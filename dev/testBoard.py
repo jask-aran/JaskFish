@@ -61,7 +61,7 @@ def on_click(event):
     
 def reset_board():
     board.reset()
-    draw_board()
+    draw_board(None)
     
 def make_random_move():
     legal_moves = list(board.legal_moves)
