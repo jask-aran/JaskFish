@@ -12,20 +12,23 @@ board_size = 500  # Set a board svg size
 
 def svg_to_photo_image(svg_string):
     png_image = cairosvg.svg2png(bytestring=svg_string.encode('utf-8'))
-    
     image = Image.open(BytesIO(png_image))
-    
     return ImageTk.PhotoImage(image)
 
-def draw_board(squares):
-    if squares:
-        squares = {chess.SQUARES[chess.parse_square(squares)]: 'green'}
+def draw_board(square):
+    squares = []
+    if square:
+        piece = chess.parse_square(square)
+        legal_moves = [move for move in board.legal_moves if move.from_square == piece]
+        print(legal_moves)
+        squares = chess.SquareSet([move.to_square for move in legal_moves])
+
+    
     
     # Get SVG of board state with last made move if available
     svg_data = chess.svg.board(board=board, lastmove=board.peek() if board.move_stack else None, size=board_size, squares=squares)
     
     # Convert SVG to PNG
-
     photo_image = svg_to_photo_image(svg_data)
 
     label.config(image=photo_image)
