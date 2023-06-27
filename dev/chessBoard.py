@@ -8,7 +8,7 @@ from tkinter import simpledialog
 from PIL import Image, ImageTk
 from io import BytesIO
 
-board = chess.Board()
+board = chess.Board('k7/7P/8/8/8/8/8/K7')
 board_size = 500  # Set a board svg size
 selected_piece = None
 
@@ -22,12 +22,14 @@ def draw_board(square):
     moves = []
     if square:
         piece = chess.parse_square(square)
+        print(piece)
         legal_moves = [move for move in board.legal_moves if move.from_square == piece]
         print("Legal Moves:" + str(legal_moves))
         moves = chess.SquareSet([move.to_square for move in legal_moves])
     
     # Get SVG of board state with last made move if available
-    svg_data = chess.svg.board(board=board, lastmove=board.peek() if board.move_stack else None, size=board_size, squares=moves)
+    svg_data = chess.svg.board(board=board, lastmove=board.peek() if \
+        board.move_stack else None, size=board_size, squares=moves)
     
     # Convert SVG to PNG
     photo_image = svg_to_photo_image(svg_data)
@@ -69,6 +71,7 @@ def on_click(event):
         return
 
     if selected_piece:
+        print(selected_piece)
         if board.piece_at(chess.parse_square(selected_piece)).piece_type == chess.PAWN and chess.square_rank(chess.parse_square(square)) in [0, 7]:
             for promotion_piece in ["q", "r", "b", "n"]:
                 try:
