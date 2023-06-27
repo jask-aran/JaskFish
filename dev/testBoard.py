@@ -3,12 +3,14 @@ import tkinter as tk
 import cairosvg
 import random
 import tkinter.messagebox as messagebox
+from tkinter import simpledialog
 
 from PIL import Image, ImageTk
 from io import BytesIO
 
 board = chess.Board()
 board_size = 500  # Set a board svg size
+selected_piece = None
 
 def svg_to_photo_image(svg_string):
     png_image = cairosvg.svg2png(bytestring=svg_string.encode('utf-8'))
@@ -16,17 +18,16 @@ def svg_to_photo_image(svg_string):
     return ImageTk.PhotoImage(image)
 
 def draw_board(square):
-    squares = []
+    check_game_status()
+    moves = []
     if square:
         piece = chess.parse_square(square)
         legal_moves = [move for move in board.legal_moves if move.from_square == piece]
-        print(legal_moves)
-        squares = chess.SquareSet([move.to_square for move in legal_moves])
-
-    
+        print("Legal Moves:" + str(legal_moves))
+        moves = chess.SquareSet([move.to_square for move in legal_moves])
     
     # Get SVG of board state with last made move if available
-    svg_data = chess.svg.board(board=board, lastmove=board.peek() if board.move_stack else None, size=board_size, squares=squares)
+    svg_data = chess.svg.board(board=board, lastmove=board.peek() if board.move_stack else None, size=board_size, squares=moves)
     
     # Convert SVG to PNG
     photo_image = svg_to_photo_image(svg_data)
@@ -48,19 +49,57 @@ def get_square_from_pixel(x, y):
     row = 7 - int((y - border_size) / square_size)
     col = int((x - border_size) / square_size)
 
-    # Convert to square number
-    square_number = chess.square(col, row)
-
     # Convert to algebraic notation (e.g. e4, d5)
-    square = chess.square_name(square_number)
+    return chess.square_name(chess.square(col, row))
 
-    return square
-
+def promote_pawn(move):
+    while True:
+        promotion_piece = simpledialog.askstring("Pawn Promotion", "Promote pawn to Q/R/B/N?")
+        if promotion_piece.lower() in ["q", "r", "b", "n"]:
+            promotion = {"q": chess.QUEEN, "r": chess.ROOK, "b": chess.BISHOP, "n": chess.KNIGHT}[promotion_piece.lower()]
+            move.promotion = promotion
+            break
+        else:
+            messagebox.showwarning("Invalid Input", "Please enter Q, R, B, or N.")
 
 def on_click(event):
+    global selected_piece
     square = get_square_from_pixel(event.x, event.y)
-    print(square)  # For now, just print the square. You might want to do something else with it
-    draw_board(square)
+    if square is None:
+        return
+
+    if selected_piece:
+        if board.piece_at(chess.parse_square(selected_piece)).piece_type == chess.PAWN and chess.square_rank(chess.parse_square(square)) in [0, 7]:
+            for promotion_piece in ["q", "r", "b", "n"]:
+                try:
+                    move = chess.Move.from_uci(selected_piece + square + promotion_piece)
+                    if move in board.legal_moves:
+                        promote_pawn(move)
+                        board.push(move)
+                        selected_piece = None
+                        draw_board(None)
+                        return
+                except:
+                    pass
+        else:
+            try:
+                move = chess.Move.from_uci(selected_piece + square)
+                if move in board.legal_moves:
+                    board.push(move)
+                    selected_piece = None
+                    draw_board(None)
+                    return
+            except:
+                pass
+
+    piece = board.piece_at(chess.parse_square(square))
+    if piece and piece.color == board.turn:
+        selected_piece = square
+        draw_board(square)
+    else:
+        selected_piece = None
+        draw_board(None)
+
     
 def reset_board():
     board.reset()
@@ -96,6 +135,21 @@ def create_move_entry():
 def on_enter_press(event):
     # Execute the "Make Move" button command when Enter key is pressed
     button_make_move.invoke()
+    
+def check_game_status():
+    if board.is_checkmate():
+        messagebox.showinfo("Game Over", "Checkmate!")
+    elif board.is_stalemate():
+        messagebox.showinfo("Game Over", "Stalemate!")
+    elif board.is_insufficient_material():
+        messagebox.showinfo("Game Over", "Draw due to insufficient material!")
+    elif board.is_seventyfive_moves():
+        messagebox.showinfo("Game Over", "Draw due to 75 moves rule!")
+    elif board.is_fivefold_repetition():
+        messagebox.showinfo("Game Over", "Draw due to fivefold repetition!")
+    elif board.is_variant_draw():
+        messagebox.showinfo("Game Over", "Draw due to variant-specific rules!")
+
 
 # Tkinter window
 window = tk.Tk()
