@@ -8,8 +8,8 @@ from tkinter import simpledialog
 from PIL import Image, ImageTk
 from io import BytesIO
 
-board = chess.Board('k7/7P/8/8/8/8/8/K7')
-# board = chess.Board()
+# board = chess.Board('k7/7P/8/8/8/8/8/K7')
+board = chess.Board()
 board_size = 500  # Set a board svg size
 selected_piece_integer = None
     
@@ -20,7 +20,7 @@ def get_square_from_pixel(x, y):
     
     if x < border_size or y < border_size or x >= board_size - \
         (border_size) or y >= board_size - (border_size):
-        return []
+        return None
     
     # Adjust the coordinates to account for the border, then calculate the row and column
     row = 7 - int((y - border_size) / square_size)
@@ -29,81 +29,70 @@ def get_square_from_pixel(x, y):
     return chess.square(col, row)
 
 
-# def on_click(event):
-#     global selected_piece_integer
-    
-#     square_integer = get_square_from_pixel(event.x, event.y)
-#     if not square_integer:
-#         return
-    
-#     if selected_piece_integer:
-#         if board.piece_at(selected_piece_integer).piece_type == chess.PAWN and chess.square_rank(square_integer) in [0,7]:
-#             print("Potential promotion")
-        
-        
-#         try:
-#             move = chess.Move(selected_piece_integer, square_integer)
-#             if move in board.legal_moves:
-#                 board.push(move)
-#                 selected_piece_integer = None
-#                 draw_board()
-#                 return
-#         except:
-#             pass
-    
-#     piece = board.piece_at(square_integer)
-#     if piece and piece.color == board.turn:
-#         selected_piece_integer = square_integer
-#     else:
-#         selected_piece_integer = None
-        
-#     draw_board(square_integer)
+
+def get_promotion_piece(legal_moves, square_integer):
+    for move in legal_moves:
+        if move.to_square == square_integer and move.promotion is not None:
+            answer = simpledialog.askstring("Promotion", "Promote pawn to (q,r,b,n):", parent=window)
+            if answer in ['q', 'r', 'b', 'n']:
+                promotion = {'q': chess.QUEEN, 'r': chess.ROOK, 'b': chess.BISHOP, 'n': chess.KNIGHT}[answer]
+                return promotion
+            else:
+                messagebox.showerror("Error", "Invalid promotion piece. Please enter 'q', 'r', 'b', or 'n'.")
+                return
+    return None
+
+
+def create_and_push_move(selected_piece_integer, square_integer, promotion=None):
+    move = chess.Move(selected_piece_integer, square_integer, promotion=promotion)
+    if move in board.legal_moves:
+        board.push(move)
+        print(board.fen() + '\n')
+        if board.is_check():
+            messagebox.showinfo("Check", "The " + ("white" if board.turn else "black") + " king is in check!")
+        return True
+    return False
+
+
+def handle_piece_selection(square_integer):
+    piece = board.piece_at(square_integer)
+    if piece and piece.color == board.turn:
+        return square_integer
+    return None
+
+def update_selected_piece(selected_piece, clicked_square):
+    legal_moves = [move for move in board.legal_moves if move.from_square == selected_piece]
+    promotion = get_promotion_piece(legal_moves, clicked_square)
+    if create_and_push_move(selected_piece, clicked_square, promotion):
+        return None  # The selected piece is deselected after a successful move
+
+    # If the move is not legal, check if the clicked square has a piece of the same color
+    new_piece = handle_piece_selection(clicked_square)
+    if new_piece is not None:
+        # If it does, change the selection to this new piece
+        return new_piece
+    else:
+        # If it doesn't, deselect the current piece
+        return None
+
 
 def on_click(event):
     global selected_piece_integer
-
     square_integer = get_square_from_pixel(event.x, event.y)
     if not square_integer:
         return
 
-    if selected_piece_integer:
-        # Check if the move is a potential promotion before creating the move
-        piece = board.piece_at(selected_piece_integer)
-        if piece.piece_type == chess.PAWN and chess.square_rank(square_integer) in [0, 7]:
-            answer = simpledialog.askstring("Promotion", "Promote pawn to (q,r,b,n):", parent=window)
-            if answer in ['q', 'r', 'b', 'n']:
-                promotion = {'q': chess.QUEEN, 'r': chess.ROOK, 'b': chess.BISHOP, 'n': chess.KNIGHT}[answer]
-            else:
-                messagebox.showerror("Error", "Invalid promotion piece. Please enter 'q', 'r', 'b', or 'n'.")
-                return
-        else:
-            promotion = None
+    # Handle piece selection once
+    new_selection = handle_piece_selection(square_integer)
 
-        # Now we can create the move with the potential promotion
-        move = chess.Move(selected_piece_integer, square_integer, promotion=promotion)
-        if move in board.legal_moves:
-            board.push(move)
-            selected_piece_integer = None
-            
-            if board.is_check():
-                messagebox.showinfo("Check", "The " + ("white" if board.turn else "black") + " king is in check!")   
-            
-            draw_board()
-            return
-
-    piece = board.piece_at(square_integer)
-    if piece and piece.color == board.turn:
-        selected_piece_integer = square_integer
-    else:
-        selected_piece_integer = None
-
-    draw_board(square_integer)
+    if selected_piece_integer or new_selection:
+        selected_piece_integer = update_selected_piece(selected_piece_integer, square_integer) if selected_piece_integer else new_selection
+        draw_board(selected_piece_integer)
 
 
 def draw_board(square=[]):
     check_game_status()
     
-
     
     available_moves = [] # Available moves for user to select (once a piece is selected)
     if square:
@@ -130,10 +119,11 @@ def draw_board(square=[]):
     # Change turn label as neccessary
     turn_label.config(text="White Move Now" if board.turn == chess.WHITE else "Black Move Now")
 
-
 def reset_board():
+    global selected_piece_integer 
+    selected_piece_integer = None
     board.reset()
-    draw_board(None)
+    draw_board()
     
     
 def make_random_move():
