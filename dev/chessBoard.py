@@ -4,11 +4,14 @@ import cairosvg
 import random
 import tkinter.messagebox as messagebox
 from tkinter import simpledialog
+import subprocess
+import os
 
 from PIL import Image, ImageTk
 from io import BytesIO
 
-board = chess.Board('k7/7P/8/8/8/8/8/K7')
+# board = chess.Board('k7/7P/8/8/8/8/8/K7')
+board = chess.Board()
 board_size = 500  # Set a board svg size
 selected_piece = None
 
@@ -38,6 +41,7 @@ def draw_board(square):
     label.image = photo_image
     
     turn_label.config(text="White Move Now" if board.turn == chess.WHITE else "Black Move Now")
+
 
 def get_square_from_pixel(x, y):
     border_size = 18  # Width of the border in pixels
@@ -114,30 +118,28 @@ def make_random_move():
     board.push(move)
     draw_board(None)
 
+def make_engine_move():
+    fen_string = board.fen()
+    print(fen_string)
+    
+    process = subprocess.Popen(["python3", "randMove.py"], 
+                            stdin=subprocess.PIPE, 
+                            stdout=subprocess.PIPE, 
+                            stderr=subprocess.PIPE, 
+                            text=True)
 
-def make_uci_move(move_entry):
-    move_uci = move_entry.get()
-    move_entry.delete(0, tk.END)  # Clear the text input box
+    stdout, stderr = process.communicate(input=fen_string)
+    
+    if stderr:
+        print("Error:", stderr)
+        
+    move_uci = stdout.strip()
     if move_uci:
-        try:
-            move = chess.Move.from_uci(move_uci)
-            if move in board.legal_moves and board.is_legal(move):
-                board.push(move)
-            else:
-                messagebox.showwarning("Invalid Move", "The move entered is not valid.")
-        except Exception as e:
-            messagebox.showwarning("Invalid Move", f"An error occurred while making the move:\n{e}")
+        move = chess.Move.from_uci(move_uci)
+        board.push(move)
     
     draw_board(None)
 
-def create_move_entry():
-    move_entry = tk.Entry(button_frame)
-    move_entry.pack(side=tk.LEFT)
-    return move_entry
-
-def on_enter_press(event):
-    # Execute the "Make Move" button command when Enter key is pressed
-    button_make_move.invoke()
     
 def check_game_status():
     if board.is_checkmate():
@@ -170,20 +172,17 @@ label.pack()
 button_frame = tk.Frame(window)
 button_frame.pack(side=tk.BOTTOM)
 
-move_entry = tk.Entry(button_frame)
-move_entry.pack(side=tk.LEFT)
-
-button_make_move = tk.Button(button_frame, text="Make Move", command=lambda: make_uci_move(move_entry))
-button_make_move.pack(side=tk.LEFT)
-
 button_make_random_move = tk.Button(button_frame, text="Make Random Move", command=make_random_move)
 button_make_random_move.pack(side=tk.LEFT)
+
+button_make_engine_move = tk.Button(button_frame, text="Make Engine Move", command=make_engine_move)
+button_make_engine_move.pack(side=tk.LEFT)
 
 button_reset_board = tk.Button(button_frame, text="Reset Board", command=reset_board)
 button_reset_board.pack(side=tk.LEFT)
 
-move_entry.bind('<Return>', on_enter_press)
 label.bind("<Button-1>", on_click)
+
 
 draw_board(None)
 window.mainloop()
