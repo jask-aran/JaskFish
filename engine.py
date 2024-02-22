@@ -29,7 +29,7 @@ def handle_go(fenstring):
     global go_command_in_progress
     
     print("info string Calculating move")
-    time.sleep(0.2)  # Simulate a long calculation
+    time.sleep(0.1)  # Simulate a long calculation
     
     move = get_random_legal_move(fenstring)
     print('bestmove ' + move)
