@@ -13,7 +13,7 @@ from utils import color_text, debug_text, svg_to_photo_image
 
 
 board = chess.Board()
-board = chess.Board('1k6/6P1/8/8/8/8/8/1K6')
+# board = chess.Board('1k6/6P1/8/8/8/8/8/1K6')
 board_size = 500
 selected_square = None
 player_color = "White"
@@ -298,7 +298,7 @@ def main():
     
     
     draw_board()
-    choose_player_color()
+    # choose_player_color()
     window.mainloop()
 
 
