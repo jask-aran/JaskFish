@@ -254,7 +254,6 @@ def setup_board(window):
 def setup_buttons(window, process):
     button_frame = tk.Frame(window)
     button_frame.pack(side=tk.BOTTOM)
-    
     button_make_random_move = tk.Button(button_frame, text="Make Random Move", command=make_random_move)
     button_reset_board = tk.Button(button_frame, text="Reset Board", command=reset_board)
     button_isready = tk.Button(button_frame, text="isready", command=lambda: is_ready(process))

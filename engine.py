@@ -22,20 +22,6 @@ def get_random_legal_move(fen):
     random_move = random.choice(legal_moves)
     return random_move.uci()
 
-def handle_go(fenstring):
-    # Placeholder for go logic
-    # Implement the logic to start the engine calculation based on the current board state
-    
-    global go_command_in_progress
-    
-    print("info string Calculating move")
-    time.sleep(0.1)  # Simulate a long calculation
-    
-    move = get_random_legal_move(fenstring)
-    print('bestmove ' + move)
-    
-    go_command_in_progress = False
-
 def engine_command_processor(command_queue):
     """
     Processes commands sent from the GUI to the chess engine.
@@ -73,7 +59,7 @@ def read_stdin(command_queue):
         command_queue.put(line.strip())
         if line.strip() == "quit":
             break
-
+        
 def main():
     global go_command_in_progress
     go_command_in_progress = False
@@ -94,7 +80,21 @@ def main():
     
     engine_thread.join()
     
+def handle_go(fenstring):
+    # Placeholder for go logic
+    # Implement the logic to start the engine calculation based on the current board state
     
+    global go_command_in_progress
+    
+    print("info string Calculating move")
+    time.sleep(0.1)  # Simulate a long calculation
+    
+    move = get_random_legal_move(fenstring)
+    print('bestmove ' + move)
+    
+    go_command_in_progress = False   
+
+
 
 if __name__ == "__main__":
     main()
