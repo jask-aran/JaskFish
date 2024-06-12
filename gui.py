@@ -11,6 +11,7 @@ from tkinter import messagebox, simpledialog
 
 from utils import color_text, debug_text, svg_to_photo_image
 
+# test
 
 board = chess.Board()
 # board = chess.Board('1k6/6P1/8/8/8/8/8/1K6')
