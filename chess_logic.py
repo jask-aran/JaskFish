@@ -34,9 +34,14 @@ def make_move(board: chess.Board, move: chess.Move) -> None:
 def undo_move(board: chess.Board) -> None:
     board.pop()
     
-def is_pawn_promotion(board: chess.Board, move: chess.Move) -> bool:
+def is_pawn_promotion_attempt(board: chess.Board, move: chess.Move) -> bool:
     piece = board.piece_at(move.from_square)
     if piece is None or piece.piece_type != chess.PAWN:
+        return False
+    
+    move.promotion = chess.QUEEN
+    if not is_valid_move(board, move):
+        move.promotion = None
         return False
     
     rank = chess.square_rank(move.to_square)

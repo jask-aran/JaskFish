@@ -132,66 +132,67 @@ class ChessGUI(QMainWindow):
         if chess_logic.is_game_over(self.board):
             QMessageBox.information(self, "Game Over", chess_logic.get_game_result(self.board))
 
-
     def get_square_style(self, square, last_moved=None):
         light_square = "#F0D9B5"
         dark_square = "#B58863"
         selected_color = "#646F40"
-        moved_color = "#ddf0a1"
+        prev_moved_color = "#ddf0a1"
+        attacked_color = "#fca5a5"
 
         is_light = (chess.square_rank(square) + chess.square_file(square)) % 2 == 0
         base_color = light_square if is_light else dark_square
+        
+        piece = self.board.piece_at(square)
 
         if square == self.selected_square:
             return f"background-color: {selected_color};"
+        elif piece and piece.piece_type == chess.KING and self.board.is_attacked_by(not piece.color, square):
+            return f"background-color: {attacked_color};"
         elif last_moved and square in [chess.parse_square(sq) for sq in last_moved]:
-            return f"background-color: {moved_color};"
+            return f"background-color: {prev_moved_color};"
         else:
             return f"background-color: {base_color};"
-            
+        
     def on_square_clicked(self):
         clicked_button = self.sender()
         clicked_square = next(square for square, button in self.squares.items() if button == clicked_button)
 
-        if self.selected_square is None:
-            piece = self.board.piece_at(clicked_square)
-            if piece and piece.color == self.board.turn:
-                self.selected_square = clicked_square
-        else:
+        def is_own_color(square):
+            piece = self.board.piece_at(square)
+            return piece and piece.color == self.board.turn
+
+        if self.selected_square == clicked_square: # Handle unselecting
+            self.selected_square = None
+        elif is_own_color(clicked_square): # Handle selecting/ reselecting own piece
+            self.selected_square = clicked_square
+        elif self.selected_square is not None: # Handle move attempt
             move = chess.Move(self.selected_square, clicked_square)
-            
-            # Check if it's a potential pawn promotion
-            if chess_logic.is_pawn_promotion(self.board, move):
-                # Check if any promotion move is legal
-                legal_promotions = [
-                    chess.Move(self.selected_square, clicked_square, promotion=chess.QUEEN),
-                ]
-                
-                if any(chess_logic.is_valid_move(self.board, promo_move) for promo_move in legal_promotions):
-                    promotion_piece = self.get_promotion_choice()
-                    if promotion_piece:
-                        move = chess.Move(self.selected_square, clicked_square, promotion=promotion_piece)
-                        print(f"Promotion Move: {str(move)}")
-                    else:
-                        self.selected_square = None
-                        self.update_board()
-                        return
-                else:
-                    # If no promotion moves are legal, reset selection
-                    self.selected_square = None
-                    self.update_board()
-                    return
-            
-            if chess_logic.is_valid_move(self.board, move):
-                chess_logic.make_move(self.board, move)
-                
-                print(f"{chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}")
-                self.selected_square = None
-            else:
-                self.selected_square = None
-                print("Invalid Move")
+            self.attempt_move(move)
+            self.selected_square = None
+        else:
+            pass
+            # print("No Piece on Square/ Wrong color")
 
         self.update_board()
+    
+    def attempt_move(self, move):
+        print(f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}")
+
+        if chess_logic.is_pawn_promotion_attempt(self.board, move):
+            promotion_choice = self.get_promotion_choice()
+            if not promotion_choice:
+                print("Promotion required but not selected")
+                return
+            move.promotion = promotion_choice
+
+        if chess_logic.is_valid_move(self.board, move):
+            print(f"Valid Move: {str(move)}")
+            chess_logic.make_move(self.board, move)
+            self.selected_square = None
+            # self.update_board() # Not needed because called in on_square_clicked
+        else:
+            print("Invalid Move")
+        
         
     def get_promotion_choice(self):
         dialog = PromotionDialog(self)
@@ -214,7 +215,8 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     app = QApplication(sys.argv)
-    board = chess.Board("k7/q5PK/8/8/8/8/8/8")
+    board = chess.Board("k7/2Q5/8/8/8/8/8/K2R4")
+    # board = chess.Board("k7/8/8/8/p7/8/Q7/K7") # Testing multiple pieces possible for target square
     if args.fen:
         board.set_fen(args.fen)
     chess_gui = ChessGUI(board, dev=True)
