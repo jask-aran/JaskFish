@@ -5,6 +5,8 @@ from PySide2.QtCore import Qt, QSize
 from PySide2.QtGui import QFont
 from PySide2.QtWidgets import QApplication, QMainWindow, QWidget, QGridLayout, QPushButton, QLabel, QVBoxLayout, QMessageBox, QHBoxLayout, QDialog, QComboBox
 import chess_logic
+import utils
+
 
 
 class PromotionDialog(QDialog):
@@ -24,31 +26,36 @@ class PromotionDialog(QDialog):
 
     def get_promotion_piece(self):
         return self.combo.currentText().lower()
+    
 
 class ChessGUI(QMainWindow):
     def __init__(self, board, dev=False):
         super().__init__()
         self.board = board
         self.selected_square = None
-        if dev:
-            self.player_is_white = True
-        else:
-            self.player_is_white = self.get_player_color()  # This will prompt the user to choose their color
-            print(self.player_is_white)
-            if not self.player_is_white:
-                self.board.turn = chess.BLACK  # Set the board turn to Black if the player chooses Black
+        self.dev = dev
+        self.player_is_white = self.get_player_color()
+        self.board.turn = chess.WHITE if self.player_is_white else chess.BLACK
+        
+        self.full_reporting = True
+        if self.dev:
+            print(utils.debug_text("Debug Mode"))
+            print(utils.debug_text(f"Full Reporting: {self.full_reporting}"))
+            print(utils.debug_text(f"USER {'White' if self.player_is_white else 'Black'}")) 
         self.init_ui()
 
     def get_player_color(self):
+        if self.dev:
+            return True # Always play as white in dev mode
+        
         msg_box = QMessageBox()
         msg_box.setWindowTitle("Choose Your Color")
-        msg_box.setText("Do you want to play as White or Black?")
         white_button = msg_box.addButton("White", QMessageBox.YesRole)
         black_button = msg_box.addButton("Black", QMessageBox.NoRole)
+        utils.center_on_screen(msg_box)
         msg_box.exec_()
-        
-        return msg_box.clickedButton() == white_button
 
+        return msg_box.clickedButton() == white_button
     
     def init_ui(self):
         self.setWindowTitle('JaskFish')
@@ -77,7 +84,7 @@ class ChessGUI(QMainWindow):
             grid_layout.addWidget(file_label, 8, i + 1)
             grid_layout.addWidget(rank_label, i, 0)
 
-        # Create squares
+        # Create board squares
         self.squares = {}
         for row in range(8):
             for col in range(8):
@@ -93,68 +100,51 @@ class ChessGUI(QMainWindow):
         undo_button = QPushButton("Undo")
         undo_button.clicked.connect(self.undo_move)
         main_layout.addWidget(undo_button)
+        
+        go_button = QPushButton("Go")
+        # go_button.clicked.connect(self.go_command)
+        main_layout.addWidget(go_button)
 
         self.update_board()
-        self.center_on_screen()
-
-
-        
-    def center_on_screen(self):
-        screen = QApplication.primaryScreen()
-        screen_geometry = screen.geometry()
-        window_size = self.size()
-        x = (screen_geometry.width() - window_size.width()) / 2 + screen_geometry.left()
-        y = (screen_geometry.height() - window_size.height()) / 2 + screen_geometry.top()
-        self.move(x, y)
-        
-    def get_piece_unicode(self, piece):
-        piece_unicode = {
-            'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
-            'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'
-        }
-        return piece_unicode[piece.symbol()]
+        utils.center_on_screen(self)
 
     def update_board(self):
+        last_move = None
         if self.board.move_stack:
-            last_move = self.board.move_stack[-1]
-            last_move = [chess.square_name(last_move.from_square), chess.square_name(last_move.to_square)]
-        else:
-            last_move = None
+            last_move_move = self.board.move_stack[-1]
+            last_move = [chess.square_name(last_move_move.from_square), chess.square_name(last_move_move.to_square)]
         
         for square, button in self.squares.items():
             piece = self.board.piece_at(square)
-            if piece:
-                button.setText(self.get_piece_unicode(piece))
-            else:
-                button.setText('')
+            button.setText(utils.get_piece_unicode(piece) if piece else '')
             button.setStyleSheet(self.get_square_style(square, last_moved=last_move))
-            
-
+    
         self.turn_indicator.setText("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
 
         if chess_logic.is_game_over(self.board):
             QMessageBox.information(self, "Game Over", chess_logic.get_game_result(self.board))
 
     def get_square_style(self, square, last_moved=None):
-        light_square = "#F0D9B5"
-        dark_square = "#B58863"
-        selected_color = "#646F40"
-        prev_moved_color = "#ddf0a1"
-        attacked_color = "#fca5a5"
+        square_style = {
+            'light_square': "#F0D9B5",
+            'dark_square': "#B58863",
+            'selected_color': "#646F40",
+            'prev_moved_color': "#ddf0a1",
+            'attacked_color': "#fca5a5"
+        }
 
         is_light = (chess.square_rank(square) + chess.square_file(square)) % 2 == 1
-        base_color = light_square if is_light else dark_square
-        
+        square_color = square_style['light_square'] if is_light else square_style['dark_square']
         piece = self.board.piece_at(square)
-
+        
         if square == self.selected_square:
-            return f"background-color: {selected_color};"
+            square_color = square_style['selected_color']
         elif piece and piece.piece_type == chess.KING and self.board.is_attacked_by(not piece.color, square):
-            return f"background-color: {attacked_color};"
+            square_color = square_style['attacked_color']
         elif last_moved and square in [chess.parse_square(sq) for sq in last_moved]:
-            return f"background-color: {prev_moved_color};"
-        else:
-            return f"background-color: {base_color};"
+            square_color = square_style['prev_moved_color']
+        
+        return f"background-color: {square_color};"
         
     def on_square_clicked(self):
         clicked_button = self.sender()
@@ -187,6 +177,7 @@ class ChessGUI(QMainWindow):
             if not promotion_choice:
                 print("Promotion required but not selected")
                 return
+
             move.promotion = promotion_choice
 
         if chess_logic.is_valid_move(self.board, move):
@@ -195,7 +186,7 @@ class ChessGUI(QMainWindow):
             self.selected_square = None
             # self.update_board() # Not needed because called in on_square_clicked
         else:
-            print("Invalid Move")
+            print(utils.debug_text("Invalid Move")) if self.dev else None
         
         
     def get_promotion_choice(self):
@@ -224,8 +215,8 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     app = QApplication(sys.argv)
+    # board = chess.Board()
     board = chess.Board("k7/2Q4P/8/8/8/8/8/K2R4")
-    # board = chess.Board("k7/8/8/8/p7/8/Q7/K7") # Testing multiple pieces possible for target square
     if args.fen:
         board.set_fen(args.fen)
     chess_gui = ChessGUI(board, dev=True)
