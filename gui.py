@@ -34,8 +34,9 @@ class ChessGUI(QMainWindow):
             self.player_is_white = True
         else:
             self.player_is_white = self.get_player_color()  # This will prompt the user to choose their color
-        # if not self.player_is_white:
-        #     self.board.turn = chess.BLACK  # Set the board turn to Black if the player chooses Black
+            print(self.player_is_white)
+            if not self.player_is_white:
+                self.board.turn = chess.BLACK  # Set the board turn to Black if the player chooses Black
         self.init_ui()
 
     def get_player_color(self):
@@ -48,53 +49,55 @@ class ChessGUI(QMainWindow):
         
         return msg_box.clickedButton() == white_button
 
+    
     def init_ui(self):
-        # Set window title and geometry
         self.setWindowTitle('JaskFish')
-        self.setGeometry(100, 100, 400, 480)
+        self.setGeometry(100, 100, 500, 550)
 
-        # Create main widget and set layout
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
+        main_layout = QVBoxLayout(central_widget)
 
-        # Create turn indicator label
         self.turn_indicator = QLabel("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
         self.turn_indicator.setAlignment(Qt.AlignCenter)
         self.turn_indicator.setFont(QFont('Arial', 16))
         main_layout.addWidget(self.turn_indicator)
 
-        # Create board widget and grid layout
         board_widget = QWidget()
-        grid_layout = QGridLayout()
-        board_widget.setLayout(grid_layout)
+        grid_layout = QGridLayout(board_widget)
         main_layout.addWidget(board_widget)
 
-        # Create squares and add them to the grid layout
+        label_font = QFont('Arial', 14)
+        files = 'abcdefgh'
+
+        # Add file and rank labels
+        for i in range(8):
+            file_label = QLabel(files[i], alignment=Qt.AlignCenter, font=label_font)
+            rank_label = QLabel(str(8 - i), alignment=Qt.AlignCenter, font=label_font)
+            grid_layout.addWidget(file_label, 8, i + 1)
+            grid_layout.addWidget(rank_label, i, 0)
+
+        # Create squares
         self.squares = {}
         for row in range(8):
             for col in range(8):
-                button = QPushButton()  # Create button
-                button.setFixedSize(QSize(50, 50))  # Set button size
-                button.setFont(QFont('Arial', 20))  # Set button font
-                button.clicked.connect(self.on_square_clicked)  # Connect button click event
-                grid_layout.addWidget(button, 7 - row, col)  # Standard board orientation
-                self.squares[chess.square(col, row)] = button  # Store button in dictionary
-                # if self.player_is_white:
-                #     grid_layout.addWidget(button, 7 - row, col)
-                # else:
-                #     grid_layout.addWidget(button, row, 7 - col)  # Flip the board for Black
-                # self.squares[chess.square(col, row)] = button
+                button = QPushButton(fixedSize=QSize(50, 50), font=QFont('Arial', 20))
+                button.clicked.connect(self.on_square_clicked)
+                grid_layout.addWidget(button, row, col + 1)
+                self.squares[chess.square(col, 7 - row)] = button
 
-        # Create restart button and connect click event
         restart_button = QPushButton("Restart")
         restart_button.clicked.connect(self.restart_game)
         main_layout.addWidget(restart_button)
+        
+        undo_button = QPushButton("Undo")
+        undo_button.clicked.connect(self.undo_move)
+        main_layout.addWidget(undo_button)
 
-        # Update board and center window on screen
         self.update_board()
         self.center_on_screen()
+
+
         
     def center_on_screen(self):
         screen = QApplication.primaryScreen()
@@ -139,7 +142,7 @@ class ChessGUI(QMainWindow):
         prev_moved_color = "#ddf0a1"
         attacked_color = "#fca5a5"
 
-        is_light = (chess.square_rank(square) + chess.square_file(square)) % 2 == 0
+        is_light = (chess.square_rank(square) + chess.square_file(square)) % 2 == 1
         base_color = light_square if is_light else dark_square
         
         piece = self.board.piece_at(square)
@@ -174,6 +177,7 @@ class ChessGUI(QMainWindow):
             # print("No Piece on Square/ Wrong color")
 
         self.update_board()
+        
     
     def attempt_move(self, move):
         print(f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}")
@@ -206,6 +210,11 @@ class ChessGUI(QMainWindow):
         self.board.reset()
         self.selected_square = None
         self.update_board()
+        
+    def undo_move(self):
+        chess_logic.undo_move(self.board)
+        self.selected_square = None
+        self.update_board()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -215,7 +224,7 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     app = QApplication(sys.argv)
-    board = chess.Board("k7/2Q5/8/8/8/8/8/K2R4")
+    board = chess.Board("k7/2Q4P/8/8/8/8/8/K2R4")
     # board = chess.Board("k7/8/8/8/p7/8/Q7/K7") # Testing multiple pieces possible for target square
     if args.fen:
         board.set_fen(args.fen)
