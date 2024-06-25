@@ -36,12 +36,14 @@ class ChessGUI(QMainWindow):
         self.dev = dev
         self.player_is_white = self.get_player_color()
         self.board.turn = chess.WHITE if self.player_is_white else chess.BLACK
+        print(utils.info_text("Starting Game..."))
         
+        # Reporting Options
         self.full_reporting = True
         if self.dev:
-            print(utils.debug_text("Debug Mode"))
-            print(utils.debug_text(f"Full Reporting: {self.full_reporting}"))
-            print(utils.debug_text(f"USER {'White' if self.player_is_white else 'Black'}")) 
+            print(utils.debug_text("Debug Mode ENABLED"))
+            print(utils.debug_text(f"Full Reporting {'ENABLED' if self.full_reporting else 'DISABLED'}"))
+            print(utils.debug_text(f"User Color {'WHITE' if self.player_is_white else 'BLACK'}")) 
         self.init_ui()
 
     def get_player_color(self):
@@ -122,7 +124,9 @@ class ChessGUI(QMainWindow):
         self.turn_indicator.setText("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
 
         if chess_logic.is_game_over(self.board):
-            QMessageBox.information(self, "Game Over", chess_logic.get_game_result(self.board))
+            outcome = chess_logic.get_game_result(self.board)
+            print(utils.info_text(f"Game Over: {outcome}"))
+            QMessageBox.information(self, "Game Over", outcome)
 
     def get_square_style(self, square, last_moved=None):
         square_style = {
@@ -141,6 +145,7 @@ class ChessGUI(QMainWindow):
             square_color = square_style['selected_color']
         elif piece and piece.piece_type == chess.KING and self.board.is_attacked_by(not piece.color, square):
             square_color = square_style['attacked_color']
+            print(utils.info_text(f"{chess.square_name(square)} In Check ({'White' if piece.color else 'Black'})"))
         elif last_moved and square in [chess.parse_square(sq) for sq in last_moved]:
             square_color = square_style['prev_moved_color']
         
@@ -156,37 +161,36 @@ class ChessGUI(QMainWindow):
 
         if self.selected_square == clicked_square: # Handle unselecting
             self.selected_square = None
+            print(utils.debug_text(f"{chess.square_name(clicked_square)} Unselected")) if self.dev and self.full_reporting else None
         elif is_own_color(clicked_square): # Handle selecting/ reselecting own piece
             self.selected_square = clicked_square
+            print(utils.debug_text(f"{chess.square_name(clicked_square)} Selected")) if self.dev and self.full_reporting else None
         elif self.selected_square is not None: # Handle move attempt
             move = chess.Move(self.selected_square, clicked_square)
             self.attempt_move(move)
             self.selected_square = None
         else:
-            pass
-            # print("No Piece on Square/ Wrong color")
-
+            print(utils.debug_text("No Piece on Square/ Wrong color")) if self.dev and self.full_reporting else None
+            
         self.update_board()
         
     
     def attempt_move(self, move):
-        print(f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}")
+        print(utils.debug_text(f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}")) \
+            if self.dev and self.full_reporting else None
 
         if chess_logic.is_pawn_promotion_attempt(self.board, move):
             promotion_choice = self.get_promotion_choice()
             if not promotion_choice:
-                print("Promotion required but not selected")
                 return
-
             move.promotion = promotion_choice
 
         if chess_logic.is_valid_move(self.board, move):
-            print(f"Valid Move: {str(move)}")
             chess_logic.make_move(self.board, move)
             self.selected_square = None
-            # self.update_board() # Not needed because called in on_square_clicked
+            print(utils.debug_text(f"{str(move)} Valid Move")) if self.dev else None
         else:
-            print(utils.debug_text("Invalid Move")) if self.dev else None
+            print(utils.debug_text(f"Invalid Move {str(move)}")) if self.dev else None
         
         
     def get_promotion_choice(self):
@@ -197,13 +201,22 @@ class ChessGUI(QMainWindow):
         return None  # Return None if the dialog is cancelled
 
     def restart_game(self):
-        print("Restarting game...")
+        print(utils.info_text("Restarting game..."))
         self.board.reset()
         self.selected_square = None
         self.update_board()
         
     def undo_move(self):
-        chess_logic.undo_move(self.board)
+        last_move = self.board.peek() if self.board.move_stack else None
+        if last_move:
+            chess_logic.undo_move(self.board)
+            
+        if last_move and self.dev:
+            print(utils.debug_text(f"{last_move} Undone"))
+            last_move = None
+        elif self.dev:
+            print(utils.debug_text("Move Stack Empty"))
+        
         self.selected_square = None
         self.update_board()
 

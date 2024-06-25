@@ -5,6 +5,9 @@ def color_text(text, color_code):
 def debug_text(text):
     return f"{color_text('DEBUG', '31')} {text}"
 
+def info_text(text):
+    return f"{color_text('INFO', '32')}  {text}"
+
 
 
 def get_piece_unicode(piece):

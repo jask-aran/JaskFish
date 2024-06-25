@@ -34,7 +34,9 @@ def make_move(board: chess.Board, move: chess.Move) -> None:
 def undo_move(board: chess.Board) -> None:
     if board.move_stack:
         board.pop()
+        return True
     else:
+        return False
         print("No moves to undo")
     
 def is_pawn_promotion_attempt(board: chess.Board, move: chess.Move) -> bool:
