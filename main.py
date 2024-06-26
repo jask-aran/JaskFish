@@ -1,7 +1,7 @@
 import sys
-# import subprocess
-# import threading
-# import queue
+import subprocess
+import threading
+import queue
 import chess
 from PySide2.QtWidgets import QApplication
 from gui import ChessGUI
@@ -14,6 +14,14 @@ def parse_args():
     return parser.parse_args()
     # k7/2Q4P/8/8/8/8/8/K2R4
 
+def engine_output_processor(output_queue, proc):
+    while True:
+        output = proc.stdout.readline().strip()
+        if output == '' and proc.poll() is not None:
+            break
+        if output:
+            output_queue.put(output)
+
 def main():
     args = parse_args()
     board = chess.Board() if not args.fen else chess.Board(args.fen)
@@ -21,6 +29,19 @@ def main():
 
     app = QApplication(sys.argv)
     gui = ChessGUI(board, dev=dev)
+    
+    engine_input_queue = queue.Queue()
+    engine_output_queue = queue.Queue()
+    engine_process = subprocess.Popen(["python3", "engine.py"], 
+                            stdin=subprocess.PIPE, 
+                            stdout=subprocess.PIPE, 
+                            stderr=subprocess.PIPE, 
+                            text=True, 
+                            bufsize=1,
+                            universal_newlines=True)
+    engine_thread = threading.Thread(target=engine_output_processor, args=(engine_output_queue, engine_process))
+    engine_thread.start()
+
     
     gui.show()
     sys.exit(app.exec_())

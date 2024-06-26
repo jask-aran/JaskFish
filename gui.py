@@ -1,13 +1,13 @@
 import sys
 import chess
-import argparse
+import json
+import time
 from PySide2.QtCore import Qt, QSize
 from PySide2.QtGui import QFont
 from PySide2.QtWidgets import QApplication, QMainWindow, QWidget, QGridLayout, QPushButton, QLabel, QVBoxLayout, QMessageBox, QHBoxLayout, QDialog, QComboBox
+
 import chess_logic
 import utils
-
-
 
 class PromotionDialog(QDialog):
     def __init__(self, parent=None):
@@ -32,6 +32,7 @@ class ChessGUI(QMainWindow):
     def __init__(self, board, dev=False):
         super().__init__()
         self.board = board
+        self.initial_fen = self.board.fen()
         self.selected_square = None
         self.dev = dev
         self.player_is_white = self.get_player_color()
@@ -71,6 +72,11 @@ class ChessGUI(QMainWindow):
         self.turn_indicator.setAlignment(Qt.AlignCenter)
         self.turn_indicator.setFont(QFont('Arial', 16))
         main_layout.addWidget(self.turn_indicator)
+        
+        self.info_indicator = QLabel("Game Started")
+        self.info_indicator.setAlignment(Qt.AlignCenter)
+        self.info_indicator.setFont(QFont('Arial', 10))
+        main_layout.addWidget(self.info_indicator)
 
         board_widget = QWidget()
         grid_layout = QGridLayout(board_widget)
@@ -95,22 +101,29 @@ class ChessGUI(QMainWindow):
                 grid_layout.addWidget(button, row, col + 1)
                 self.squares[chess.square(col, 7 - row)] = button
 
+        button_layout = QHBoxLayout()
+        main_layout.addLayout(button_layout)
+
         restart_button = QPushButton("Restart")
         restart_button.clicked.connect(self.restart_game)
-        main_layout.addWidget(restart_button)
+        button_layout.addWidget(restart_button)
         
         undo_button = QPushButton("Undo")
         undo_button.clicked.connect(self.undo_move)
-        main_layout.addWidget(undo_button)
+        button_layout.addWidget(undo_button)
+        
+        export_button = QPushButton("Export")
+        export_button.clicked.connect(self.export_game)
+        button_layout.addWidget(export_button)
         
         go_button = QPushButton("Go")
-        # go_button.clicked.connect(self.go_command)
-        main_layout.addWidget(go_button)
+        go_button.clicked.connect(self.go_command)
+        button_layout.addWidget(go_button)
 
         self.update_board()
         utils.center_on_screen(self)
 
-    def update_board(self):
+    def update_board(self, info_text=None):
         last_move = None
         if self.board.move_stack:
             last_move_move = self.board.move_stack[-1]
@@ -122,6 +135,7 @@ class ChessGUI(QMainWindow):
             button.setStyleSheet(self.get_square_style(square, last_moved=last_move))
     
         self.turn_indicator.setText("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
+        self.info_indicator.setText(info_text) if info_text else None
 
         if chess_logic.is_game_over(self.board):
             outcome = chess_logic.get_game_result(self.board)
@@ -186,11 +200,11 @@ class ChessGUI(QMainWindow):
             move.promotion = promotion_choice
 
         if chess_logic.is_valid_move(self.board, move):
+            print(utils.info_text(f"{str(move)} Valid Move by {'White' if self.board.turn else 'Black'}"))
             chess_logic.make_move(self.board, move)
             self.selected_square = None
-            print(utils.debug_text(f"{str(move)} Valid Move")) if self.dev else None
         else:
-            print(utils.debug_text(f"Invalid Move {str(move)}")) if self.dev else None
+            print(utils.info_text(f"{str(move)} Invalid Move attempted by {'White' if self.board.turn else 'Black'}"))
         
         
     def get_promotion_choice(self):
@@ -198,13 +212,16 @@ class ChessGUI(QMainWindow):
         if dialog.exec_():
             piece = dialog.get_promotion_piece()
             return {'queen': chess.QUEEN, 'rook': chess.ROOK, 'bishop': chess.BISHOP, 'knight': chess.KNIGHT}[piece]
+        
+        print(utils.debug_text("Promotion Dialog Cancelled"))
         return None  # Return None if the dialog is cancelled
 
     def restart_game(self):
         print(utils.info_text("Restarting game..."))
         self.board.reset()
+        self.initial_fen = self.board.fen()
         self.selected_square = None
-        self.update_board()
+        self.update_board(info_text="Game Restarted")
         
     def undo_move(self):
         last_move = self.board.peek() if self.board.move_stack else None
@@ -219,19 +236,39 @@ class ChessGUI(QMainWindow):
         
         self.selected_square = None
         self.update_board()
+    
+    def export_game(self):
+        print(utils.info_text("---EXPORTING GAME---"))
+        
+        game_state = {
+            'export-time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
+            'fen-init': self.initial_fen,
+            'fen-final': self.board.fen(),
+            'san': chess_logic.export_move_history_san(self.board),
+            'uci': chess_logic.export_move_history_uci(self.board)
+        }
+        
+        if self.dev:
+            with open('game_state.json', 'w') as outfile:
+                json.dump(game_state, outfile)
+        else:
+            with open(f'chess_game_{game_state["export-time"]}.json', 'w') as outfile:
+                json.dump(game_state, outfile)
+            
+        print(utils.info_text(f"FEN: {game_state['fen-final']}"))
+        print(utils.info_text(f"SAN: {game_state['san']}"))
+        print(utils.info_text(f"UCI: {game_state['uci']}"))
+    
+    def go_command(self):
+        print(utils.info_text("Go Command..."))
+        pass
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--fen', help='Set the initial board state to the given FEN string')
-    return parser.parse_args()
 
 if __name__ == '__main__':
-    args = parse_args()
     app = QApplication(sys.argv)
     # board = chess.Board()
     board = chess.Board("k7/2Q4P/8/8/8/8/8/K2R4")
-    if args.fen:
-        board.set_fen(args.fen)
+
     chess_gui = ChessGUI(board, dev=True)
 
     chess_gui.show()

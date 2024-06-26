@@ -35,9 +35,8 @@ def undo_move(board: chess.Board) -> None:
     if board.move_stack:
         board.pop()
         return True
-    else:
-        return False
-        print("No moves to undo")
+    return False
+
     
 def is_pawn_promotion_attempt(board: chess.Board, move: chess.Move) -> bool:
     piece = board.piece_at(move.from_square)
@@ -51,3 +50,27 @@ def is_pawn_promotion_attempt(board: chess.Board, move: chess.Move) -> bool:
     
     rank = chess.square_rank(move.to_square)
     return (piece.color == chess.WHITE and rank == 7) or (piece.color == chess.BLACK and rank == 0)
+
+def export_board_fen(board: chess.Board) -> str:
+    return board.fen()
+
+
+def export_move_history_uci(board: chess.Board) -> str:
+    """Exports the move history of a chess game in Universal Chess Interface (UCI) format."""
+    moves_uci = [move.uci() for move in board.move_stack]
+    return ' '.join(moves_uci)
+
+import chess
+
+def export_move_history_san(board: chess.Board) -> str:
+    moves_san = []
+    temp_board = board.copy()  # Create a copy of the board
+    temp_board.reset()  # Reset to starting position
+    
+    for move in board.move_stack:
+        
+        moves_san.append(temp_board.san(move))  # Convert to SAN before applying
+        temp_board.push(move)  # Apply the move
+    
+    return ' '.join(moves_san)
+
