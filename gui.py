@@ -29,7 +29,7 @@ class PromotionDialog(QDialog):
     
 
 class ChessGUI(QMainWindow):
-    def __init__(self, board, dev=False, go_callback=None):
+    def __init__(self, board, dev=False, go_callback=None, ready_callback=None):
         super().__init__()
         self.board = board
         self.initial_fen = self.board.fen()
@@ -38,6 +38,7 @@ class ChessGUI(QMainWindow):
         self.player_is_white = self.get_player_color()
         self.board.turn = chess.WHITE if self.player_is_white else chess.BLACK
         self.go_callback = go_callback
+        self.ready_callback = ready_callback
         print(utils.info_text("Starting Game..."))
         
         # Reporting Options
@@ -117,9 +118,16 @@ class ChessGUI(QMainWindow):
         export_button.clicked.connect(self.export_game)
         button_layout.addWidget(export_button)
         
+        button_layout2 = QHBoxLayout()
+        main_layout.addLayout(button_layout2)
+        
+        ready_button = QPushButton("Ready")
+        ready_button.clicked.connect(self.ready_command)
+        button_layout2.addWidget(ready_button)
+        
         go_button = QPushButton("Go")
         go_button.clicked.connect(self.go_command)
-        button_layout.addWidget(go_button)
+        button_layout2.addWidget(go_button)
 
         self.update_board()
         utils.center_on_screen(self)
@@ -269,9 +277,13 @@ class ChessGUI(QMainWindow):
         else:
             print(utils.debug_text("Go callback not set"))
         
-        # print(utils.sending_text(f"position fen {self.board.fen()}"))
-        # print(utils.sending_text("go"))
-        # pass
+    def ready_command(self):
+        if self.ready_callback:
+            self.ready_callback()
+        else:
+            print(utils.debug_text("Ready callback not set"))
+        
+    
 
 
 if __name__ == '__main__':

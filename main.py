@@ -23,6 +23,8 @@ def engine_output_processor(proc):
         output = proc.stdout.readline().strip()
         if output == '' and proc.poll() is not None:
             break
+        elif output.startswith('bestmove'):
+            print(color_text('BESTMOVE ', '33') + output[9:])
         elif output:
             print(color_text('RECIEVED ', '34') + output)
 
@@ -35,6 +37,9 @@ def send_command(proc, command):
 def handle_command_go(proc, fen_string):
     send_command(proc, f"position fen {fen_string}")
     send_command(proc, "go")
+
+def handle_command_readyok(proc):
+    send_command(proc, "isready")
 
 def main():
     args = parse_args()
@@ -58,8 +63,9 @@ def main():
 
     # Create a partial function for go_command_handler
     go_callback = partial(handle_command_go, engine_process)
+    ready_callback = partial(handle_command_readyok, engine_process)
     app = QApplication(sys.argv)
-    gui = ChessGUI(board, dev=dev, go_callback=go_callback) # Pass the go_callback to the GUI
+    gui = ChessGUI(board, dev=dev, go_callback=go_callback, ready_callback=ready_callback) # Pass the go_callback to the GUI
     
     
     app.aboutToQuit.connect(lambda: cleanup(engine_process, engine_thread, app, dev=dev))
