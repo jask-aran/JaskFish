@@ -1,275 +1,149 @@
-Project Path: /home/jask/JaskFish/dev3
+Project Path: /home/jask/JaskFish/test
 
 Source Tree:
 
 ```
-dev3
-├── gui.py
+test
+├── utils.py
 ├── main.py
-├── chess_logic.py
-├── test_chess_logic.py
+└── engine.py
 
 ```
 
-`/home/jask/JaskFish/dev3/gui.py`:
+`/home/jask/JaskFish/test/utils.py`:
 
 ```````py
-   1 | import sys
-   2 | import chess
-   3 | from PySide2.QtCore import Qt, QSize
-   4 | from PySide2.QtGui import QFont
-   5 | from PySide2.QtWidgets import QApplication, QMainWindow, QWidget, QGridLayout, QPushButton, QLabel, QVBoxLayout, QMessageBox, QHBoxLayout
-   6 | import chess_logic
-   7 | 
-   8 | class ChessGUI(QMainWindow):
-   9 |     def __init__(self):
-  10 |         super().__init__()
-  11 |         self.board = chess.Board()
-  12 |         self.selected_square = None
-  13 |         self.player_is_white = self.get_player_color()
-  14 |         self.init_ui()
-  15 | 
-  16 |     def get_player_color(self):
-  17 |         msg_box = QMessageBox()
-  18 |         msg_box.setWindowTitle("Choose Your Color")
-  19 |         msg_box.setText("Do you want to play as White or Black?")
-  20 |         white_button = msg_box.addButton("White", QMessageBox.YesRole)
-  21 |         black_button = msg_box.addButton("Black", QMessageBox.NoRole)
-  22 |         msg_box.exec_()
-  23 | 
-  24 |         return msg_box.clickedButton() == white_button
-  25 | 
-  26 |     def init_ui(self):
-  27 |         self.setWindowTitle('Chess GUI')
-  28 |         self.setGeometry(100, 100, 400, 480)  # Increased height for turn indicator and restart button
-  29 | 
-  30 |         central_widget = QWidget(self)
-  31 |         self.setCentralWidget(central_widget)
-  32 | 
-  33 |         main_layout = QVBoxLayout()
-  34 |         central_widget.setLayout(main_layout)
-  35 | 
-  36 |         # Turn indicator
-  37 |         self.turn_indicator = QLabel("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
-  38 |         self.turn_indicator.setAlignment(Qt.AlignCenter)
-  39 |         self.turn_indicator.setFont(QFont('Arial', 14))
-  40 |         main_layout.addWidget(self.turn_indicator)
-  41 | 
-  42 |         # Chess board
-  43 |         board_widget = QWidget()
-  44 |         grid_layout = QGridLayout()
-  45 |         board_widget.setLayout(grid_layout)
-  46 |         main_layout.addWidget(board_widget)
-  47 | 
-  48 |         self.squares = {}
-  49 |         for row in range(8):
-  50 |             for col in range(8):
-  51 |                 button = QPushButton()
-  52 |                 button.setFixedSize(QSize(50, 50))
-  53 |                 button.setFont(QFont('Arial', 20))
-  54 |                 button.clicked.connect(self.on_square_clicked)
-  55 |                 grid_layout.addWidget(button, 7 - row, col)  # Invert row to match chess notation
-  56 |                 self.squares[chess.square(col, row)] = button
-  57 | 
-  58 |         # Restart button
-  59 |         restart_button = QPushButton("Restart")
-  60 |         restart_button.clicked.connect(self.restart_game)
-  61 |         main_layout.addWidget(restart_button)
-  62 | 
-  63 |         self.update_board()
-  64 | 
-  65 |     def update_board(self):
-  66 |         for square, button in self.squares.items():
-  67 |             piece = self.board.piece_at(square)
-  68 |             if piece:
-  69 |                 button.setText(self.get_piece_unicode(piece))
-  70 |             else:
-  71 |                 button.setText('')
-  72 |             button.setStyleSheet(self.get_square_style(square))
-  73 | 
-  74 |         self.turn_indicator.setText("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
-  75 | 
-  76 |         if chess_logic.is_game_over(self.board):
-  77 |             QMessageBox.information(self, "Game Over", chess_logic.get_game_result(self.board))
-  78 | 
-  79 |     def get_piece_unicode(self, piece):
-  80 |         piece_unicode = {
-  81 |             'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
-  82 |             'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'
-  83 |         }
-  84 |         return piece_unicode[piece.symbol()]
-  85 | 
-  86 |     def get_square_style(self, square):
-  87 |         light_square = "#F0D9B5"
-  88 |         dark_square = "#B58863"
-  89 |         selected_color = "#646F40"
-  90 | 
-  91 |         is_light = (chess.square_rank(square) + chess.square_file(square)) % 2 == 0
-  92 |         base_color = light_square if is_light else dark_square
-  93 | 
-  94 |         if square == self.selected_square:
-  95 |             return f"background-color: {selected_color};"
-  96 |         else:
-  97 |             return f"background-color: {base_color};"
-  98 | 
-  99 |     def on_square_clicked(self):
- 100 |         clicked_button = self.sender()
- 101 |         clicked_square = next(square for square, button in self.squares.items() if button == clicked_button)
- 102 | 
- 103 |         if self.selected_square is None:
- 104 |             piece = self.board.piece_at(clicked_square)
- 105 |             if piece and piece.color == self.board.turn:
- 106 |                 self.selected_square = clicked_square
- 107 |         else:
- 108 |             move = chess.Move(self.selected_square, clicked_square)
- 109 |             if chess_logic.is_valid_move(self.board, move):
- 110 |                 chess_logic.make_move(self.board, move)
- 111 |                 self.selected_square = None
- 112 |             else:
- 113 |                 self.selected_square = None
- 114 | 
- 115 |         self.update_board()
- 116 | 
- 117 |     def restart_game(self):
- 118 |         self.board.reset()
- 119 |         self.selected_square = None
- 120 |         self.update_board()
- 121 | 
- 122 | if __name__ == '__main__':
- 123 |     app = QApplication(sys.argv)
- 124 |     chess_gui = ChessGUI()
- 125 |     chess_gui.show()
- 126 |     sys.exit(app.exec_())
+from PySide2.QtWidgets import QApplication
+def color_text(text, color_code):
+    return f"\033[{color_code}m{text}\033[0m"
 
+def debug_text(text):
+    return f"{color_text('DEBUG', '31')} {text}"
+
+def info_text(text):
+    return f"{color_text('INFO', '32')}  {text}"
+
+def sending_text(text):
+    return f"{color_text('SENDING ', '35')} {text}"
+
+def cleanup(process, thread, app, dev=False):
+    if dev:
+        print(debug_text("Cleaning up resources..."))
+    process.terminate()
+    thread.join()
+    app.quit()
+
+def get_piece_unicode(piece):
+    piece_unicode = {
+        'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙',
+        'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟'
+    }
+    return piece_unicode[piece.symbol()]
+
+def center_on_screen(window):
+    screen = QApplication.primaryScreen()
+    screen_geometry = screen.geometry()
+    window_size = window.size()
+    x = (screen_geometry.width() - window_size.width()) / 2 + screen_geometry.left()
+    y = (screen_geometry.height() - window_size.height()) / 2 + screen_geometry.top()
+    window.move(x, y)
 ```````
 
-`/home/jask/JaskFish/dev3/main.py`:
+`/home/jask/JaskFish/test/main.py`:
 
 ```````py
-   1 | import sys
-   2 | import subprocess
-   3 | import threading
-   4 | import queue
-   5 | from PySide2.QtWidgets import QApplication
-   6 | from gui import ChessGUI
-   7 | 
-   8 | def main():
-   9 |     app = QApplication(sys.argv)
-  10 |     gui = ChessGUI()
-  11 |     gui.show()
-  12 |     sys.exit(app.exec_())
-  13 | 
-  14 | if __name__ == "__main__":
-  15 |     main()
+import sys
+import subprocess
+import queue
+import threading
+import time
 
+from utils import color_text, debug_text
+
+def engine_output_processor(output_queue, proc):
+    while True:
+        output = proc.stdout.readline().strip()
+        if output == '' and proc.poll() is not None:
+            break
+        elif output:
+            print(color_text('RECIEVED ', '34') + output)
+
+def send_command(proc, command):
+    print(color_text('SENDING  ', '32') + command)
+    proc.stdin.write(command + "\n")
+    proc.stdin.flush()
+    
+def handle_command_go(proc, fen_string):
+    send_command(proc, f"position fen {fen_string}")
+    send_command(proc, "go")
+
+def main():
+    engine_process = subprocess.Popen(
+        ["python3", "engine.py"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        universal_newlines=True
+    )
+
+    engine_output_queue = queue.Queue()
+    engine_thread = threading.Thread(target=engine_output_processor, args=(engine_output_queue, engine_process), daemon=True)
+    engine_thread.start()
+    
+    time.sleep(0.5)
+    while True:
+        command = input("Enter command: ")
+        if command.strip().lower() == 'quit':
+            send_command(engine_process, 'quit')
+            print(debug_text("Quitting..."))
+            engine_process.terminate()
+            break
+        elif command:
+            send_command(engine_process, command)
+            
+
+
+if __name__ == "__main__":
+    main()
 ```````
 
-`/home/jask/JaskFish/dev3/chess_logic.py`:
+`/home/jask/JaskFish/test/engine.py`:
 
 ```````py
-   1 | import chess
-   2 | 
-   3 | def is_valid_move(board: chess.Board, move: chess.Move) -> bool:
-   4 |     return move in board.legal_moves
-   5 | 
-   6 | def is_game_over(board: chess.Board) -> bool:
-   7 |     return board.is_game_over()
-   8 | 
-   9 | def get_game_result(board: chess.Board) -> str:
-  10 |     if board.is_checkmate():
-  11 |         return "Checkmate"
-  12 |     elif board.is_stalemate():
-  13 |         return "Stalemate"
-  14 |     elif board.is_insufficient_material():
-  15 |         return "Insufficient Material"
-  16 |     elif board.is_seventyfive_moves():
-  17 |         return "75-move rule"
-  18 |     elif board.is_fivefold_repetition():
-  19 |         return "Fivefold Repetition"
-  20 |     elif board.is_variant_draw():
-  21 |         return "Variant-specific Draw"
-  22 |     else:
-  23 |         return "Game in progress"
-  24 | 
-  25 | def is_in_check(board: chess.Board) -> bool:
-  26 |     return board.is_check()
-  27 | 
-  28 | def get_possible_moves(board: chess.Board, square: chess.Square) -> list:
-  29 |     return [move for move in board.legal_moves if move.from_square == square]
-  30 | 
-  31 | def make_move(board: chess.Board, move: chess.Move) -> None:
-  32 |     board.push(move)
-  33 | 
-  34 | def undo_move(board: chess.Board) -> None:
-  35 |     board.pop()
+import sys
+import io
+import chess
+import threading
+import queue
+import time
 
-```````
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
-`/home/jask/JaskFish/dev3/test_chess_logic.py`:
+print('id name JaskFish')
+print('id author Jaskaran Singh')
+print('uciok')
 
-```````py
-   1 | import unittest
-   2 | import chess
-   3 | import chess_logic
-   4 | 
-   5 | class TestChessLogic(unittest.TestCase):
-   6 |     def setUp(self):
-   7 |         self.board = chess.Board()
-   8 | 
-   9 |     def test_initial_board(self):
-  10 |         self.assertFalse(chess_logic.is_game_over(self.board))
-  11 |         self.assertEqual(chess_logic.get_game_result(self.board), "Game in progress")
-  12 | 
-  13 |     def test_valid_moves(self):
-  14 |         e2e4 = chess.Move.from_uci("e2e4")
-  15 |         self.assertTrue(chess_logic.is_valid_move(self.board, e2e4))
-  16 |         chess_logic.make_move(self.board, e2e4)
-  17 |         e7e5 = chess.Move.from_uci("e7e5")
-  18 |         self.assertTrue(chess_logic.is_valid_move(self.board, e7e5))
-  19 | 
-  20 |     def test_invalid_moves(self):
-  21 |         e2e5 = chess.Move.from_uci("e2e5")
-  22 |         self.assertFalse(chess_logic.is_valid_move(self.board, e2e5))
-  23 | 
-  24 |     def test_checkmate(self):
-  25 |         # Fool's mate
-  26 |         moves = ["f2f3", "e7e5", "g2g4", "d8h4"]
-  27 |         for move in moves:
-  28 |             chess_logic.make_move(self.board, chess.Move.from_uci(move))
-  29 |         self.assertTrue(chess_logic.is_game_over(self.board))
-  30 |         self.assertEqual(chess_logic.get_game_result(self.board), "Checkmate")
-  31 | 
-  32 |     def test_stalemate(self):
-  33 |         # Set up a true stalemate position
-  34 |         self.board.set_fen("7k/5Q2/5K2/8/8/8/8/8 b - - 0 1")
-  35 |         self.assertTrue(chess_logic.is_game_over(self.board))
-  36 |         self.assertEqual(chess_logic.get_game_result(self.board), "Stalemate")
-  37 | 
-  38 |     def test_insufficient_material(self):
-  39 |         # King vs King
-  40 |         self.board.set_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1")
-  41 |         self.assertTrue(chess_logic.is_game_over(self.board))
-  42 |         self.assertEqual(chess_logic.get_game_result(self.board), "Insufficient Material")
-  43 | 
-  44 |     def test_check(self):
-  45 |         # Set up a check position where the White queen directly threatens the Black king
-  46 |         self.board.set_fen("8/8/8/8/8/8/4Q3/4k3 b - - 0 1")
-  47 |         self.assertTrue(chess_logic.is_in_check(self.board))
-  48 | 
-  49 | 
-  50 |     def test_possible_moves(self):
-  51 |         e2_square = chess.parse_square("e2")
-  52 |         possible_moves = chess_logic.get_possible_moves(self.board, e2_square)
-  53 |         self.assertEqual(len(possible_moves), 2)  # e2e3 and e2e4
-  54 | 
-  55 |     def test_undo_move(self):
-  56 |         initial_fen = self.board.fen()
-  57 |         e2e4 = chess.Move.from_uci("e2e4")
-  58 |         chess_logic.make_move(self.board, e2e4)
-  59 |         chess_logic.undo_move(self.board)
-  60 |         self.assertEqual(self.board.fen(), initial_fen)
-  61 | 
-  62 | if __name__ == '__main__':
-  63 |     unittest.main()
+def engine_command_processor():
+    print("readyok")
+    while True:
+        # Read input directly from sys.stdin
+        command = sys.stdin.readline().strip()
+        if command == "quit":
+            print('info string Engine shutting down')
+            break
+        elif command.startswith("go"):
+            print(f"{command} received from GUI (GO COMMAND)")
+        elif command:
+            print(f"{command} received from GUI")
+        sys.stdout.flush()
+
+def main():
+    engine_command_processor()
+    print("test")
+    
+main()
+
 
 ```````

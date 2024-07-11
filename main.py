@@ -3,8 +3,10 @@ import subprocess
 import threading
 import queue
 import chess
-from PySide2.QtWidgets import QApplication
 import argparse
+
+from PySide2.QtWidgets import QApplication
+from functools import partial
 
 from gui import ChessGUI
 from utils import cleanup, color_text, info_text
@@ -16,52 +18,51 @@ def parse_args():
     return parser.parse_args()
     # k7/2Q4P/8/8/8/8/8/K2R4
 
-def engine_output_processor(output_queue, proc):
+def engine_output_processor(proc):
     while True:
         output = proc.stdout.readline().strip()
         if output == '' and proc.poll() is not None:
             break
         elif output:
             print(color_text('RECIEVED ', '34') + output)
-            # output_queue.put(output.strip())
-            
-# def process_output_queue(output_queue, window):
-#     while not output_queue.empty():
-#         output = output_queue.get()
-#         print(color_text('Received  ', '34') + output)
 
 
 def send_command(proc, command):
-    print(info_text(color_text('SENDING  ', '32') + command))
+    print(color_text('SENDING  ', '32') + command)
     proc.stdin.write(command + "\n")
     proc.stdin.flush()
+    
+def handle_command_go(proc, fen_string):
+    send_command(proc, f"position fen {fen_string}")
+    send_command(proc, "go")
 
 def main():
     args = parse_args()
     board = chess.Board() if not args.fen else chess.Board(args.fen)
-    dev = not args.dev # CHANGE LATER
+    dev = not args.dev  # CHANGE LATER
 
-    app = QApplication(sys.argv)
-    gui = ChessGUI(board, dev=dev)
     
 
     engine_process = subprocess.Popen(
-                    ["python3", "engine.py"], 
-                    stdin=subprocess.PIPE, 
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.PIPE, 
-                    text=True, 
-                    bufsize=1,
-                    universal_newlines=True)
-    
-    # engine_input_queue = queue.Queue()
-    engine_output_queue = queue.Queue()
-    engine_thread = threading.Thread(target=engine_output_processor, args=(engine_output_queue, engine_process), daemon=True)
+        ["python3", "engine.py"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        universal_newlines=True
+    )
+
+    engine_thread = threading.Thread(target=engine_output_processor, args=(engine_process,), daemon=True)
     engine_thread.start()
 
-
-    app.aboutToQuit.connect(lambda: cleanup(engine_process, engine_thread, app, dev=dev))
+    # Create a partial function for go_command_handler
+    go_callback = partial(handle_command_go, engine_process)
+    app = QApplication(sys.argv)
+    gui = ChessGUI(board, dev=dev, go_callback=go_callback) # Pass the go_callback to the GUI
     
+    
+    app.aboutToQuit.connect(lambda: cleanup(engine_process, engine_thread, app, dev=dev))
     gui.show()
     sys.exit(app.exec_())
 

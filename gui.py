@@ -29,7 +29,7 @@ class PromotionDialog(QDialog):
     
 
 class ChessGUI(QMainWindow):
-    def __init__(self, board, dev=False):
+    def __init__(self, board, dev=False, go_callback=None):
         super().__init__()
         self.board = board
         self.initial_fen = self.board.fen()
@@ -37,6 +37,7 @@ class ChessGUI(QMainWindow):
         self.dev = dev
         self.player_is_white = self.get_player_color()
         self.board.turn = chess.WHITE if self.player_is_white else chess.BLACK
+        self.go_callback = go_callback
         print(utils.info_text("Starting Game..."))
         
         # Reporting Options
@@ -236,6 +237,9 @@ class ChessGUI(QMainWindow):
         
         self.selected_square = None
         self.update_board()
+        
+    def game_state(self):
+        return self.board.fen()
     
     def export_game(self):
         print(utils.info_text("---EXPORTING GAME---"))
@@ -260,8 +264,14 @@ class ChessGUI(QMainWindow):
         print(utils.info_text(f"UCI: {game_state['uci']}"))
     
     def go_command(self):
-        print(utils.info_text(utils.sending_text("Go Command")))
-        pass
+        if self.go_callback:
+            self.go_callback(fen_string=self.board.fen())
+        else:
+            print(utils.debug_text("Go callback not set"))
+        
+        # print(utils.sending_text(f"position fen {self.board.fen()}"))
+        # print(utils.sending_text("go"))
+        # pass
 
 
 if __name__ == '__main__':
