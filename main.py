@@ -4,9 +4,10 @@ import threading
 import queue
 import chess
 from PySide2.QtWidgets import QApplication
-from gui import ChessGUI
 import argparse
-from utils import cleanup, color_text
+
+from gui import ChessGUI
+from utils import cleanup, color_text, info_text
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -21,7 +22,7 @@ def engine_output_processor(output_queue, proc):
         if output == '' and proc.poll() is not None:
             break
         elif output:
-            print(color_text('Received  ', '34') + output)
+            print(color_text('RECIEVED ', '34') + output)
             # output_queue.put(output.strip())
             
 # def process_output_queue(output_queue, window):
@@ -31,7 +32,7 @@ def engine_output_processor(output_queue, proc):
 
 
 def send_command(proc, command):
-    print(color_text('Sending   ', '32') + command)
+    print(info_text(color_text('SENDING  ', '32') + command))
     proc.stdin.write(command + "\n")
     proc.stdin.flush()
 

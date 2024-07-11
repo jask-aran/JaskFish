@@ -200,11 +200,11 @@ class ChessGUI(QMainWindow):
             move.promotion = promotion_choice
 
         if chess_logic.is_valid_move(self.board, move):
-            print(utils.info_text(f"{str(move)} Valid Move by {'White' if self.board.turn else 'Black'}"))
+            print(utils.info_text(f"{str(move)} {utils.color_text('Valid Move', '32')} by {'White' if self.board.turn else 'Black'}"))
             chess_logic.make_move(self.board, move)
             self.selected_square = None
         else:
-            print(utils.info_text(f"{str(move)} Invalid Move attempted by {'White' if self.board.turn else 'Black'}"))
+            print(utils.info_text(f"{str(move)} {utils.color_text('Invalid Move', '31')} attempted by {'White' if self.board.turn else 'Black'}"))
         
         
     def get_promotion_choice(self):
