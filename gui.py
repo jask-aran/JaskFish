@@ -260,7 +260,7 @@ class ChessGUI(QMainWindow):
         print(utils.info_text(f"UCI: {game_state['uci']}"))
     
     def go_command(self):
-        print(utils.info_text("Go Command..."))
+        print(utils.info_text(utils.sending_text("Go Command")))
         pass
 
 

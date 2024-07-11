@@ -1,12 +1,9 @@
 import sys
 import io
 import chess
+import threading
+import queue
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
-while True:
-    line = sys.stdin.readline().strip()
-    if line == 'quit':
-        break
-    else:
-        print(line)
+print('test')

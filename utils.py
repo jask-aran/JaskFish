@@ -8,7 +8,15 @@ def debug_text(text):
 def info_text(text):
     return f"{color_text('INFO', '32')}  {text}"
 
+def sending_text(text):
+    return f"{color_text('SENDING', '36')} {text}"
 
+def cleanup(process, thread, app, dev=False):
+    if dev:
+        print(debug_text("Cleaning up resources..."))
+    process.terminate()
+    thread.join()
+    app.quit()
 
 def get_piece_unicode(piece):
     piece_unicode = {
