@@ -1,3 +1,4 @@
+# MAIN
 import sys
 import subprocess
 import threading
@@ -9,7 +10,7 @@ from PySide2.QtWidgets import QApplication
 from functools import partial
 
 from gui import ChessGUI
-from utils import cleanup, color_text, info_text
+from utils import cleanup, sending_text, recieved_text
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -24,19 +25,23 @@ def engine_output_processor(proc):
         if output == '' and proc.poll() is not None:
             break
         elif output.startswith('bestmove'):
-            print(color_text('BESTMOVE ', '33') + output[9:])
+            handle_bestmove(proc, output)
+
         elif output:
-            print(color_text('RECIEVED ', '34') + output)
+            print(recieved_text(output))
 
 
 def send_command(proc, command):
-    print(color_text('SENDING  ', '32') + command)
+    print(sending_text(command))
     proc.stdin.write(command + "\n")
     proc.stdin.flush()
     
 def handle_command_go(proc, fen_string):
     send_command(proc, f"position fen {fen_string}")
     send_command(proc, "go")
+    
+def handle_bestmove(proc, bestmove):
+    print(recieved_text(bestmove))
 
 def handle_command_readyok(proc):
     send_command(proc, "isready")
@@ -45,8 +50,6 @@ def main():
     args = parse_args()
     board = chess.Board() if not args.fen else chess.Board(args.fen)
     dev = not args.dev  # CHANGE LATER
-
-    
 
     engine_process = subprocess.Popen(
         ["python3", "engine.py"],
@@ -60,6 +63,8 @@ def main():
 
     engine_thread = threading.Thread(target=engine_output_processor, args=(engine_process,), daemon=True)
     engine_thread.start()
+    
+    send_command(engine_process, 'debug on')  if dev else None
 
     # Create a partial function for go_command_handler
     go_callback = partial(handle_command_go, engine_process)

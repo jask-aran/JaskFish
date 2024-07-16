@@ -6,10 +6,13 @@ def debug_text(text):
     return f"{color_text('DEBUG', '31')} {text}"
 
 def info_text(text):
-    return f"{color_text('INFO', '32')}  {text}"
+    return f"{color_text('INFO', '34')}  {text}"
 
 def sending_text(text):
-    return f"{color_text('SENDING ', '35')} {text}"
+    return f"{color_text('SENDING  ', '32')} {text}"
+
+def recieved_text(text):
+    return f"{color_text('RECIEVED ', '35')} {text}"
 
 def cleanup(process, thread, app, dev=False):
     if dev:

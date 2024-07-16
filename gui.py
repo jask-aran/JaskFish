@@ -1,3 +1,4 @@
+# GUI
 import sys
 import chess
 import json
@@ -199,6 +200,7 @@ class ChessGUI(QMainWindow):
         
     
     def attempt_move(self, move):
+        # Move in form e1e2
         print(utils.debug_text(f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}")) \
             if self.dev and self.full_reporting else None
 
@@ -215,6 +217,10 @@ class ChessGUI(QMainWindow):
         else:
             print(utils.info_text(f"{str(move)} {utils.color_text('Invalid Move', '31')} attempted by {'White' if self.board.turn else 'Black'}"))
         
+    def attempt_engine_move(self, move_uci):
+        move = chess.Move.from_uci(move_uci)
+        self.attempt_move(move)
+        self.update_board()
         
     def get_promotion_choice(self):
         dialog = PromotionDialog(self)
