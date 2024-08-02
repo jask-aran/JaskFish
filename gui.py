@@ -267,10 +267,10 @@ class ChessGUI(QMainWindow):
         }
         
         if self.dev:
-            with open('game_state.json', 'w') as outfile:
+            with open('gamestates/DEV_game_state.json', 'w') as outfile:
                 json.dump(game_state, outfile)
         else:
-            with open(f'chess_game_{game_state["export-time"]}.json', 'w') as outfile:
+            with open(f'gamestates/chess_game_{game_state["export-time"]}.json', 'w') as outfile:
                 json.dump(game_state, outfile)
             
         print(utils.info_text(f"FEN: {game_state['fen-final']}"))
