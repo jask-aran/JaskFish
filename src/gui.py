@@ -3,6 +3,7 @@ import sys
 import chess
 import json
 import time
+import os
 from PySide2.QtCore import Qt, QSize
 from PySide2.QtGui import QFont
 from PySide2.QtWidgets import QApplication, QMainWindow, QWidget, QGridLayout, QPushButton, QLabel, QVBoxLayout, QMessageBox, QHBoxLayout, QDialog, QComboBox
@@ -219,6 +220,7 @@ class ChessGUI(QMainWindow):
         
     def attempt_engine_move(self, move_uci):
         move = chess.Move.from_uci(move_uci)
+        print(utils.info_text(f"Engine Move Attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}"))
         self.attempt_move(move)
         self.update_board()
         
@@ -266,11 +268,15 @@ class ChessGUI(QMainWindow):
             'uci': chess_logic.export_move_history_uci(self.board)
         }
         
+        gamestates_folder = 'gamestates'
+        if not os.path.exists(gamestates_folder):
+            os.makedirs(gamestates_folder)
+            
         if self.dev:
-            with open('gamestates/DEV_game_state.json', 'w') as outfile:
+            with open(f'{gamestates_folder}/DEV_game_state.json', 'w') as outfile:
                 json.dump(game_state, outfile)
         else:
-            with open(f'gamestates/chess_game_{game_state["export-time"]}.json', 'w') as outfile:
+            with open(f'{gamestates_folder}/chess_game_{game_state["export-time"]}.json', 'w') as outfile:
                 json.dump(game_state, outfile)
             
         print(utils.info_text(f"FEN: {game_state['fen-final']}"))

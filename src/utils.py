@@ -17,8 +17,16 @@ def recieved_text(text):
 def cleanup(process, thread, app, dev=False):
     if dev:
         print(debug_text("Cleaning up resources..."))
-    process.terminate()
-    thread.join()
+    
+    # Safely terminate the process
+    if process is not None:
+        process.terminate()  # Send termination signal
+        process.waitForFinished()  # Wait for the process to exit
+
+    # Only join the thread if it exists
+    if thread is not None:
+        thread.join()
+    
     app.quit()
 
 def get_piece_unicode(piece):
