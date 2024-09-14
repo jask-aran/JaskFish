@@ -34,8 +34,16 @@ def recieved_text(text):
 def cleanup(process, thread, app, dev=False):
     if dev:
         print(debug_text("Cleaning up resources..."))
-    process.terminate()
-    thread.join()
+    
+    # Safely terminate the process
+    if process is not None:
+        process.terminate()  # Send termination signal
+        process.waitForFinished()  # Wait for the process to exit
+
+    # Only join the thread if it exists
+    if thread is not None:
+        thread.join()
+    
     app.quit()
 
 def get_piece_unicode(piece):
@@ -90,7 +98,7 @@ class PromotionDialog(QDialog):
     
 
 class ChessGUI(QMainWindow):
-    def __init__(self, board, dev=False, go_callback=None, ready_callback=None):
+    def __init__(self, board, dev=False, go_callback=None, ready_callback=None, restart_engine_callback=None):
         super().__init__()
         self.board = board
         self.initial_fen = self.board.fen()
@@ -100,6 +108,7 @@ class ChessGUI(QMainWindow):
         self.board.turn = chess.WHITE if self.player_is_white else chess.BLACK
         self.go_callback = go_callback
         self.ready_callback = ready_callback
+        self.restart_engine_callback = restart_engine_callback
         print(utils.info_text("Starting Game..."))
         
         # Reporting Options
@@ -166,10 +175,6 @@ class ChessGUI(QMainWindow):
 
         button_layout = QHBoxLayout()
         main_layout.addLayout(button_layout)
-
-        restart_button = QPushButton("Restart")
-        restart_button.clicked.connect(self.restart_game)
-        button_layout.addWidget(restart_button)
         
         undo_button = QPushButton("Undo")
         undo_button.clicked.connect(self.undo_move)
@@ -178,6 +183,10 @@ class ChessGUI(QMainWindow):
         export_button = QPushButton("Export")
         export_button.clicked.connect(self.export_game)
         button_layout.addWidget(export_button)
+
+        reset_button = QPushButton("Reset board")
+        reset_button.clicked.connect(self.reset_game)
+        button_layout.addWidget(reset_button)
         
         button_layout2 = QHBoxLayout()
         main_layout.addLayout(button_layout2)
@@ -189,6 +198,10 @@ class ChessGUI(QMainWindow):
         go_button = QPushButton("Go")
         go_button.clicked.connect(self.go_command)
         button_layout2.addWidget(go_button)
+        
+        restart_engine_button = QPushButton("Restart Engine")
+        restart_engine_button.clicked.connect(self.restart_engine)
+        button_layout2.addWidget(restart_engine_button)
 
         self.update_board()
         utils.center_on_screen(self)
@@ -279,6 +292,7 @@ class ChessGUI(QMainWindow):
         
     def attempt_engine_move(self, move_uci):
         move = chess.Move.from_uci(move_uci)
+        print(utils.info_text(f"Engine Move Attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}"))
         self.attempt_move(move)
         self.update_board()
         
@@ -291,12 +305,12 @@ class ChessGUI(QMainWindow):
         print(utils.debug_text("Promotion Dialog Cancelled"))
         return None  # Return None if the dialog is cancelled
 
-    def restart_game(self):
-        print(utils.info_text("Restarting game..."))
+    def reset_game(self):
+        print(utils.info_text("Resetting game..."))
         self.board.reset()
         self.initial_fen = self.board.fen()
         self.selected_square = None
-        self.update_board(info_text="Game Restarted")
+        self.update_board(info_text="Game Reset")
         
     def undo_move(self):
         last_move = self.board.peek() if self.board.move_stack else None
@@ -352,6 +366,12 @@ class ChessGUI(QMainWindow):
             self.ready_callback()
         else:
             print(utils.debug_text("Ready callback not set"))
+            
+    def restart_engine(self):
+        if self.restart_engine_callback:
+            self.restart_engine_callback()
+        else:
+            print(utils.debug_text("Restart engine callback not set"))
         
     
 
@@ -372,85 +392,96 @@ if __name__ == '__main__':
 ```````py
 # MAIN
 import sys
-import subprocess
-import threading
-import queue
 import chess
 import argparse
+import os
 
 from PySide2.QtWidgets import QApplication
-from functools import partial
+from PySide2.QtCore import QProcess
 
 from gui import ChessGUI
-from utils import cleanup, sending_text, recieved_text
+from utils import cleanup, sending_text, recieved_text, info_text
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-fen', help='Set the initial board state to the given FEN string')
     parser.add_argument('-dev', action='store_true', help='Enable debug mode')
     return parser.parse_args()
-    # k7/2Q4P/8/8/8/8/8/K2R4
-
-def engine_output_processor(proc):
-    while True:
-        output = proc.stdout.readline().strip()
-        if output == '' and proc.poll() is not None:
-            break
-        elif output.startswith('bestmove'):
-            handle_bestmove(proc, output)
-
-        elif output:
-            print(recieved_text(output))
-
+    # Example FEN: k7/2Q4P/8/8/8/8/8/K2R4
 
 def send_command(proc, command):
     print(sending_text(command))
-    proc.stdin.write(command + "\n")
-    proc.stdin.flush()
-    
+    proc.write((command + '\n').encode())
+    proc.waitForBytesWritten()
+
 def handle_command_go(proc, fen_string):
     send_command(proc, f"position fen {fen_string}")
     send_command(proc, "go")
-    
-def handle_bestmove(proc, bestmove):
-    print(recieved_text(bestmove))
 
 def handle_command_readyok(proc):
     send_command(proc, "isready")
+    
+def handle_bestmove(proc, bestmove, gui):
+    print(recieved_text(bestmove))
+    parts = bestmove.strip().split()
+    if len(parts) >= 2:
+        move_uci = parts[1]
+        gui.attempt_engine_move(move_uci)
+    else:
+        print("info string No best move found.")
+
+def engine_output_processor(proc, gui):
+    while proc.canReadLine():
+        output = bytes(proc.readLine()).decode().strip()
+        if output.startswith('bestmove'):
+            handle_bestmove(proc, output, gui)
+        elif output:
+            print(recieved_text(output))
+            
+def restart_engine(engine_process, gui, engine_path):
+    print(info_text("Restarting engine..."))
+    if engine_process.state() == QProcess.Running:
+        engine_process.kill()
+        engine_process.waitForFinished()
+    
+    engine_process.start("python3", [engine_path])
+    send_command(engine_process, 'debug on') if gui.dev else None
+    print(info_text("Engine restarted"))
 
 def main():
     args = parse_args()
     board = chess.Board() if not args.fen else chess.Board(args.fen)
-    dev = not args.dev  # CHANGE LATER
-
-    engine_process = subprocess.Popen(
-        ["python3", "./engine.py"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        universal_newlines=True
-    )
-
-    engine_thread = threading.Thread(target=engine_output_processor, args=(engine_process,), daemon=True)
-    engine_thread.start()
+    dev = not args.dev
     
-    send_command(engine_process, 'debug on')  if dev else None
-
-    # Create a partial function for go_command_handler
-    go_callback = partial(handle_command_go, engine_process)
-    ready_callback = partial(handle_command_readyok, engine_process)
+    # Find absolute path to engine.py
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    engine_path = os.path.join(script_dir, "engine.py")
+    
+    # Construct GUI object
     app = QApplication(sys.argv)
-    gui = ChessGUI(board, dev=dev, go_callback=go_callback, ready_callback=ready_callback) # Pass the go_callback to the GUI
+    go_callback = lambda fen_string: handle_command_go(engine_process, fen_string)
+    ready_callback = lambda: handle_command_readyok(engine_process)
+    restart_engine_callback = lambda: restart_engine(engine_process, gui, engine_path)
+    gui = ChessGUI(board, dev=dev, go_callback=go_callback, ready_callback=ready_callback, restart_engine_callback=restart_engine_callback)
     
+    # Start engine
+    engine_process = QProcess()
+    engine_process.setProcessChannelMode(QProcess.MergedChannels)
+    engine_process.readyReadStandardOutput.connect(lambda: engine_output_processor(engine_process, gui))
+    engine_process.start("python3", [engine_path])
     
-    app.aboutToQuit.connect(lambda: cleanup(engine_process, engine_thread, app, dev=dev))
+    # Enable debug mode
+    send_command(engine_process, 'debug on') if dev else None
+
+
+    app.aboutToQuit.connect(lambda: cleanup(engine_process, None, app, dev=dev))
+
     gui.show()
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
     main()
+
 ```````
 
 `/home/jask/JaskFish/src/engine.py`:
@@ -482,7 +513,7 @@ class ChessEngine:
         # Engine state
         self.board = chess.Board()
         self.debug = False
-        self.go_command_in_progress = False
+        self.move_calculating = False
         self.running = True
 
         # Lock to manage concurrent access to engine state
@@ -503,6 +534,11 @@ class ChessEngine:
     def start(self):
         self.handle_uci()
         self.command_processor()
+        
+    def handle_uci(self, args=None):
+        print(f'id name {self.engine_name}')
+        print(f'id author {self.engine_author}')
+        print('uciok')
 
     def command_processor(self):
         """
@@ -531,14 +567,15 @@ class ChessEngine:
             finally:
                 sys.stdout.flush()
 
+
+    def handle_unknown(self, args):
+        print(f"unknown command received: '{args}'")
+
     def handle_quit(self, args):
         print('info string Engine shutting down')
         self.running = False
 
     def handle_debug(self, args):
-        """
-        :param args: The command argument. Should be either "on" or "off".
-        """
         setting = args.strip().lower()
         if setting == "on":
             self.debug = True
@@ -551,7 +588,7 @@ class ChessEngine:
 
     def handle_isready(self, args):
         with self.state_lock:
-            if not self.go_command_in_progress:
+            if not self.move_calculating:
                 print("readyok")
             else:
                 print("info string Engine is busy processing a move")
@@ -575,19 +612,33 @@ class ChessEngine:
 
     def handle_boardpos(self, args):
         with self.state_lock:
-            print(f"info string Position: {self.board.fen()}" if self.board else "info string Board state not found")
+            print(f"info string Position: {self.board.fen()}" if self.board else "info string Board state not set")
 
     def handle_go(self, args):
         with self.state_lock:
-            if self.go_command_in_progress:
+            if self.move_calculating:
                 print('info string Please wait for computer move')
                 return
-            self.go_command_in_progress = True
+            self.move_calculating = True
 
         # Start the move calculation in a separate thread
         move_thread = threading.Thread(target=self.process_go_command)
         move_thread.start()
 
+    def handle_ucinewgame(self, args):
+        with self.state_lock:
+            self.board.reset()
+            if self.debug:
+                print("info string New game started, board reset to initial position")
+            print("info string New game initialized")
+
+    def random_move(self, board):
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            return None
+        selected_move = random.choice(legal_moves)
+        return selected_move.uci()
+        
     def process_go_command(self):
         if self.debug:
             print(f"info string calc start: {self.board.fen()}")
@@ -599,33 +650,10 @@ class ChessEngine:
             move = self.random_move(self.board)
             if move:
                 print(f"bestmove {move}")
+                print("readyok")
             else:
                 print("bestmove (none)")
-            self.go_command_in_progress = False
-
-    def handle_ucinewgame(self, args):
-        with self.state_lock:
-            self.board.reset()
-            if self.debug:
-                print("info string New game started, board reset to initial position")
-            print("info string New game initialized")
-
-    def handle_uci(self, args=None):
-        print(f'id name {self.engine_name}')
-        print(f'id author {self.engine_author}')
-        print('uciok')
-
-    def random_move(self, board):
-
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            return None
-        selected_move = random.choice(legal_moves)
-        return selected_move.uci()
-
-    def handle_unknown(self, args):
-        """Handle any unknown or unsupported commands."""
-        print(f"unknown command received: '{args}'")
+            self.move_calculating = False
 
 
 

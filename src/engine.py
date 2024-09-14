@@ -24,7 +24,7 @@ class ChessEngine:
         # Engine state
         self.board = chess.Board()
         self.debug = False
-        self.go_command_in_progress = False
+        self.move_calculating = False
         self.running = True
 
         # Lock to manage concurrent access to engine state
@@ -45,6 +45,11 @@ class ChessEngine:
     def start(self):
         self.handle_uci()
         self.command_processor()
+        
+    def handle_uci(self, args=None):
+        print(f'id name {self.engine_name}')
+        print(f'id author {self.engine_author}')
+        print('uciok')
 
     def command_processor(self):
         """
@@ -73,6 +78,10 @@ class ChessEngine:
             finally:
                 sys.stdout.flush()
 
+
+    def handle_unknown(self, args):
+        print(f"unknown command received: '{args}'")
+
     def handle_quit(self, args):
         print('info string Engine shutting down')
         self.running = False
@@ -90,7 +99,7 @@ class ChessEngine:
 
     def handle_isready(self, args):
         with self.state_lock:
-            if not self.go_command_in_progress:
+            if not self.move_calculating:
                 print("readyok")
             else:
                 print("info string Engine is busy processing a move")
@@ -114,14 +123,14 @@ class ChessEngine:
 
     def handle_boardpos(self, args):
         with self.state_lock:
-            print(f"info string Position: {self.board.fen()}" if self.board else "info string Board state not found")
+            print(f"info string Position: {self.board.fen()}" if self.board else "info string Board state not set")
 
     def handle_go(self, args):
         with self.state_lock:
-            if self.go_command_in_progress:
+            if self.move_calculating:
                 print('info string Please wait for computer move')
                 return
-            self.go_command_in_progress = True
+            self.move_calculating = True
 
         # Start the move calculation in a separate thread
         move_thread = threading.Thread(target=self.process_go_command)
@@ -134,22 +143,12 @@ class ChessEngine:
                 print("info string New game started, board reset to initial position")
             print("info string New game initialized")
 
-    def handle_uci(self, args=None):
-        print(f'id name {self.engine_name}')
-        print(f'id author {self.engine_author}')
-        print('uciok')
-
     def random_move(self, board):
-
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             return None
         selected_move = random.choice(legal_moves)
         return selected_move.uci()
-
-    def handle_unknown(self, args):
-        """Handle any unknown or unsupported commands."""
-        print(f"unknown command received: '{args}'")
         
     def process_go_command(self):
         if self.debug:
@@ -162,9 +161,10 @@ class ChessEngine:
             move = self.random_move(self.board)
             if move:
                 print(f"bestmove {move}")
+                print("readyok")
             else:
                 print("bestmove (none)")
-            self.go_command_in_progress = False
+            self.move_calculating = False
 
 
 

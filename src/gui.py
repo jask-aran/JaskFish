@@ -31,7 +31,7 @@ class PromotionDialog(QDialog):
     
 
 class ChessGUI(QMainWindow):
-    def __init__(self, board, dev=False, go_callback=None, ready_callback=None):
+    def __init__(self, board, dev=False, go_callback=None, ready_callback=None, restart_engine_callback=None):
         super().__init__()
         self.board = board
         self.initial_fen = self.board.fen()
@@ -41,6 +41,7 @@ class ChessGUI(QMainWindow):
         self.board.turn = chess.WHITE if self.player_is_white else chess.BLACK
         self.go_callback = go_callback
         self.ready_callback = ready_callback
+        self.restart_engine_callback = restart_engine_callback
         print(utils.info_text("Starting Game..."))
         
         # Reporting Options
@@ -107,10 +108,6 @@ class ChessGUI(QMainWindow):
 
         button_layout = QHBoxLayout()
         main_layout.addLayout(button_layout)
-
-        restart_button = QPushButton("Restart")
-        restart_button.clicked.connect(self.restart_game)
-        button_layout.addWidget(restart_button)
         
         undo_button = QPushButton("Undo")
         undo_button.clicked.connect(self.undo_move)
@@ -119,6 +116,10 @@ class ChessGUI(QMainWindow):
         export_button = QPushButton("Export")
         export_button.clicked.connect(self.export_game)
         button_layout.addWidget(export_button)
+
+        reset_button = QPushButton("Reset board")
+        reset_button.clicked.connect(self.reset_game)
+        button_layout.addWidget(reset_button)
         
         button_layout2 = QHBoxLayout()
         main_layout.addLayout(button_layout2)
@@ -130,6 +131,10 @@ class ChessGUI(QMainWindow):
         go_button = QPushButton("Go")
         go_button.clicked.connect(self.go_command)
         button_layout2.addWidget(go_button)
+        
+        restart_engine_button = QPushButton("Restart Engine")
+        restart_engine_button.clicked.connect(self.restart_engine)
+        button_layout2.addWidget(restart_engine_button)
 
         self.update_board()
         utils.center_on_screen(self)
@@ -233,12 +238,12 @@ class ChessGUI(QMainWindow):
         print(utils.debug_text("Promotion Dialog Cancelled"))
         return None  # Return None if the dialog is cancelled
 
-    def restart_game(self):
-        print(utils.info_text("Restarting game..."))
+    def reset_game(self):
+        print(utils.info_text("Resetting game..."))
         self.board.reset()
         self.initial_fen = self.board.fen()
         self.selected_square = None
-        self.update_board(info_text="Game Restarted")
+        self.update_board(info_text="Game Reset")
         
     def undo_move(self):
         last_move = self.board.peek() if self.board.move_stack else None
@@ -294,6 +299,12 @@ class ChessGUI(QMainWindow):
             self.ready_callback()
         else:
             print(utils.debug_text("Ready callback not set"))
+            
+    def restart_engine(self):
+        if self.restart_engine_callback:
+            self.restart_engine_callback()
+        else:
+            print(utils.debug_text("Restart engine callback not set"))
         
     
 
