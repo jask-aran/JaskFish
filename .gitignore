@@ -162,4 +162,4 @@ cython_debug/
 
 game_state.json
 gamestates/
-
+output.txt

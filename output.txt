@@ -7,8 +7,12 @@ src
 ├── utils.py
 ├── gui.py
 ├── main.py
+├── tests
+│   └── test_gui.py
 ├── engine.py
-└── chess_logic.py
+├── chess_logic.py
+├── conftest.py
+└── __init__.py
 
 ```
 
@@ -484,6 +488,44 @@ if __name__ == "__main__":
 
 ```````
 
+`/home/jask/JaskFish/src/tests/test_gui.py`:
+
+```````py
+import sys
+import unittest
+import chess
+
+from PySide2.QtWidgets import QApplication
+from PySide2.QtTest import QTest
+from PySide2.QtCore import Qt
+from gui import ChessGUI
+
+class TestChessGUI(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication(sys.argv)
+        
+    @classmethod
+    def tearDownClass(cls):
+        # When all tests are complete
+        cls.app.quit()
+
+    def setUp(self):
+        """Sets up a ChessGUI with a starting board and shows the window."""
+        board = chess.Board()
+        self.gui = ChessGUI(board, dev=True)
+        self.gui.show()
+
+    def tearDown(self):
+        self.gui.close()
+        
+    
+
+
+if __name__ == '__main__':
+    unittest.main()
+```````
+
 `/home/jask/JaskFish/src/engine.py`:
 
 ```````py
@@ -742,4 +784,18 @@ def export_move_history_san(board: chess.Board) -> str:
     return ' '.join(moves_san)
 
 
+```````
+
+`/home/jask/JaskFish/src/conftest.py`:
+
+```````py
+import sys
+import os
+
+# Get the absolute path of the 'src' directory
+src_dir = os.path.abspath(os.path.dirname(__file__))
+
+# Add the src directory to sys.path if it's not already there
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 ```````
