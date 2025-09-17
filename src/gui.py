@@ -112,7 +112,7 @@ class ChessGUI(QMainWindow):
         undo_button = QPushButton("Undo")
         undo_button.clicked.connect(self.undo_move)
         button_layout.addWidget(undo_button)
-        
+
         export_button = QPushButton("Export")
         export_button.clicked.connect(self.export_game)
         button_layout.addWidget(export_button)
@@ -124,17 +124,17 @@ class ChessGUI(QMainWindow):
         button_layout2 = QHBoxLayout()
         main_layout.addLayout(button_layout2)
         
-        ready_button = QPushButton("Ready")
-        ready_button.clicked.connect(self.ready_command)
-        button_layout2.addWidget(ready_button)
-        
-        go_button = QPushButton("Go")
-        go_button.clicked.connect(self.go_command)
-        button_layout2.addWidget(go_button)
-        
-        restart_engine_button = QPushButton("Restart Engine")
-        restart_engine_button.clicked.connect(self.restart_engine)
-        button_layout2.addWidget(restart_engine_button)
+        self.ready_button = QPushButton("Ready")
+        self.ready_button.clicked.connect(self.ready_command)
+        button_layout2.addWidget(self.ready_button)
+
+        self.go_button = QPushButton("Go")
+        self.go_button.clicked.connect(self.go_command)
+        button_layout2.addWidget(self.go_button)
+
+        self.restart_engine_button = QPushButton("Restart Engine")
+        self.restart_engine_button.clicked.connect(self.restart_engine)
+        button_layout2.addWidget(self.restart_engine_button)
 
         self.update_board()
         utils.center_on_screen(self)
@@ -151,7 +151,8 @@ class ChessGUI(QMainWindow):
             button.setStyleSheet(self.get_square_style(square, last_moved=last_move))
     
         self.turn_indicator.setText("White's turn" if self.board.turn == chess.WHITE else "Black's turn")
-        self.info_indicator.setText(info_text) if info_text else None
+        if info_text is not None:
+            self.set_info_message(info_text)
 
         if chess_logic.is_game_over(self.board):
             outcome = chess_logic.get_game_result(self.board)
@@ -264,7 +265,7 @@ class ChessGUI(QMainWindow):
     
     def export_game(self):
         print(utils.info_text("---EXPORTING GAME---"))
-        
+
         game_state = {
             'export-time': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
             'fen-init': self.initial_fen,
@@ -287,7 +288,19 @@ class ChessGUI(QMainWindow):
         print(utils.info_text(f"FEN: {game_state['fen-final']}"))
         print(utils.info_text(f"SAN: {game_state['san']}"))
         print(utils.info_text(f"UCI: {game_state['uci']}"))
-    
+
+    def set_engine_controls_enabled(self, enabled: bool) -> None:
+        for button in (
+            getattr(self, "ready_button", None),
+            getattr(self, "go_button", None),
+            getattr(self, "restart_engine_button", None),
+        ):
+            if button:
+                button.setEnabled(enabled)
+
+    def set_info_message(self, message: str) -> None:
+        self.info_indicator.setText(message)
+
     def go_command(self):
         if self.go_callback:
             self.go_callback(fen_string=self.board.fen())
