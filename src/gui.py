@@ -31,7 +31,16 @@ class PromotionDialog(QDialog):
     
 
 class ChessGUI(QMainWindow):
-    def __init__(self, board, dev=False, go_callback=None, ready_callback=None, restart_engine_callback=None):
+    def __init__(
+        self,
+        board,
+        dev=False,
+        go_callback=None,
+        ready_callback=None,
+        restart_engine_callback=None,
+        collect_callback=None,
+        collect_data_enabled=False,
+    ):
         super().__init__()
         self.board = board
         self.initial_fen = self.board.fen()
@@ -42,6 +51,8 @@ class ChessGUI(QMainWindow):
         self.go_callback = go_callback
         self.ready_callback = ready_callback
         self.restart_engine_callback = restart_engine_callback
+        self.collect_callback = collect_callback
+        self.collect_data_enabled = collect_data_enabled
         print(utils.info_text("Starting Game..."))
         
         # Reporting Options
@@ -127,11 +138,18 @@ class ChessGUI(QMainWindow):
         ready_button = QPushButton("Ready")
         ready_button.clicked.connect(self.ready_command)
         button_layout2.addWidget(ready_button)
-        
+
         go_button = QPushButton("Go")
         go_button.clicked.connect(self.go_command)
         button_layout2.addWidget(go_button)
-        
+
+        self.data_collection_button = QPushButton()
+        self.data_collection_button.setCheckable(True)
+        self.data_collection_button.setChecked(self.collect_data_enabled)
+        self.data_collection_button.toggled.connect(self.toggle_data_collection)
+        self.update_data_collection_button()
+        button_layout2.addWidget(self.data_collection_button)
+
         restart_engine_button = QPushButton("Restart Engine")
         restart_engine_button.clicked.connect(self.restart_engine)
         button_layout2.addWidget(restart_engine_button)
@@ -244,12 +262,28 @@ class ChessGUI(QMainWindow):
         self.initial_fen = self.board.fen()
         self.selected_square = None
         self.update_board(info_text="Game Reset")
-        
+
+    def update_data_collection_button(self):
+        if not hasattr(self, 'data_collection_button'):
+            return
+
+        label = "Disable Data Capture" if self.collect_data_enabled else "Enable Data Capture"
+        self.data_collection_button.setText(label)
+
+    def toggle_data_collection(self, enabled):
+        self.collect_data_enabled = enabled
+        if self.collect_callback:
+            self.collect_callback(self.collect_data_enabled)
+        if self.dev and self.full_reporting:
+            state = 'ENABLED' if self.collect_data_enabled else 'DISABLED'
+            print(utils.debug_text(f"Data Capture {state}"))
+        self.update_data_collection_button()
+
     def undo_move(self):
         last_move = self.board.peek() if self.board.move_stack else None
         if last_move:
             chess_logic.undo_move(self.board)
-            
+
         if last_move and self.dev:
             print(utils.debug_text(f"{last_move} Undone"))
             last_move = None

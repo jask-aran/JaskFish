@@ -1,12 +1,27 @@
 import sys
 import io
 import random
-import chess
+import shlex
 import time
 import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List
+
+import chess
+
+from utils import write_search_log_entry
 
 # Ensure stdout is line-buffered
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+
+
+@dataclass
+class SearchInfo:
+    board_fen: str
+    best_move: str
+    principal_variation: List[str]
+    score: float
 
 
 class ChessEngine:
@@ -26,6 +41,9 @@ class ChessEngine:
         self.debug = False
         self.move_calculating = False
         self.running = True
+        self.collect_search_data = False
+        self.search_log_format = 'json'
+        self.search_log_path = Path('logs/search_logs.jsonl')
 
         # Lock to manage concurrent access to engine state
         self.state_lock = threading.Lock()
@@ -39,7 +57,8 @@ class ChessEngine:
             'boardpos': self.handle_boardpos,
             'go': self.handle_go,
             'ucinewgame': self.handle_ucinewgame,
-            'uci': self.handle_uci
+            'uci': self.handle_uci,
+            'collectdata': self.handle_collectdata
         }
 
     def start(self):
@@ -97,6 +116,37 @@ class ChessEngine:
             return
         print(f"info string Debug:{self.debug}")
 
+    def handle_collectdata(self, args):
+        tokens = shlex.split(args)
+        if not tokens:
+            state = 'enabled' if self.collect_search_data else 'disabled'
+            print(f"info string Data collection currently {state} (format={self.search_log_format}, path={self.search_log_path})")
+            return
+
+        command = tokens[0].lower()
+        if command in {"on", "off"}:
+            self.collect_search_data = command == "on"
+            state = 'enabled' if self.collect_search_data else 'disabled'
+            print(f"info string Data collection {state}")
+            return
+
+        if command == "format" and len(tokens) >= 2:
+            fmt = tokens[1].lower()
+            if fmt not in {"json", "csv"}:
+                print("info string Unsupported format. Choose 'json' or 'csv'.")
+                return
+            self.search_log_format = fmt
+            print(f"info string Data collection format set to {fmt}")
+            return
+
+        if command == "path" and len(tokens) >= 2:
+            path_value = tokens[1]
+            self.search_log_path = Path(path_value)
+            print(f"info string Data collection path set to {self.search_log_path}")
+            return
+
+        print("info string Usage: collectdata on|off | format <json|csv> | path <file>")
+
     def handle_isready(self, args):
         with self.state_lock:
             if not self.move_calculating:
@@ -149,22 +199,77 @@ class ChessEngine:
             return None
         selected_move = random.choice(legal_moves)
         return selected_move.uci()
+
+    def evaluate_board(self, board):
+        piece_values = {
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0,
+        }
+
+        score = 0
+        for piece_type, value in piece_values.items():
+            score += len(board.pieces(piece_type, chess.WHITE)) * value
+            score -= len(board.pieces(piece_type, chess.BLACK)) * value
+        return score
         
     def process_go_command(self):
-        if self.debug:
-            print(f"info string calc start: {self.board.fen()}")
+        with self.state_lock:
+            current_fen = self.board.fen()
 
-        # Simulate a long move calculation
+        if self.debug:
+            print(f"info string calc start: {current_fen}")
+
         time.sleep(2)
 
-        with self.state_lock:
-            move = self.random_move(self.board)
+        try:
+            with self.state_lock:
+                move = self.random_move(self.board)
+                pv = [move] if move else []
+
+                if move:
+                    board_copy = self.board.copy()
+                    board_copy.push_uci(move)
+                    score = float(self.evaluate_board(board_copy))
+                else:
+                    score = float(self.evaluate_board(self.board))
+
+                should_log = self.collect_search_data
+                search_info = SearchInfo(
+                    board_fen=current_fen,
+                    best_move=move or "(none)",
+                    principal_variation=pv,
+                    score=score,
+                )
+
+            if should_log:
+                try:
+                    field_order = [
+                        "board_fen",
+                        "best_move",
+                        "principal_variation",
+                        "score",
+                    ]
+                    write_search_log_entry(
+                        search_info,
+                        self.search_log_path,
+                        self.search_log_format,
+                        field_order=field_order,
+                    )
+                except Exception as exc:
+                    print(f"info string Failed to write search log: {exc}")
+
             if move:
                 print(f"bestmove {move}")
                 print("readyok")
             else:
                 print("bestmove (none)")
-            self.move_calculating = False
+        finally:
+            with self.state_lock:
+                self.move_calculating = False
 
 
 
