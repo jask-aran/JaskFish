@@ -1,12 +1,240 @@
 import sys
 import io
 import random
-import chess
 import time
 import threading
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+import chess
+
+
+PIECE_VALUES = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 0,
+}
 
 # Ensure stdout is line-buffered
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+
+
+@dataclass
+class StrategyContext:
+    """Snapshot of board metrics used by move strategies."""
+
+    fullmove_number: int
+    halfmove_clock: int
+    piece_count: int
+    material_imbalance: int
+    turn: bool = True
+    fen: str = ""
+    repetition_info: Dict[str, bool] = field(default_factory=dict)
+    legal_moves_count: int = 0
+    time_controls: Optional[Dict[str, int]] = None
+
+
+@dataclass
+class StrategyResult:
+    """Container describing the outcome of a strategy evaluation."""
+
+    move: Optional[str]
+    strategy_name: str
+    score: Optional[float] = None
+    confidence: Optional[float] = None
+    metadata: Dict[str, object] = field(default_factory=dict)
+
+
+class MoveStrategy(ABC):
+    """Base class for all move selection strategies."""
+
+    def __init__(self, name: Optional[str] = None, priority: int = 0, confidence: Optional[float] = None):
+        self.name = name or self.__class__.__name__
+        self.priority = priority
+        self.confidence = confidence
+
+    @abstractmethod
+    def is_applicable(self, context: StrategyContext) -> bool:
+        """Return whether the strategy should be considered in the given context."""
+
+    @abstractmethod
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        """Produce a move suggestion when applicable."""
+
+
+class StrategySelector:
+    """Manages strategy registration and selection for the engine."""
+
+    def __init__(
+        self,
+        strategies: Optional[Iterable[MoveStrategy]] = None,
+        selection_policy: Optional[Callable[..., Optional[StrategyResult]]] = None,
+        logger: Optional[Callable[[str], None]] = None,
+    ):
+        self._strategies: List[MoveStrategy] = []
+        self._logger = logger or (lambda message: None)
+        self._selection_policy = selection_policy or self._default_selection_policy
+        self._uses_default_policy = selection_policy is None
+        if strategies:
+            for strategy in strategies:
+                self.register_strategy(strategy)
+
+    def register_strategy(self, strategy: MoveStrategy) -> None:
+        """Register a strategy and maintain priority ordering."""
+
+        self._strategies.append(strategy)
+        self._strategies.sort(key=lambda item: item.priority, reverse=True)
+        self._logger(f"strategy registered: {strategy.name} (priority={strategy.priority})")
+
+    def clear_strategies(self) -> None:
+        self._strategies.clear()
+
+    def get_strategies(self) -> Tuple[MoveStrategy, ...]:
+        return tuple(self._strategies)
+
+    def set_selection_policy(
+        self,
+        policy: Optional[Callable[..., Optional[StrategyResult]]],
+    ) -> None:
+        if policy is None:
+            self._selection_policy = self._default_selection_policy
+            self._uses_default_policy = True
+        else:
+            self._selection_policy = policy
+            self._uses_default_policy = False
+        self._logger("strategy selection policy updated")
+
+    def select_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        """Evaluate registered strategies and choose a result using the selection policy."""
+
+        strategy_results: List[Tuple[MoveStrategy, StrategyResult]] = []
+        for strategy in self._strategies:
+            if not strategy.is_applicable(context):
+                self._logger(f"strategy skipped (not applicable): {strategy.name}")
+                continue
+
+            self._logger(f"strategy evaluating: {strategy.name}")
+            try:
+                result = strategy.generate_move(board, context)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._logger(f"strategy error in {strategy.name}: {exc}")
+                continue
+
+            if result is None:
+                self._logger(f"strategy produced no result: {strategy.name}")
+                continue
+
+            strategy_results.append((strategy, result))
+            if result.move and self._uses_default_policy:
+                break
+
+        if not strategy_results:
+            self._logger("no strategies produced a move suggestion")
+
+        return self._selection_policy(strategy_results, board=board, context=context)
+
+    @staticmethod
+    def _default_selection_policy(
+        strategy_results: List[Tuple[MoveStrategy, StrategyResult]],
+        **_: Any,
+    ) -> Optional[StrategyResult]:
+        for _, result in strategy_results:
+            if result.move:
+                return result
+        return None
+
+
+class OpeningBookStrategy(MoveStrategy):
+    def __init__(self, opening_book: Optional[Dict[str, str]] = None, max_fullmove: int = 12, **kwargs):
+        super().__init__(priority=90, **kwargs)
+        self.opening_book = opening_book or {}
+        self.max_fullmove = max_fullmove
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.fullmove_number <= self.max_fullmove and bool(self.opening_book)
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        move = self.opening_book.get(board.fen())
+        if not move:
+            return None
+        return StrategyResult(
+            move=move,
+            strategy_name=self.name,
+            confidence=self.confidence or 1.0,
+            metadata={"source": "opening_book"},
+        )
+
+
+class EndgameTableStrategy(MoveStrategy):
+    def __init__(self, table: Optional[Dict[str, str]] = None, piece_threshold: int = 6, **kwargs):
+        super().__init__(priority=80, **kwargs)
+        self.table = table or {}
+        self.piece_threshold = piece_threshold
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.piece_count <= self.piece_threshold
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        move = self.table.get(board.fen())
+        if not move:
+            return None
+        return StrategyResult(
+            move=move,
+            strategy_name=self.name,
+            confidence=self.confidence,
+            metadata={"source": "endgame_table"},
+        )
+
+
+class HeuristicSearchStrategy(MoveStrategy):
+    def __init__(self, fallback: Optional[MoveStrategy] = None, **kwargs):
+        super().__init__(priority=70, **kwargs)
+        self._fallback = fallback
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return True
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        if not self._fallback:
+            return None
+
+        fallback_result = self._fallback.generate_move(board, context)
+        if not fallback_result:
+            return None
+
+        metadata = dict(fallback_result.metadata)
+        metadata.setdefault("delegated_to", self._fallback.name)
+        return StrategyResult(
+            move=fallback_result.move,
+            strategy_name=self.name,
+            score=fallback_result.score,
+            confidence=self.confidence or fallback_result.confidence,
+            metadata=metadata,
+        )
+
+
+class FallbackRandomStrategy(MoveStrategy):
+    def __init__(self, random_move_provider: Callable[[chess.Board], Optional[str]], **kwargs):
+        super().__init__(priority=0, **kwargs)
+        self._random_move_provider = random_move_provider
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.legal_moves_count > 0
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        move = self._random_move_provider(board)
+        if not move:
+            return None
+        return StrategyResult(
+            move=move,
+            strategy_name=self.name,
+            confidence=self.confidence,
+            metadata={"source": "random_fallback"},
+        )
 
 
 class ChessEngine:
@@ -30,6 +258,10 @@ class ChessEngine:
         # Lock to manage concurrent access to engine state
         self.state_lock = threading.Lock()
 
+        # Strategy management
+        self.strategy_selector = StrategySelector(logger=self._log_debug)
+        self._register_default_strategies()
+
         # Dispatch table mapping commands to handler methods
         self.dispatch_table = {
             'quit': self.handle_quit,
@@ -41,6 +273,81 @@ class ChessEngine:
             'ucinewgame': self.handle_ucinewgame,
             'uci': self.handle_uci
         }
+
+    def _log_debug(self, message: str) -> None:
+        if self.debug:
+            print(f"info string {message}")
+
+    def _register_default_strategies(self) -> None:
+        opening_strategy = OpeningBookStrategy(
+            opening_book=self._create_default_opening_book(),
+            name="OpeningBookStrategy",
+        )
+        endgame_strategy = EndgameTableStrategy(name="EndgameTableStrategy")
+        fallback_strategy = FallbackRandomStrategy(self.random_move, name="FallbackRandomStrategy")
+        heuristic_strategy = HeuristicSearchStrategy(
+            fallback=fallback_strategy,
+            name="HeuristicSearchStrategy",
+        )
+
+        for strategy in (opening_strategy, endgame_strategy, heuristic_strategy, fallback_strategy):
+            self.strategy_selector.register_strategy(strategy)
+
+    def _create_default_opening_book(self) -> Dict[str, str]:
+        start_board = chess.Board()
+        return {
+            start_board.fen(): "e2e4",
+        }
+
+    def create_strategy_context(self, board: chess.Board) -> StrategyContext:
+        piece_map = board.piece_map()
+        piece_count = len(piece_map)
+        material_imbalance = self.compute_material_imbalance(board)
+        repetition_info = {
+            "is_threefold_repetition": board.is_repetition(),
+            "can_claim_threefold": board.can_claim_threefold_repetition(),
+            "is_fivefold_repetition": board.is_fivefold_repetition(),
+        }
+        legal_moves_count = self.get_legal_moves_count(board)
+
+        return StrategyContext(
+            fullmove_number=board.fullmove_number,
+            halfmove_clock=board.halfmove_clock,
+            piece_count=piece_count,
+            material_imbalance=material_imbalance,
+            turn=board.turn,
+            fen=board.fen(),
+            repetition_info=repetition_info,
+            legal_moves_count=legal_moves_count,
+            time_controls=None,
+        )
+
+    def compute_material_imbalance(self, board: chess.Board) -> int:
+        material_balance = 0
+        for piece in board.piece_map().values():
+            value = PIECE_VALUES.get(piece.piece_type, 0)
+            material_balance += value if piece.color == chess.WHITE else -value
+        return material_balance
+
+    def get_legal_moves_count(self, board: chess.Board) -> int:
+        return board.legal_moves.count()
+
+    def register_strategy(self, strategy: MoveStrategy) -> None:
+        self.strategy_selector.register_strategy(strategy)
+
+    def set_selection_policy(
+        self,
+        policy: Optional[Callable[..., Optional[StrategyResult]]],
+    ) -> None:
+        self.strategy_selector.set_selection_policy(policy)
+
+    def get_strategy_selector(self) -> StrategySelector:
+        return self.strategy_selector
+
+    def get_strategy_context(self) -> StrategyContext:
+        with self.state_lock:
+            board_snapshot = self.board.copy(stack=True)
+        return self.create_strategy_context(board_snapshot)
 
     def start(self):
         self.handle_uci()
@@ -149,22 +456,47 @@ class ChessEngine:
             return None
         selected_move = random.choice(legal_moves)
         return selected_move.uci()
-        
+
     def process_go_command(self):
-        if self.debug:
-            print(f"info string calc start: {self.board.fen()}")
+        try:
+            with self.state_lock:
+                board_snapshot = self.board.copy(stack=True)
+                context = self.create_strategy_context(board_snapshot)
 
-        # Simulate a long move calculation
-        time.sleep(2)
+            if self.debug:
+                self._log_debug(
+                    "context prepared: "
+                    f"fullmove={context.fullmove_number}, "
+                    f"halfmove={context.halfmove_clock}, "
+                    f"pieces={context.piece_count}, "
+                    f"material={context.material_imbalance}"
+                )
 
-        with self.state_lock:
-            move = self.random_move(self.board)
-            if move:
-                print(f"bestmove {move}")
+            # Simulate thinking delay for now
+            time.sleep(2)
+
+            result = self.strategy_selector.select_move(board_snapshot, context) if self.strategy_selector else None
+
+            if result and result.move:
+                print(f"info string strategy {result.strategy_name} selected move {result.move}")
+            elif self.debug:
+                self._log_debug("no strategy produced a move")
+
+            move = result.move if result else None
+
+            with self.state_lock:
+                if move:
+                    print(f"bestmove {move}")
+                else:
+                    print("bestmove (none)")
                 print("readyok")
-            else:
+                self.move_calculating = False
+        except Exception as exc:
+            print(f"info string Error generating move: {exc}")
+            with self.state_lock:
                 print("bestmove (none)")
-            self.move_calculating = False
+                print("readyok")
+                self.move_calculating = False
 
 
 
