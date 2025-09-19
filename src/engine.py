@@ -429,8 +429,16 @@ PIECE_SQUARE_TABLES = {
     ],
 }
 
-# Ensure stdout is line-buffered
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
+def _ensure_line_buffered_stdout() -> None:
+    """Wrap ``sys.stdout`` with line buffering if possible."""
+
+    stdout = sys.stdout
+    if isinstance(stdout, io.TextIOBase) and getattr(stdout, "line_buffering", False):
+        return
+    buffer = getattr(stdout, "buffer", None)
+    if buffer is None:
+        return
+    sys.stdout = io.TextIOWrapper(buffer, line_buffering=True)
 
 
 @dataclass
@@ -2027,6 +2035,7 @@ class ChessEngine:
         return self.create_strategy_context(board_snapshot)
 
     def start(self):
+        _ensure_line_buffered_stdout()
         self.handle_uci()
         self.command_processor()
         
@@ -2205,5 +2214,6 @@ class ChessEngine:
 
 
 
-engine = ChessEngine()
-engine.start()
+if __name__ == "__main__":
+    engine = ChessEngine()
+    engine.start()
