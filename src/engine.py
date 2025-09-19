@@ -499,6 +499,21 @@ class MoveStrategy(ABC):
         """Produce a move suggestion when applicable."""
 
 
+# Toggle individual strategies by flipping these booleans. The engine will
+# always fall back to a random legal move if no strategies produce a result.
+STRATEGY_ENABLE_FLAGS = {
+    "mate_in_one": True,
+    "opening_book": True,
+    "endgame_table": True,
+    "mate_threat_evasion": True,
+    "tactical": True,
+    "repetition_avoidance": True,
+    "mcts": True,
+    "heuristic": True,
+    "fallback_random": True,
+}
+
+
 class StrategySelector:
     """Manages strategy registration and selection for the engine."""
 
@@ -1865,46 +1880,77 @@ class ChessEngine:
             print(f"info string {message}")
 
     def _register_default_strategies(self) -> None:
-        mate_in_one_strategy = MateInOneStrategy(
-            name="MateInOneStrategy",
-            logger=self._log_debug,
-        )
-        opening_strategy = OpeningBookStrategy(
-            opening_book=self._create_default_opening_book(),
-            name="OpeningBookStrategy",
-        )
-        endgame_strategy = EndgameTableStrategy(name="EndgameTableStrategy")
-        threat_evasion_strategy = MateThreatEvasionStrategy(
-            name="MateThreatEvasionStrategy",
-            logger=self._log_debug,
-        )
-        tactical_strategy = TacticalResponseStrategy(
-            name="TacticalResponseStrategy",
-            logger=self._log_debug,
-        )
-        repetition_strategy = RepetitionAvoidanceStrategy(name="RepetitionAvoidanceStrategy")
-        mcts_strategy = MonteCarloTreeSearchStrategy(
-            name="MonteCarloTreeSearchStrategy",
-            logger=self._log_debug,
-        )
-        fallback_strategy = FallbackRandomStrategy(self.random_move, name="FallbackRandomStrategy")
-        heuristic_strategy = HeuristicSearchStrategy(
-            fallback=fallback_strategy,
-            name="HeuristicSearchStrategy",
-            search_depth=3,
-        )
+        strategies_to_register: List[MoveStrategy] = []
 
-        for strategy in (
-            mate_in_one_strategy,
-            opening_strategy,
-            endgame_strategy,
-            threat_evasion_strategy,
-            tactical_strategy,
-            repetition_strategy,
-            mcts_strategy,
-            heuristic_strategy,
-            fallback_strategy,
-        ):
+        if STRATEGY_ENABLE_FLAGS.get("mate_in_one", True):
+            strategies_to_register.append(
+                MateInOneStrategy(
+                    name="MateInOneStrategy",
+                    logger=self._log_debug,
+                )
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("opening_book", True):
+            strategies_to_register.append(
+                OpeningBookStrategy(
+                    opening_book=self._create_default_opening_book(),
+                    name="OpeningBookStrategy",
+                )
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("endgame_table", True):
+            strategies_to_register.append(
+                EndgameTableStrategy(name="EndgameTableStrategy")
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("mate_threat_evasion", True):
+            strategies_to_register.append(
+                MateThreatEvasionStrategy(
+                    name="MateThreatEvasionStrategy",
+                    logger=self._log_debug,
+                )
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("tactical", True):
+            strategies_to_register.append(
+                TacticalResponseStrategy(
+                    name="TacticalResponseStrategy",
+                    logger=self._log_debug,
+                )
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("repetition_avoidance", True):
+            strategies_to_register.append(
+                RepetitionAvoidanceStrategy(name="RepetitionAvoidanceStrategy")
+            )
+
+        fallback_strategy: Optional[MoveStrategy] = None
+        if STRATEGY_ENABLE_FLAGS.get("fallback_random", True):
+            fallback_strategy = FallbackRandomStrategy(
+                self.random_move, name="FallbackRandomStrategy"
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("mcts", True):
+            strategies_to_register.append(
+                MonteCarloTreeSearchStrategy(
+                    name="MonteCarloTreeSearchStrategy",
+                    logger=self._log_debug,
+                )
+            )
+
+        if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
+            strategies_to_register.append(
+                HeuristicSearchStrategy(
+                    fallback=fallback_strategy,
+                    name="HeuristicSearchStrategy",
+                    search_depth=3,
+                )
+            )
+
+        if fallback_strategy is not None:
+            strategies_to_register.append(fallback_strategy)
+
+        for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
 
     def _create_default_opening_book(self) -> Dict[str, str]:
@@ -2127,12 +2173,21 @@ class ChessEngine:
 
             result = self.strategy_selector.select_move(board_snapshot, context) if self.strategy_selector else None
 
+            move = None
             if result and result.move:
-                print(f"info string strategy {result.strategy_name} selected move {result.move}")
-            elif self.debug:
-                self._log_debug("no strategy produced a move")
-
-            move = result.move if result else None
+                move = result.move
+                print(
+                    f"info string strategy {result.strategy_name} selected move {result.move}"
+                )
+            else:
+                if self.debug:
+                    self._log_debug("no strategy produced a move")
+                move = self.random_move(board_snapshot)
+                if move:
+                    print(
+                        "info string fallback RandomFallback selected move "
+                        f"{move}"
+                    )
 
             with self.state_lock:
                 if move:
