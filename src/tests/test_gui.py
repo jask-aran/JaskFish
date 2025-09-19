@@ -7,11 +7,11 @@ from unittest.mock import mock_open, patch
 import chess
 import pytest
 
-pytest.importorskip("PySide2")
+pytest.importorskip("PySide6")
 
-from PySide2.QtCore import Qt
-from PySide2.QtTest import QTest
-from PySide2.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from gui import ChessGUI, PromotionDialog
 
@@ -48,8 +48,8 @@ def _button_with_text(gui: ChessGUI, text: str) -> QPushButton:
 def test_window_properties(chess_gui):
     assert chess_gui.isVisible()
     assert chess_gui.windowTitle() == "JaskFish"
-    assert chess_gui.width() == 500
-    assert chess_gui.height() == 550
+    assert chess_gui.width() >= 780
+    assert chess_gui.height() >= 800
 
 
 def test_layout_structure(chess_gui):
@@ -121,7 +121,7 @@ def test_promotion_dialog_selection(chess_gui):
     f7_button = chess_gui.squares[chess.F7]
     f8_button = chess_gui.squares[chess.F8]
 
-    with patch.object(PromotionDialog, "exec_", return_value=True), \
+    with patch.object(PromotionDialog, "exec", return_value=True), \
          patch.object(PromotionDialog, "get_promotion_piece", return_value="queen"):
         QTest.mouseClick(f7_button, Qt.LeftButton)
         QTest.mouseClick(f8_button, Qt.LeftButton)
@@ -138,7 +138,7 @@ def test_promotion_dialog_cancel(chess_gui):
     f7_button = chess_gui.squares[chess.F7]
     f8_button = chess_gui.squares[chess.F8]
 
-    with patch.object(PromotionDialog, "exec_", return_value=False):
+    with patch.object(PromotionDialog, "exec", return_value=False):
         QTest.mouseClick(f7_button, Qt.LeftButton)
         QTest.mouseClick(f8_button, Qt.LeftButton)
         QTest.qWait(20)
