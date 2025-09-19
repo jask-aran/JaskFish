@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QProcess
 
 from gui import ChessGUI
-from utils import cleanup, sending_text, recieved_text, info_text
+from utils import cleanup, sending_text, recieved_text, info_text, debug_text
 
 
 def parse_args():
@@ -97,9 +97,20 @@ def main():
     engine_process.start(sys.executable, [engine_path])
 
     # Enable debug mode
-    send_command(engine_process, "debug on") if dev else None
+    if dev:
+        send_command(engine_process, "debug on")
 
-    app.aboutToQuit.connect(lambda: cleanup(engine_process, None, app, dev=dev))
+    def shutdown():
+        if engine_process.state() != QProcess.NotRunning:
+            try:
+                send_command(engine_process, "quit")
+                engine_process.closeWriteChannel()
+            except Exception as exc:
+                if dev:
+                    print(debug_text(f"Failed to send quit command: {exc}"))
+        cleanup(engine_process, None, app, dev=dev, quit_app=False)
+
+    app.aboutToQuit.connect(shutdown)
 
     gui.show()
     sys.exit(app.exec())

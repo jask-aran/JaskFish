@@ -1,4 +1,6 @@
+from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication
+
 def color_text(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"
 
@@ -14,20 +16,25 @@ def sending_text(text):
 def recieved_text(text):
     return f"{color_text('RECIEVED ', '35')} {text}"
 
-def cleanup(process, thread, app, dev=False):
+def cleanup(process, thread, app, dev=False, quit_app=True):
     if dev:
         print(debug_text("Cleaning up resources..."))
-    
-    # Safely terminate the process
-    if process is not None:
-        process.terminate()  # Send termination signal
-        process.waitForFinished()  # Wait for the process to exit
 
-    # Only join the thread if it exists
+    if process is not None:
+        if process.state() != QProcess.NotRunning:
+            process.terminate()
+            if not process.waitForFinished(2000):
+                if dev:
+                    print(debug_text("Engine process unresponsive; forcing termination"))
+                process.kill()
+                process.waitForFinished(1000)
+        process.close()
+
     if thread is not None:
-        thread.join()
-    
-    app.quit()
+        thread.join(timeout=1)
+
+    if quit_app and app is not None:
+        app.quit()
 
 def get_piece_unicode(piece):
     piece_unicode = {
