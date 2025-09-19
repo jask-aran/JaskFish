@@ -591,6 +591,86 @@ class EndgameTableStrategy(MoveStrategy):
         )
 
 
+class TacticalResponseStrategy(MoveStrategy):
+    def __init__(
+        self,
+        min_tactical_score: float = 150.0,
+        check_bonus: float = 150.0,
+        promotion_bonus: float = 250.0,
+        capture_weight: float = 1.0,
+        logger: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ):
+        super().__init__(priority=75, **kwargs)
+        self.min_tactical_score = min_tactical_score
+        self.check_bonus = check_bonus
+        self.promotion_bonus = promotion_bonus
+        self.capture_weight = capture_weight
+        self._logger = logger or (lambda *_: None)
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.legal_moves_count > 0
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        mover = board.turn
+        best_move: Optional[chess.Move] = None
+        best_score = -float("inf")
+
+        for move in board.legal_moves:
+            score = 0.0
+            if board.gives_check(move):
+                score += self.check_bonus
+            if move.promotion:
+                score += self.promotion_bonus
+                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
+
+            material_delta = 0.0
+            if board.is_capture(move) or move.promotion:
+                material_delta = self._material_delta(board, move, mover)
+            if material_delta:
+                score += material_delta * self.capture_weight
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+        if best_move and best_score >= self.min_tactical_score:
+            uci_move = best_move.uci()
+            self._logger(
+                f"tactical strategy chose {uci_move} (score={best_score:.1f})"
+            )
+            return StrategyResult(
+                move=uci_move,
+                strategy_name=self.name,
+                score=best_score,
+                confidence=self.confidence or 0.9,
+                metadata={
+                    "pattern": "forcing",
+                    "tactical_score": best_score,
+                },
+            )
+
+        return None
+
+    def _material_delta(self, board: chess.Board, move: chess.Move, perspective: bool) -> float:
+        before = self._material_balance(board, perspective)
+        board.push(move)
+        after = self._material_balance(board, perspective)
+        board.pop()
+        return after - before
+
+    @staticmethod
+    def _material_balance(board: chess.Board, perspective: bool) -> float:
+        balance = 0.0
+        for piece in board.piece_map().values():
+            value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
+            if piece.color == chess.WHITE:
+                balance += value
+            else:
+                balance -= value
+        return balance if perspective == chess.WHITE else -balance
+
+
 class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
@@ -826,6 +906,10 @@ class ChessEngine:
             name="OpeningBookStrategy",
         )
         endgame_strategy = EndgameTableStrategy(name="EndgameTableStrategy")
+        tactical_strategy = TacticalResponseStrategy(
+            name="TacticalResponseStrategy",
+            logger=self._log_debug,
+        )
         fallback_strategy = FallbackRandomStrategy(self.random_move, name="FallbackRandomStrategy")
         heuristic_strategy = HeuristicSearchStrategy(
             fallback=fallback_strategy,
@@ -833,7 +917,13 @@ class ChessEngine:
             search_depth=3,
         )
 
-        for strategy in (opening_strategy, endgame_strategy, heuristic_strategy, fallback_strategy):
+        for strategy in (
+            opening_strategy,
+            endgame_strategy,
+            tactical_strategy,
+            heuristic_strategy,
+            fallback_strategy,
+        ):
             self.strategy_selector.register_strategy(strategy)
 
     def _create_default_opening_book(self) -> Dict[str, str]:
