@@ -445,6 +445,8 @@ class StrategyContext:
     repetition_info: Dict[str, bool] = field(default_factory=dict)
     legal_moves_count: int = 0
     time_controls: Optional[Dict[str, int]] = None
+    in_check: bool = False
+    opponent_mate_in_one_threat: bool = False
 
 
 @dataclass
@@ -475,10 +477,17 @@ class TranspositionEntry:
 class MoveStrategy(ABC):
     """Base class for all move selection strategies."""
 
-    def __init__(self, name: Optional[str] = None, priority: int = 0, confidence: Optional[float] = None):
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        priority: int = 0,
+        confidence: Optional[float] = None,
+        short_circuit: bool = True,
+    ):
         self.name = name or self.__class__.__name__
         self.priority = priority
         self.confidence = confidence
+        self.short_circuit = short_circuit
 
     @abstractmethod
     def is_applicable(self, context: StrategyContext) -> bool:
@@ -552,8 +561,13 @@ class StrategySelector:
                 continue
 
             strategy_results.append((strategy, result))
-            if result.move and self._uses_default_policy:
-                break
+            if result.move:
+                if strategy.short_circuit:
+                    if self._uses_default_policy:
+                        return result
+                    break
+                if self._uses_default_policy:
+                    return result
 
         if not strategy_results:
             self._logger("no strategies produced a move suggestion")
@@ -569,6 +583,26 @@ class StrategySelector:
             if result.move:
                 return result
         return None
+
+    @staticmethod
+    def priority_score_selection_policy(
+        strategy_results: List[Tuple[MoveStrategy, StrategyResult]],
+        **_: Any,
+    ) -> Optional[StrategyResult]:
+        """Pick the result with the highest (priority, score, confidence) tuple."""
+
+        best_result: Optional[StrategyResult] = None
+        best_key: Optional[Tuple[float, float, float]] = None
+        for strategy, result in strategy_results:
+            if not result.move:
+                continue
+            score = float(result.score) if result.score is not None else 0.0
+            confidence = float(result.confidence) if result.confidence is not None else 0.0
+            key = (float(strategy.priority), score, confidence)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_result = result
+        return best_result
 
 
 class OpeningBookStrategy(MoveStrategy):
@@ -587,6 +621,7 @@ class OpeningBookStrategy(MoveStrategy):
         return StrategyResult(
             move=move,
             strategy_name=self.name,
+            score=100000.0,
             confidence=self.confidence or 1.0,
             metadata={"source": "opening_book"},
         )
@@ -608,9 +643,195 @@ class EndgameTableStrategy(MoveStrategy):
         return StrategyResult(
             move=move,
             strategy_name=self.name,
+            score=75000.0,
             confidence=self.confidence,
             metadata={"source": "endgame_table"},
         )
+
+
+class MateInOneStrategy(MoveStrategy):
+    def __init__(
+        self,
+        mate_score: float = 500000.0,
+        logger: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ):
+        super().__init__(priority=100, short_circuit=True, **kwargs)
+        self.mate_score = mate_score
+        self._logger = logger or (lambda *_: None)
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.legal_moves_count > 0
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        for move in board.legal_moves:
+            board.push(move)
+            is_mate = board.is_checkmate()
+            board.pop()
+            if is_mate:
+                uci_move = move.uci()
+                self._logger(f"mate-in-one strategy chose {uci_move}")
+                return StrategyResult(
+                    move=uci_move,
+                    strategy_name=self.name,
+                    score=self.mate_score,
+                    confidence=self.confidence or 1.0,
+                    metadata={"pattern": "mate_in_one"},
+                )
+        return None
+
+
+class MateThreatEvasionStrategy(MoveStrategy):
+    def __init__(
+        self,
+        safe_move_bonus: float = 250.0,
+        capture_bonus: float = 50.0,
+        promotion_bonus: float = 200.0,
+        logger: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ):
+        super().__init__(priority=85, short_circuit=True, **kwargs)
+        self.safe_move_bonus = safe_move_bonus
+        self.capture_bonus = capture_bonus
+        self.promotion_bonus = promotion_bonus
+        self._logger = logger or (lambda *_: None)
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.legal_moves_count > 0 and (
+            context.in_check or context.opponent_mate_in_one_threat
+        )
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        best_move: Optional[chess.Move] = None
+        best_score = -float("inf")
+
+        for move in board.legal_moves:
+            capture_value = self._capture_value(board, move)
+            gives_check = board.gives_check(move)
+            board.push(move)
+            allows_mate = self._opponent_has_mate_in_one(board)
+            board.pop()
+
+            if allows_mate:
+                continue
+
+            score = self.safe_move_bonus + capture_value * self.capture_bonus
+            if move.promotion:
+                score += self.promotion_bonus
+                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
+            if gives_check:
+                score += self.capture_bonus
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+        if best_move is None:
+            return None
+
+        uci_move = best_move.uci()
+        self._logger(f"mate-threat evasion chose {uci_move} (score={best_score:.1f})")
+        return StrategyResult(
+            move=uci_move,
+            strategy_name=self.name,
+            score=best_score,
+            confidence=self.confidence or 0.95,
+            metadata={"pattern": "mate_threat_evasion"},
+        )
+
+    def _capture_value(self, board: chess.Board, move: chess.Move) -> float:
+        if not board.is_capture(move):
+            return 0.0
+        if board.is_en_passant(move):
+            return float(EVAL_PIECE_VALUES[chess.PAWN]) / 100.0
+        captured = board.piece_at(move.to_square)
+        if not captured:
+            return 0.0
+        return float(EVAL_PIECE_VALUES.get(captured.piece_type, 0)) / 100.0
+
+    @staticmethod
+    def _opponent_has_mate_in_one(board: chess.Board) -> bool:
+        for reply in board.legal_moves:
+            board.push(reply)
+            is_mate = board.is_checkmate()
+            board.pop()
+            if is_mate:
+                return True
+        return False
+
+
+class RepetitionAvoidanceStrategy(MoveStrategy):
+    def __init__(
+        self,
+        avoid_draw_bonus: float = 150.0,
+        capture_bonus: float = 25.0,
+        check_bonus: float = 40.0,
+        **kwargs,
+    ):
+        super().__init__(priority=72, short_circuit=False, **kwargs)
+        self.avoid_draw_bonus = avoid_draw_bonus
+        self.capture_bonus = capture_bonus
+        self.check_bonus = check_bonus
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        if context.legal_moves_count <= 0:
+            return False
+        repetition_flags = context.repetition_info or {}
+        return repetition_flags.get("can_claim_threefold", False) and context.material_imbalance >= 0
+
+    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+        best_move: Optional[chess.Move] = None
+        best_score = -float("inf")
+        original_fen = board.board_fen()
+
+        for move in board.legal_moves:
+            score = 0.0
+            capture_value = 0.0
+            if board.is_capture(move):
+                capture_value = self._capture_value(board, move)
+                score += capture_value * self.capture_bonus
+            if board.gives_check(move):
+                score += self.check_bonus
+            if move.promotion:
+                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
+
+            board.push(move)
+            avoids_repetition = not (
+                board.can_claim_threefold_repetition() or board.is_repetition()
+            )
+            board.pop()
+
+            if not avoids_repetition:
+                continue
+
+            score += self.avoid_draw_bonus
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+        if best_move is None:
+            return None
+
+        return StrategyResult(
+            move=best_move.uci(),
+            strategy_name=self.name,
+            score=best_score,
+            confidence=self.confidence or 0.7,
+            metadata={
+                "pattern": "avoid_threefold",
+                "board_before": original_fen,
+            },
+        )
+
+    @staticmethod
+    def _capture_value(board: chess.Board, move: chess.Move) -> float:
+        if board.is_en_passant(move):
+            return float(EVAL_PIECE_VALUES[chess.PAWN]) / 100.0
+        captured_piece = board.piece_at(move.to_square)
+        if not captured_piece:
+            return 0.0
+        return float(EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0)) / 100.0
 
 
 class TacticalResponseStrategy(MoveStrategy):
@@ -1321,7 +1542,10 @@ class ChessEngine:
         self.state_lock = threading.Lock()
 
         # Strategy management
-        self.strategy_selector = StrategySelector(logger=self._log_debug)
+        self.strategy_selector = StrategySelector(
+            logger=self._log_debug,
+            selection_policy=StrategySelector.priority_score_selection_policy,
+        )
         self._register_default_strategies()
 
         # Dispatch table mapping commands to handler methods
@@ -1341,15 +1565,24 @@ class ChessEngine:
             print(f"info string {message}")
 
     def _register_default_strategies(self) -> None:
+        mate_in_one_strategy = MateInOneStrategy(
+            name="MateInOneStrategy",
+            logger=self._log_debug,
+        )
         opening_strategy = OpeningBookStrategy(
             opening_book=self._create_default_opening_book(),
             name="OpeningBookStrategy",
         )
         endgame_strategy = EndgameTableStrategy(name="EndgameTableStrategy")
+        threat_evasion_strategy = MateThreatEvasionStrategy(
+            name="MateThreatEvasionStrategy",
+            logger=self._log_debug,
+        )
         tactical_strategy = TacticalResponseStrategy(
             name="TacticalResponseStrategy",
             logger=self._log_debug,
         )
+        repetition_strategy = RepetitionAvoidanceStrategy(name="RepetitionAvoidanceStrategy")
         fallback_strategy = FallbackRandomStrategy(self.random_move, name="FallbackRandomStrategy")
         heuristic_strategy = HeuristicSearchStrategy(
             fallback=fallback_strategy,
@@ -1358,9 +1591,12 @@ class ChessEngine:
         )
 
         for strategy in (
+            mate_in_one_strategy,
             opening_strategy,
             endgame_strategy,
+            threat_evasion_strategy,
             tactical_strategy,
+            repetition_strategy,
             heuristic_strategy,
             fallback_strategy,
         ):
@@ -1384,6 +1620,8 @@ class ChessEngine:
             "is_fivefold_repetition": board.is_fivefold_repetition(),
         }
         legal_moves_count = self.get_legal_moves_count(board)
+        in_check = board.is_check()
+        mate_threat = self.detect_opponent_mate_in_one_threat(board)
 
         return StrategyContext(
             fullmove_number=board.fullmove_number,
@@ -1395,7 +1633,20 @@ class ChessEngine:
             repetition_info=repetition_info,
             legal_moves_count=legal_moves_count,
             time_controls=dict(time_controls) if time_controls else None,
+            in_check=in_check,
+            opponent_mate_in_one_threat=mate_threat,
         )
+
+    def detect_opponent_mate_in_one_threat(self, board: chess.Board) -> bool:
+        board_copy = board.copy()
+        board_copy.turn = not board.turn
+        for move in board_copy.legal_moves:
+            board_copy.push(move)
+            is_mate = board_copy.is_checkmate()
+            board_copy.pop()
+            if is_mate:
+                return True
+        return False
 
     def compute_material_imbalance(self, board: chess.Board) -> int:
         material_balance = 0
