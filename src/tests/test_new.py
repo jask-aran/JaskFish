@@ -8,6 +8,8 @@ import time
 import chess
 from unittest.mock import MagicMock, patch
 
+pytest.importorskip("PySide2")
+
 from PySide2.QtWidgets import QApplication, QPushButton, QLabel, QDialog, QMessageBox
 from PySide2.QtCore import Qt
 from PySide2.QtTest import QTest
