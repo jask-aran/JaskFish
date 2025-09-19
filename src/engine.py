@@ -429,6 +429,7 @@ PIECE_SQUARE_TABLES = {
     ],
 }
 
+
 def _ensure_line_buffered_stdout() -> None:
     """Wrap ``sys.stdout`` with line buffering if possible."""
 
@@ -503,7 +504,9 @@ class MoveStrategy(ABC):
         """Return whether the strategy should be considered in the given context."""
 
     @abstractmethod
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         """Produce a move suggestion when applicable."""
 
 
@@ -544,7 +547,9 @@ class StrategySelector:
 
         self._strategies.append(strategy)
         self._strategies.sort(key=lambda item: item.priority, reverse=True)
-        self._logger(f"strategy registered: {strategy.name} (priority={strategy.priority})")
+        self._logger(
+            f"strategy registered: {strategy.name} (priority={strategy.priority})"
+        )
 
     def clear_strategies(self) -> None:
         self._strategies.clear()
@@ -564,7 +569,9 @@ class StrategySelector:
             self._uses_default_policy = False
         self._logger("strategy selection policy updated")
 
-    def select_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def select_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         """Evaluate registered strategies and choose a result using the selection policy."""
 
         strategy_results: List[Tuple[MoveStrategy, StrategyResult]] = []
@@ -621,7 +628,9 @@ class StrategySelector:
             if not result.move:
                 continue
             score = float(result.score) if result.score is not None else 0.0
-            confidence = float(result.confidence) if result.confidence is not None else 0.0
+            confidence = (
+                float(result.confidence) if result.confidence is not None else 0.0
+            )
             key = (float(strategy.priority), score, confidence)
             if best_key is None or key > best_key:
                 best_key = key
@@ -630,7 +639,12 @@ class StrategySelector:
 
 
 class OpeningBookStrategy(MoveStrategy):
-    def __init__(self, opening_book: Optional[Dict[str, str]] = None, max_fullmove: int = 12, **kwargs):
+    def __init__(
+        self,
+        opening_book: Optional[Dict[str, str]] = None,
+        max_fullmove: int = 12,
+        **kwargs,
+    ):
         super().__init__(priority=90, **kwargs)
         self.opening_book = opening_book or {}
         self.max_fullmove = max_fullmove
@@ -638,7 +652,9 @@ class OpeningBookStrategy(MoveStrategy):
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.fullmove_number <= self.max_fullmove and bool(self.opening_book)
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         move = self.opening_book.get(board.fen())
         if not move:
             return None
@@ -652,7 +668,9 @@ class OpeningBookStrategy(MoveStrategy):
 
 
 class EndgameTableStrategy(MoveStrategy):
-    def __init__(self, table: Optional[Dict[str, str]] = None, piece_threshold: int = 6, **kwargs):
+    def __init__(
+        self, table: Optional[Dict[str, str]] = None, piece_threshold: int = 6, **kwargs
+    ):
         super().__init__(priority=80, **kwargs)
         self.table = table or {}
         self.piece_threshold = piece_threshold
@@ -660,7 +678,9 @@ class EndgameTableStrategy(MoveStrategy):
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.piece_count <= self.piece_threshold
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         move = self.table.get(board.fen())
         if not move:
             return None
@@ -687,7 +707,9 @@ class MateInOneStrategy(MoveStrategy):
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         for move in board.legal_moves:
             board.push(move)
             is_mate = board.is_checkmate()
@@ -725,7 +747,9 @@ class MateThreatEvasionStrategy(MoveStrategy):
             context.in_check or context.opponent_mate_in_one_threat
         )
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
 
@@ -801,9 +825,14 @@ class RepetitionAvoidanceStrategy(MoveStrategy):
         if context.legal_moves_count <= 0:
             return False
         repetition_flags = context.repetition_info or {}
-        return repetition_flags.get("can_claim_threefold", False) and context.material_imbalance >= 0
+        return (
+            repetition_flags.get("can_claim_threefold", False)
+            and context.material_imbalance >= 0
+        )
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
         original_fen = board.board_fen()
@@ -878,7 +907,9 @@ class TacticalResponseStrategy(MoveStrategy):
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         mover = board.turn
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
@@ -903,9 +934,7 @@ class TacticalResponseStrategy(MoveStrategy):
 
         if best_move and best_score >= self.min_tactical_score:
             uci_move = best_move.uci()
-            self._logger(
-                f"tactical strategy chose {uci_move} (score={best_score:.1f})"
-            )
+            self._logger(f"tactical strategy chose {uci_move} (score={best_score:.1f})")
             return StrategyResult(
                 move=uci_move,
                 strategy_name=self.name,
@@ -919,7 +948,9 @@ class TacticalResponseStrategy(MoveStrategy):
 
         return None
 
-    def _material_delta(self, board: chess.Board, move: chess.Move, perspective: bool) -> float:
+    def _material_delta(
+        self, board: chess.Board, move: chess.Move, perspective: bool
+    ) -> float:
         before = self._material_balance(board, perspective)
         board.push(move)
         after = self._material_balance(board, perspective)
@@ -1061,7 +1092,11 @@ class MonteCarloTreeSearchStrategy(MoveStrategy):
 
         while rollouts < rollout_limit:
             current_time = time.time()
-            if deadline is not None and current_time >= deadline and rollouts >= self.min_rollouts:
+            if (
+                deadline is not None
+                and current_time >= deadline
+                and rollouts >= self.min_rollouts
+            ):
                 break
 
             node = root
@@ -1079,7 +1114,11 @@ class MonteCarloTreeSearchStrategy(MoveStrategy):
             node.backpropagate(value, root_player)
             rollouts += 1
 
-            if deadline is not None and time.time() >= deadline and rollouts >= self.min_rollouts:
+            if (
+                deadline is not None
+                and time.time() >= deadline
+                and rollouts >= self.min_rollouts
+            ):
                 break
 
         elapsed = time.time() - start_time
@@ -1198,9 +1237,7 @@ class MonteCarloTreeSearchStrategy(MoveStrategy):
         if not captured_piece:
             return 0.0
         mover = board.piece_at(move.from_square)
-        mover_value = (
-            EVAL_PIECE_VALUES.get(mover.piece_type, 0) if mover else 0
-        )
+        mover_value = EVAL_PIECE_VALUES.get(mover.piece_type, 0) if mover else 0
         return (
             float(EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0) - mover_value)
             / 100.0
@@ -1212,7 +1249,11 @@ class MonteCarloTreeSearchStrategy(MoveStrategy):
             if winner == root_player:
                 return 1.0
             return -1.0
-        if board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw():
+        if (
+            board.is_stalemate()
+            or board.is_insufficient_material()
+            or board.can_claim_draw()
+        ):
             return 0.0
 
         material_score = 0.0
@@ -1222,8 +1263,14 @@ class MonteCarloTreeSearchStrategy(MoveStrategy):
             material_score += value if piece.color == chess.WHITE else -value
             table = PIECE_SQUARE_TABLES.get(piece.piece_type)
             if table:
-                index = square if piece.color == chess.WHITE else chess.square_mirror(square)
-                pst_score += table[index] if piece.color == chess.WHITE else -table[index]
+                index = (
+                    square
+                    if piece.color == chess.WHITE
+                    else chess.square_mirror(square)
+                )
+                pst_score += (
+                    table[index] if piece.color == chess.WHITE else -table[index]
+                )
 
         mobility_score = board.legal_moves.count()
         board.push(chess.Move.null())
@@ -1315,7 +1362,9 @@ class HeuristicSearchStrategy(MoveStrategy):
             else self._search_start_time + max(time_budget, self.min_time_limit)
         )
         self._nodes_visited = 0
-        self._killer_moves = [list() for _ in range(depth_limit + self.quiescence_depth + 4)]
+        self._killer_moves = [
+            list() for _ in range(depth_limit + self.quiescence_depth + 4)
+        ]
 
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
@@ -1440,7 +1489,11 @@ class HeuristicSearchStrategy(MoveStrategy):
 
         if board.is_checkmate():
             return -float(self._mate_score) + ply
-        if board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw():
+        if (
+            board.is_stalemate()
+            or board.is_insufficient_material()
+            or board.can_claim_draw()
+        ):
             return 0.0
 
         if depth == 0:
@@ -1552,7 +1605,8 @@ class HeuristicSearchStrategy(MoveStrategy):
             if board.is_capture(move) or move.promotion or board.gives_check(move):
                 captures.append(move)
         captures.sort(
-            key=lambda mv: self._capture_score(board, mv) + (500 if board.gives_check(mv) else 0),
+            key=lambda mv: self._capture_score(board, mv)
+            + (500 if board.gives_check(mv) else 0),
             reverse=True,
         )
         return captures
@@ -1562,9 +1616,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         if captured_piece is None and board.is_en_passant(move):
             captured_piece = chess.Piece(chess.PAWN, not board.turn)
         captured_value = (
-            EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0)
-            if captured_piece
-            else 0
+            EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0) if captured_piece else 0
         )
         moving_piece = board.piece_at(move.from_square)
         moving_value = (
@@ -1661,7 +1713,9 @@ class HeuristicSearchStrategy(MoveStrategy):
             color = piece.color
             material[color] += value
             if table:
-                pst_index = square if color == chess.WHITE else chess.square_mirror(square)
+                pst_index = (
+                    square if color == chess.WHITE else chess.square_mirror(square)
+                )
                 piece_square[color] += table[pst_index]
             if piece.piece_type == chess.PAWN:
                 pawn_files[color][chess.square_file(square)] += 1
@@ -1706,7 +1760,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         board.push(chess.Move.null())
         opponent_mobility = board.legal_moves.count()
         board.pop()
-        return (current_mobility - opponent_mobility)
+        return current_mobility - opponent_mobility
 
     def _king_safety_score(self, board: chess.Board) -> float:
         score = 0.0
@@ -1810,7 +1864,9 @@ class HeuristicSearchStrategy(MoveStrategy):
             chess.ROOK: 4,
             chess.QUEEN: 2,
         }
-        max_phase = sum(phase_values[piece] * initial_counts[piece] for piece in phase_values)
+        max_phase = sum(
+            phase_values[piece] * initial_counts[piece] for piece in phase_values
+        )
         current_phase = 0
         for piece_type, value in phase_values.items():
             count = len(board.pieces(piece_type, chess.WHITE)) + len(
@@ -1824,14 +1880,18 @@ class HeuristicSearchStrategy(MoveStrategy):
 
 
 class FallbackRandomStrategy(MoveStrategy):
-    def __init__(self, random_move_provider: Callable[[chess.Board], Optional[str]], **kwargs):
+    def __init__(
+        self, random_move_provider: Callable[[chess.Board], Optional[str]], **kwargs
+    ):
         super().__init__(priority=0, **kwargs)
         self._random_move_provider = random_move_provider
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
 
-    def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
         move = self._random_move_provider(board)
         if not move:
             return None
@@ -1852,8 +1912,8 @@ class ChessEngine:
     def __init__(self):
         """Initialize the chess engine with default settings and state."""
         # Engine identification
-        self.engine_name = 'JaskFish'
-        self.engine_author = 'Jaskaran Singh'
+        self.engine_name = "JaskFish"
+        self.engine_author = "Jaskaran Singh"
 
         # Engine state
         self.board = chess.Board()
@@ -1873,14 +1933,14 @@ class ChessEngine:
 
         # Dispatch table mapping commands to handler methods
         self.dispatch_table = {
-            'quit': self.handle_quit,
-            'debug': self.handle_debug,
-            'isready': self.handle_isready,
-            'position': self.handle_position,
-            'boardpos': self.handle_boardpos,
-            'go': self.handle_go,
-            'ucinewgame': self.handle_ucinewgame,
-            'uci': self.handle_uci
+            "quit": self.handle_quit,
+            "debug": self.handle_debug,
+            "isready": self.handle_isready,
+            "position": self.handle_position,
+            "boardpos": self.handle_boardpos,
+            "go": self.handle_go,
+            "ucinewgame": self.handle_ucinewgame,
+            "uci": self.handle_uci,
         }
 
     def _log_debug(self, message: str) -> None:
@@ -2038,11 +2098,11 @@ class ChessEngine:
         _ensure_line_buffered_stdout()
         self.handle_uci()
         self.command_processor()
-        
+
     def handle_uci(self, args=None):
-        print(f'id name {self.engine_name}')
-        print(f'id author {self.engine_author}')
-        print('uciok')
+        print(f"id name {self.engine_name}")
+        print(f"id author {self.engine_author}")
+        print("uciok")
 
     def command_processor(self):
         """
@@ -2059,24 +2119,23 @@ class ChessEngine:
                     continue  # Ignore empty lines
 
                 # Split the command into parts for dispatching
-                parts = command.split(' ', 1)
+                parts = command.split(" ", 1)
                 cmd = parts[0].lower()
-                args = parts[1] if len(parts) > 1 else ''
+                args = parts[1] if len(parts) > 1 else ""
 
                 # Dispatch the command to the appropriate handler
                 handler = self.dispatch_table.get(cmd, self.handle_unknown)
                 handler(args)
             except Exception as e:
-                print(f'info string Error processing command: {e}')
+                print(f"info string Error processing command: {e}")
             finally:
                 sys.stdout.flush()
-
 
     def handle_unknown(self, args):
         print(f"unknown command received: '{args}'")
 
     def handle_quit(self, args):
-        print('info string Engine shutting down')
+        print("info string Engine shutting down")
         self.running = False
 
     def handle_debug(self, args):
@@ -2116,7 +2175,11 @@ class ChessEngine:
 
     def handle_boardpos(self, args):
         with self.state_lock:
-            print(f"info string Position: {self.board.fen()}" if self.board else "info string Board state not set")
+            print(
+                f"info string Position: {self.board.fen()}"
+                if self.board
+                else "info string Board state not set"
+            )
 
     def _parse_go_args(self, args: str) -> Dict[str, int]:
         tokens = args.split()
@@ -2127,7 +2190,15 @@ class ChessEngine:
         iterator = iter(tokens)
         for token in iterator:
             key = token.lower()
-            if key in {"wtime", "btime", "winc", "binc", "movestogo", "movetime", "depth"}:
+            if key in {
+                "wtime",
+                "btime",
+                "winc",
+                "binc",
+                "movestogo",
+                "movetime",
+                "depth",
+            }:
                 try:
                     value_token = next(iterator)
                     parsed[key] = int(value_token)
@@ -2143,12 +2214,14 @@ class ChessEngine:
         time_controls = self._parse_go_args(args)
         with self.state_lock:
             if self.move_calculating:
-                print('info string Please wait for computer move')
+                print("info string Please wait for computer move")
                 return
             self.move_calculating = True
 
         # Start the move calculation in a separate thread
-        move_thread = threading.Thread(target=self.process_go_command, args=(time_controls,))
+        move_thread = threading.Thread(
+            target=self.process_go_command, args=(time_controls,)
+        )
         move_thread.start()
 
     def handle_ucinewgame(self, args):
@@ -2169,7 +2242,9 @@ class ChessEngine:
         try:
             with self.state_lock:
                 board_snapshot = self.board.copy(stack=True)
-                context = self.create_strategy_context(board_snapshot, time_controls=time_controls)
+                context = self.create_strategy_context(
+                    board_snapshot, time_controls=time_controls
+                )
 
             if self.debug:
                 self._log_debug(
@@ -2180,7 +2255,11 @@ class ChessEngine:
                     f"material={context.material_imbalance}"
                 )
 
-            result = self.strategy_selector.select_move(board_snapshot, context) if self.strategy_selector else None
+            result = (
+                self.strategy_selector.select_move(board_snapshot, context)
+                if self.strategy_selector
+                else None
+            )
 
             move = None
             if result and result.move:
@@ -2194,8 +2273,7 @@ class ChessEngine:
                 move = self.random_move(board_snapshot)
                 if move:
                     print(
-                        "info string fallback RandomFallback selected move "
-                        f"{move}"
+                        "info string fallback RandomFallback selected move " f"{move}"
                     )
 
             with self.state_lock:
@@ -2211,7 +2289,6 @@ class ChessEngine:
                 print("bestmove (none)")
                 print("readyok")
                 self.move_calculating = False
-
 
 
 if __name__ == "__main__":

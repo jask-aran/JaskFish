@@ -135,22 +135,20 @@ class ChessGUI(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow { background-color: #1c1f24; }
-            QLabel#turnIndicator { font-size: 22px; font-weight: 600; letter-spacing: 0.8px; }
-            QLabel#infoIndicator { color: #b0b7c3; font-size: 13px; }
+            QLabel#turnIndicator { font-size: 18px; font-weight: 600; }
+            QLabel#infoIndicator { color: #b0b7c3; font-size: 12px; }
             QWidget#boardContainer {
                 background-color: #171a1f;
-                border-radius: 16px;
-                padding: 18px;
+                border-radius: 12px;
+                padding: 6px;                                 /* was 18px */
             }
             QPushButton[panel="control"] {
                 background-color: #2d333c;
                 color: #f5f7fb;
                 border: 1px solid #3a414d;
                 border-radius: 8px;
-                padding: 8px 16px;
+                padding: 6px 10px;                            /* was 8px 16px */
             }
-            QPushButton[panel="control"]:hover { background-color: #363d48; }
-            QPushButton[panel="control"]:pressed { background-color: #2b313a; }
             """
         )
 
@@ -159,7 +157,7 @@ class ChessGUI(QMainWindow):
         button.setFont(self.control_button_font)
         button.setCursor(Qt.PointingHandCursor)
         button.setFocusPolicy(Qt.NoFocus)
-        button.setMinimumWidth(96)
+        button.setMinimumWidth(72)
         button.style().unpolish(button)
         button.style().polish(button)
         button.update()
@@ -193,21 +191,21 @@ class ChessGUI(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("JaskFish")
-        self.resize(600, 740)
-        self.setMinimumSize(600, 680)
+        self.resize(560, 600)
+        self.setMinimumSize(560, 600)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(24, 24, 24, 24)
-        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
 
         self.turn_indicator = QLabel(
             "White's turn" if self.board.turn == chess.WHITE else "Black's turn"
         )
         self.turn_indicator.setObjectName("turnIndicator")
         self.turn_indicator.setAlignment(Qt.AlignCenter)
-        self.turn_indicator.setFont(QFont("Segoe UI Semibold", 22))
+        self.turn_indicator.setFont(QFont("Segoe UI Semibold", 20))
         main_layout.addWidget(self.turn_indicator)
 
         self.info_indicator = QLabel("Game Started")
@@ -219,9 +217,15 @@ class ChessGUI(QMainWindow):
         board_widget = QWidget()
         board_widget.setObjectName("boardContainer")
         grid_layout = QGridLayout(board_widget)
-        grid_layout.setSpacing(4)
-        grid_layout.setContentsMargins(12, 12, 12, 12)
+        grid_layout.setSpacing(1)
+        grid_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.addWidget(board_widget)
+
+        # Tighten rank/file label columns
+        grid_layout.setColumnStretch(0, 0)
+        grid_layout.setColumnMinimumWidth(0, 18)
+        for col in range(1, 9):
+            grid_layout.setColumnStretch(col, 1)
 
         label_font = QFont("Segoe UI", 11)
         label_font.setBold(True)
@@ -245,7 +249,7 @@ class ChessGUI(QMainWindow):
         for row in range(8):
             for col in range(8):
                 button = QPushButton("")
-                button.setFixedSize(QSize(54, 54))
+                button.setFixedSize(QSize(48, 48))
                 button.setFont(self.square_font)
                 button.setCursor(Qt.PointingHandCursor)
                 button.setFocusPolicy(Qt.NoFocus)
@@ -254,7 +258,7 @@ class ChessGUI(QMainWindow):
                 self.squares[chess.square(col, 7 - row)] = button
 
         button_layout = QHBoxLayout()
-        button_layout.setSpacing(12)
+        button_layout.setSpacing(8)
         main_layout.addLayout(button_layout)
 
         undo_button = QPushButton("Undo")
@@ -273,7 +277,7 @@ class ChessGUI(QMainWindow):
         button_layout.addWidget(reset_button)
 
         button_layout2 = QHBoxLayout()
-        button_layout2.setSpacing(12)
+        button_layout2.setSpacing(8)
         main_layout.addLayout(button_layout2)
 
         ready_button = QPushButton("Ready")
@@ -293,6 +297,32 @@ class ChessGUI(QMainWindow):
 
         self.update_board()
         utils.center_on_screen(self)
+
+    def _build_game_over_message(self, outcome):
+        if self.board.is_checkmate():
+            winner = "White" if self.board.turn == chess.BLACK else "Black"
+            return f"Checkmate! {winner} wins."
+
+        draw_messages = {
+            "Stalemate": "Draw by Stalemate (No Checkmate).",
+            "Insufficient Material": "Draw by Insufficient Material (No Checkmate).",
+            "75-move rule": "Draw by 75-move rule (No Checkmate).",
+            "Fivefold Repetition": "Draw by Fivefold Repetition (No Checkmate).",
+            "Variant-specific Draw": "Draw by Variant-specific Draw (No Checkmate).",
+        }
+        return draw_messages.get(outcome, outcome)
+
+    # def resizeEvent(self, event):
+    #     super().resizeEvent(event)
+    #     # available width for 8 files + grid gaps (~9 px total) + labels col
+    #     board_area = self.centralWidget().width() - 32
+    #     sq = max(36, min((board_area // 10), (self.height() - 240) // 10))
+    #     for b in self.squares.values():
+    #         b.setFixedSize(sq, sq)
+    #     # scale piece font to square size
+    #     self.square_font.setPointSizeF(max(18, sq * 0.55))
+    #     for b in self.squares.values():
+    #         b.setFont(self.square_font)
 
     def update_board(self, info_text=None):
         last_move = None
@@ -315,8 +345,9 @@ class ChessGUI(QMainWindow):
 
         if chess_logic.is_game_over(self.board):
             outcome = chess_logic.get_game_result(self.board)
-            print(utils.info_text(f"Game Over: {outcome}"))
-            QMessageBox.information(self, "Game Over", outcome)
+            message = self._build_game_over_message(outcome)
+            print(utils.info_text(f"Game Over: {message}"))
+            QMessageBox.information(self, "Game Over", message)
 
     def get_square_style(self, square, last_moved=None):
         square_style = {
@@ -496,14 +527,9 @@ class ChessGUI(QMainWindow):
         if not os.path.exists(gamestates_folder):
             os.makedirs(gamestates_folder)
 
-        if self.dev:
-            with open(f"{gamestates_folder}/DEV_game_state.json", "w") as outfile:
-                json.dump(game_state, outfile)
-        else:
-            with open(
-                f'{gamestates_folder}/chess_game_{game_state["export-time"]}.json', "w"
-            ) as outfile:
-                json.dump(game_state, outfile)
+        filename = f'{gamestates_folder}/chess_game_{game_state["export-time"]}.json'
+        with open(filename, "w") as outfile:
+            outfile.write(json.dumps(game_state))
 
         print(utils.info_text(f"FEN: {game_state['fen-final']}"))
         print(utils.info_text(f"SAN: {game_state['san']}"))
