@@ -19,6 +19,407 @@ PIECE_VALUES = {
     chess.KING: 0,
 }
 
+EVAL_PIECE_VALUES = {piece: value * 100 for piece, value in PIECE_VALUES.items()}
+
+PIECE_SQUARE_TABLES = {
+    chess.PAWN: [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        50,
+        50,
+        50,
+        50,
+        50,
+        50,
+        50,
+        50,
+        10,
+        10,
+        20,
+        30,
+        30,
+        20,
+        10,
+        10,
+        5,
+        5,
+        10,
+        25,
+        25,
+        10,
+        5,
+        5,
+        0,
+        0,
+        0,
+        20,
+        20,
+        0,
+        0,
+        0,
+        5,
+        -5,
+        -10,
+        0,
+        0,
+        -10,
+        -5,
+        5,
+        5,
+        10,
+        10,
+        -20,
+        -20,
+        10,
+        10,
+        5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ],
+    chess.KNIGHT: [
+        -50,
+        -40,
+        -30,
+        -30,
+        -30,
+        -30,
+        -40,
+        -50,
+        -40,
+        -20,
+        0,
+        0,
+        0,
+        0,
+        -20,
+        -40,
+        -30,
+        0,
+        10,
+        15,
+        15,
+        10,
+        0,
+        -30,
+        -30,
+        5,
+        15,
+        20,
+        20,
+        15,
+        5,
+        -30,
+        -30,
+        0,
+        15,
+        20,
+        20,
+        15,
+        0,
+        -30,
+        -30,
+        5,
+        10,
+        15,
+        15,
+        10,
+        5,
+        -30,
+        -40,
+        -20,
+        0,
+        5,
+        5,
+        0,
+        -20,
+        -40,
+        -50,
+        -40,
+        -30,
+        -30,
+        -30,
+        -30,
+        -40,
+        -50,
+    ],
+    chess.BISHOP: [
+        -20,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -20,
+        -10,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -10,
+        -10,
+        0,
+        5,
+        10,
+        10,
+        5,
+        0,
+        -10,
+        -10,
+        5,
+        5,
+        10,
+        10,
+        5,
+        5,
+        -10,
+        -10,
+        0,
+        10,
+        10,
+        10,
+        10,
+        0,
+        -10,
+        -10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        -10,
+        -10,
+        5,
+        0,
+        0,
+        0,
+        0,
+        5,
+        -10,
+        -20,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -20,
+    ],
+    chess.ROOK: [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        5,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        5,
+        -5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -5,
+        -5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -5,
+        -5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -5,
+        -5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -5,
+        -5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -5,
+        0,
+        0,
+        0,
+        5,
+        5,
+        0,
+        0,
+        0,
+    ],
+    chess.QUEEN: [
+        -20,
+        -10,
+        -10,
+        -5,
+        -5,
+        -10,
+        -10,
+        -20,
+        -10,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -10,
+        -10,
+        0,
+        5,
+        5,
+        5,
+        5,
+        0,
+        -10,
+        -5,
+        0,
+        5,
+        5,
+        5,
+        5,
+        0,
+        -5,
+        0,
+        0,
+        5,
+        5,
+        5,
+        5,
+        0,
+        -5,
+        -10,
+        0,
+        5,
+        5,
+        5,
+        5,
+        0,
+        -10,
+        -10,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -10,
+        -20,
+        -10,
+        -10,
+        -5,
+        -5,
+        -10,
+        -10,
+        -20,
+    ],
+    chess.KING: [
+        -30,
+        -40,
+        -40,
+        -50,
+        -50,
+        -40,
+        -40,
+        -30,
+        -30,
+        -40,
+        -40,
+        -50,
+        -50,
+        -40,
+        -40,
+        -30,
+        -30,
+        -30,
+        -30,
+        -40,
+        -40,
+        -30,
+        -30,
+        -30,
+        -20,
+        -20,
+        -20,
+        -20,
+        -20,
+        -20,
+        -20,
+        -20,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        -10,
+        20,
+        20,
+        0,
+        0,
+        0,
+        0,
+        20,
+        20,
+        20,
+        30,
+        10,
+        0,
+        0,
+        10,
+        30,
+        20,
+        20,
+        30,
+        10,
+        0,
+        0,
+        10,
+        30,
+        20,
+    ],
+}
+
 # Ensure stdout is line-buffered
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
@@ -191,30 +592,171 @@ class EndgameTableStrategy(MoveStrategy):
 
 
 class HeuristicSearchStrategy(MoveStrategy):
-    def __init__(self, fallback: Optional[MoveStrategy] = None, **kwargs):
+    def __init__(
+        self,
+        fallback: Optional[MoveStrategy] = None,
+        search_depth: int = 3,
+        mobility_weight: float = 5.0,
+        king_safety_weight: float = 10.0,
+        **kwargs,
+    ):
         super().__init__(priority=70, **kwargs)
         self._fallback = fallback
+        self.search_depth = max(1, search_depth)
+        self.mobility_weight = mobility_weight
+        self.king_safety_weight = king_safety_weight
+        self._mate_score = 100000
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return True
 
     def generate_move(self, board: chess.Board, context: StrategyContext) -> Optional[StrategyResult]:
-        if not self._fallback:
+        if context.legal_moves_count == 0:
+            if board.is_checkmate():
+                return StrategyResult(
+                    move=None,
+                    strategy_name=self.name,
+                    score=-float(self._mate_score),
+                    metadata={"status": "checkmate"},
+                )
+            if board.is_stalemate():
+                return StrategyResult(
+                    move=None,
+                    strategy_name=self.name,
+                    score=0.0,
+                    metadata={"status": "stalemate"},
+                )
+            if self._fallback:
+                return self._fallback.generate_move(board, context)
             return None
 
-        fallback_result = self._fallback.generate_move(board, context)
-        if not fallback_result:
+        ordered_moves = self._order_moves(board)
+        best_move: Optional[chess.Move] = None
+        best_score = -float("inf")
+        alpha = -float("inf")
+        beta = float("inf")
+        node_counter = 0
+
+        def alpha_beta(depth: int, alpha_bound: float, beta_bound: float) -> float:
+            nonlocal node_counter
+            node_counter += 1
+
+            if depth == 0 or board.is_game_over():
+                return self._evaluate_board(board)
+
+            value = -float("inf")
+            for child_move in self._order_moves(board):
+                board.push(child_move)
+                score = -alpha_beta(depth - 1, -beta_bound, -alpha_bound)
+                board.pop()
+                value = max(value, score)
+                alpha_bound = max(alpha_bound, score)
+                if alpha_bound >= beta_bound:
+                    break
+            return value
+
+        for move in ordered_moves:
+            board.push(move)
+            score = -alpha_beta(self.search_depth - 1, -beta, -alpha)
+            board.pop()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+            alpha = max(alpha, score)
+            if alpha >= beta:
+                break
+
+        if best_move is None:
+            if self._fallback:
+                return self._fallback.generate_move(board, context)
             return None
 
-        metadata = dict(fallback_result.metadata)
-        metadata.setdefault("delegated_to", self._fallback.name)
+        move_str = best_move.uci()
+        metadata = {
+            "depth": self.search_depth,
+            "nodes": node_counter,
+            "searched_moves": len(ordered_moves),
+        }
         return StrategyResult(
-            move=fallback_result.move,
+            move=move_str,
             strategy_name=self.name,
-            score=fallback_result.score,
-            confidence=self.confidence or fallback_result.confidence,
+            score=best_score,
+            confidence=self.confidence or 0.75,
             metadata=metadata,
         )
+
+    def _order_moves(self, board: chess.Board) -> List[chess.Move]:
+        def move_score(move: chess.Move) -> float:
+            score = 0.0
+            if board.is_capture(move):
+                captured_piece = board.piece_at(move.to_square)
+                if captured_piece is None and board.is_en_passant(move):
+                    captured_piece = chess.Piece(chess.PAWN, not board.turn)
+                if captured_piece:
+                    score += EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0)
+                moving_piece = board.piece_at(move.from_square)
+                if moving_piece:
+                    score += EVAL_PIECE_VALUES.get(moving_piece.piece_type, 0) * 0.1
+            if board.gives_check(move):
+                score += 50
+            if move.promotion:
+                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
+            return score
+
+        moves = list(board.legal_moves)
+        moves.sort(key=move_score, reverse=True)
+        return moves
+
+    def _evaluate_board(self, board: chess.Board) -> float:
+        if board.is_checkmate():
+            return -float(self._mate_score)
+        if board.is_stalemate() or board.is_insufficient_material():
+            return 0.0
+
+        material_score = 0.0
+        piece_square_score = 0.0
+        for square, piece in board.piece_map().items():
+            piece_value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
+            table = PIECE_SQUARE_TABLES.get(piece.piece_type, None)
+            if piece.color == chess.WHITE:
+                material_score += piece_value
+                if table:
+                    piece_square_score += table[square]
+            else:
+                material_score -= piece_value
+                if table:
+                    mirrored_square = chess.square_mirror(square)
+                    piece_square_score -= table[mirrored_square]
+
+        mobility_score = self._mobility_score(board)
+        king_safety_score = self._king_safety_score(board)
+
+        total_score = material_score + piece_square_score + mobility_score + king_safety_score
+        return total_score if board.turn == chess.WHITE else -total_score
+
+    def _mobility_score(self, board: chess.Board) -> float:
+        current_mobility = board.legal_moves.count()
+        board.push(chess.Move.null())
+        opponent_mobility = board.legal_moves.count()
+        board.pop()
+        mobility_delta = current_mobility - opponent_mobility
+        return mobility_delta * self.mobility_weight
+
+    def _king_safety_score(self, board: chess.Board) -> float:
+        score = 0.0
+        for color in (chess.WHITE, chess.BLACK):
+            king_square = board.king(color)
+            if king_square is None:
+                continue
+            attackers = len(board.attackers(not color, king_square))
+            penalty = attackers * self.king_safety_weight
+            if color == chess.WHITE:
+                score -= penalty
+            else:
+                score += penalty
+        return score
 
 
 class FallbackRandomStrategy(MoveStrategy):
@@ -288,6 +830,7 @@ class ChessEngine:
         heuristic_strategy = HeuristicSearchStrategy(
             fallback=fallback_strategy,
             name="HeuristicSearchStrategy",
+            search_depth=3,
         )
 
         for strategy in (opening_strategy, endgame_strategy, heuristic_strategy, fallback_strategy):
