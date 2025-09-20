@@ -4,13 +4,19 @@ import random
 import time
 import threading
 import math
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import chess
+
+try:
+    import chess.syzygy as syzygy
+except ImportError:  # pragma: no cover - optional dependency
+    syzygy = None
 
 
 class _SearchTimeout(Exception):
@@ -519,7 +525,7 @@ STRATEGY_ENABLE_FLAGS = {
     "mate_threat_evasion": True,
     "tactical": True,
     "repetition_avoidance": True,
-    "mcts": True,
+    "mcts": False,
     "heuristic": True,
     "fallback_random": True,
 }
@@ -641,7 +647,7 @@ class StrategySelector:
 class OpeningBookStrategy(MoveStrategy):
     def __init__(
         self,
-        opening_book: Optional[Dict[str, str]] = None,
+        opening_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
         max_fullmove: int = 12,
         **kwargs,
     ):
@@ -652,35 +658,66 @@ class OpeningBookStrategy(MoveStrategy):
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.fullmove_number <= self.max_fullmove and bool(self.opening_book)
 
+    def _normalise_entry(self, entry: Union[str, Sequence[str]]) -> List[str]:
+        if isinstance(entry, str):
+            return [entry]
+        return [move for move in entry if move]
+
     def generate_move(
         self, board: chess.Board, context: StrategyContext
     ) -> Optional[StrategyResult]:
-        move = self.opening_book.get(board.fen())
-        if not move:
+        entry = self.opening_book.get(board.fen())
+        if not entry:
             return None
+        moves = self._normalise_entry(entry)
+        if not moves:
+            return None
+        move = moves[0]
         return StrategyResult(
             move=move,
             strategy_name=self.name,
             score=100000.0,
             confidence=self.confidence or 1.0,
-            metadata={"source": "opening_book"},
+            metadata={"source": "opening_book", "book_moves": moves},
         )
 
 
 class EndgameTableStrategy(MoveStrategy):
     def __init__(
-        self, table: Optional[Dict[str, str]] = None, piece_threshold: int = 6, **kwargs
+        self,
+        table: Optional[Dict[str, str]] = None,
+        piece_threshold: int = 7,
+        syzygy_tablebase: Any = None,
+        **kwargs,
     ):
         super().__init__(priority=80, **kwargs)
         self.table = table or {}
         self.piece_threshold = piece_threshold
+        self.syzygy_tablebase = syzygy_tablebase
 
     def is_applicable(self, context: StrategyContext) -> bool:
-        return context.piece_count <= self.piece_threshold
+        if context.piece_count > self.piece_threshold:
+            return False
+        return bool(self.table) or self.syzygy_tablebase is not None
 
     def generate_move(
         self, board: chess.Board, context: StrategyContext
     ) -> Optional[StrategyResult]:
+        if (
+            self.syzygy_tablebase is not None
+            and context.piece_count <= self.piece_threshold
+            and board.legal_moves.count() > 0
+        ):
+            move, metadata = self._probe_syzygy_move(board)
+            if move is not None:
+                return StrategyResult(
+                    move=move.uci(),
+                    strategy_name=self.name,
+                    score=self._syzygy_score(metadata),
+                    confidence=1.0,
+                    metadata=metadata,
+                )
+
         move = self.table.get(board.fen())
         if not move:
             return None
@@ -691,6 +728,80 @@ class EndgameTableStrategy(MoveStrategy):
             confidence=self.confidence,
             metadata={"source": "endgame_table"},
         )
+
+    def _probe_syzygy_move(self, board: chess.Board) -> Tuple[Optional[chess.Move], Dict[str, Any]]:
+        if self.syzygy_tablebase is None:
+            return None, {}
+        try:
+            root_wdl = int(self.syzygy_tablebase.probe_wdl(board))
+        except KeyError:
+            return None, {}
+
+        best_move: Optional[chess.Move] = None
+        best_score = -float('inf')
+        best_child_wdl: Optional[int] = None
+        best_dtz: Optional[int] = None
+        best_matches_target = False
+        target = root_wdl
+
+        for move in board.legal_moves:
+            board.push(move)
+            try:
+                child_wdl = int(self.syzygy_tablebase.probe_wdl(board))
+            except KeyError:
+                board.pop()
+                continue
+            try:
+                child_dtz = int(self.syzygy_tablebase.probe_dtz(board))
+            except KeyError:
+                child_dtz = None
+            board.pop()
+
+            score = -child_wdl
+            matches_target = score == target
+            better = False
+
+            if best_move is None:
+                better = True
+            elif best_matches_target and not matches_target:
+                better = False
+            elif not best_matches_target and matches_target:
+                better = True
+            elif score > best_score:
+                better = True
+            elif score == best_score and child_dtz is not None:
+                if best_dtz is None:
+                    better = True
+                elif score > 0 and child_dtz < best_dtz:
+                    better = True
+                elif score < 0 and child_dtz > best_dtz:
+                    better = True
+
+            if better:
+                best_move = move
+                best_score = score
+                best_child_wdl = child_wdl
+                best_dtz = child_dtz
+                best_matches_target = matches_target
+
+        if best_move is None:
+            return None, {}
+
+        metadata: Dict[str, Any] = {
+            "source": "syzygy_tablebase",
+            "root_wdl": target,
+            "child_wdl": best_child_wdl,
+        }
+        if best_dtz is not None:
+            metadata["dtz"] = best_dtz
+        return best_move, metadata
+
+    @staticmethod
+    def _syzygy_score(metadata: Dict[str, Any]) -> float:
+        wdl = metadata.get("root_wdl")
+        if isinstance(wdl, int):
+            return float(wdl) * 100000.0
+        return 80000.0
 
 
 class MateInOneStrategy(MoveStrategy):
@@ -1288,7 +1399,7 @@ class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
         fallback: Optional[MoveStrategy] = None,
-        search_depth: int = 4,
+        search_depth: int = 5,
         quiescence_depth: int = 6,
         mobility_weight: float = 4.0,
         king_safety_weight: float = 12.0,
@@ -1909,7 +2020,12 @@ class ChessEngine:
     It can process commands to set up positions, calculate moves, and manage engine state.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        syzygy_paths: Optional[Iterable[str]] = None,
+        opening_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+    ):
         """Initialize the chess engine with default settings and state."""
         # Engine identification
         self.engine_name = "JaskFish"
@@ -1923,6 +2039,10 @@ class ChessEngine:
 
         # Lock to manage concurrent access to engine state
         self.state_lock = threading.Lock()
+
+        self._custom_opening_book = opening_book
+        self._syzygy_paths = tuple(self._normalize_syzygy_paths(syzygy_paths))
+        self._syzygy_tablebase = self._initialise_syzygy_tablebase(self._syzygy_paths)
 
         # Strategy management
         self.strategy_selector = StrategySelector(
@@ -1959,16 +2079,22 @@ class ChessEngine:
             )
 
         if STRATEGY_ENABLE_FLAGS.get("opening_book", True):
-            strategies_to_register.append(
-                OpeningBookStrategy(
-                    opening_book=self._create_default_opening_book(),
-                    name="OpeningBookStrategy",
+            opening_book = self._create_default_opening_book(self._custom_opening_book)
+            if opening_book:
+                strategies_to_register.append(
+                    OpeningBookStrategy(
+                        opening_book=opening_book,
+                        name="OpeningBookStrategy",
+                    )
                 )
-            )
 
         if STRATEGY_ENABLE_FLAGS.get("endgame_table", True):
             strategies_to_register.append(
-                EndgameTableStrategy(name="EndgameTableStrategy")
+                EndgameTableStrategy(
+                    name="EndgameTableStrategy",
+                    syzygy_tablebase=self._syzygy_tablebase,
+                    piece_threshold=7,
+                )
             )
 
         if STRATEGY_ENABLE_FLAGS.get("mate_threat_evasion", True):
@@ -2011,7 +2137,7 @@ class ChessEngine:
                 HeuristicSearchStrategy(
                     fallback=fallback_strategy,
                     name="HeuristicSearchStrategy",
-                    search_depth=3,
+                    search_depth=5,
                 )
             )
 
@@ -2021,11 +2147,57 @@ class ChessEngine:
         for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
 
-    def _create_default_opening_book(self) -> Dict[str, str]:
-        start_board = chess.Board()
-        return {
-            start_board.fen(): "e2e4",
+    def _normalize_syzygy_paths(self, explicit_paths: Optional[Iterable[str]]) -> List[str]:
+        if explicit_paths is not None:
+            return [path for path in explicit_paths if path]
+        env_value = os.environ.get("SYZYGY_PATH")
+        if not env_value:
+            return []
+        return [segment for segment in env_value.split(os.pathsep) if segment]
+
+    def _initialise_syzygy_tablebase(self, paths: Iterable[str]):
+        paths = [path for path in paths if path]
+        if not paths:
+            return None
+        if syzygy is None:
+            self._log_debug("Syzygy integration unavailable: python-chess built without tablebase support")
+            return None
+        tablebase = syzygy.Tablebase()
+        for path in paths:
+            try:
+                if os.path.isdir(path):
+                    tablebase.add_directory(path)
+                elif os.path.isfile(path):
+                    tablebase.add_file(path)
+                else:
+                    self._log_debug(f"Syzygy path not found: {path}")
+            except (OSError, IOError) as exc:
+                self._log_debug(f"Failed to load Syzygy data from {path}: {exc}")
+        return tablebase
+
+    def _create_default_opening_book(
+        self, overrides: Optional[Dict[str, Union[str, Sequence[str]]]] = None
+    ) -> Dict[str, Union[str, Sequence[str]]]:
+        book: Dict[str, Union[str, Sequence[str]]] = {
+            chess.STARTING_FEN: ["e2e4", "d2d4", "c2c4", "g1f3"],
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1": "c7c5",
+            "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2": "g1f3",
+            "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2": "d7d6",
+            "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1": "g8f6",
+            "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 1 2": "c2c4",
+            "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2": "e7e6",
+            "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2": "c2c4",
+            "rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2": "e7e6",
+            "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq - 0 1": "e7e5",
+            "rnbqkbnr/pppp1ppp/8/4p3/2P5/8/PP1PPPPP/RNBQKBNR w KQkq - 0 2": "b1c3",
+            "rnbqkbnr/pppp1ppp/8/4p3/2P5/2N5/PP1PPPPP/R1BQKBNR b KQkq - 1 2": "g8f6",
+            "rnbqkbnr/ppp1pppp/8/3p4/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 2": "g2g3",
+            "rnbqkbnr/ppp1pppp/8/3p4/8/5NP1/PPPPPP1P/RNBQKB1R b KQkq - 0 2": "g7g6",
         }
+        if overrides:
+            for fen, moves in overrides.items():
+                book[fen] = moves
+        return book
 
     def create_strategy_context(
         self, board: chess.Board, time_controls: Optional[Dict[str, int]] = None
