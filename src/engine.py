@@ -12,6 +12,7 @@ from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import chess
+import chess.polyglot
 
 try:
     import chess.syzygy as syzygy
@@ -522,9 +523,9 @@ STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
     "opening_book": True,
     "endgame_table": True,
-    "mate_threat_evasion": True,
-    "tactical": True,
-    "repetition_avoidance": True,
+    "mate_threat_evasion": False,
+    "tactical": False,
+    "repetition_avoidance": False,
     "mcts": False,
     "heuristic": True,
     "fallback_random": True,
@@ -647,16 +648,20 @@ class StrategySelector:
 class OpeningBookStrategy(MoveStrategy):
     def __init__(
         self,
-        opening_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+        reader: Optional[chess.polyglot.MemoryMappedReader] = None,
+        dict_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
         max_fullmove: int = 12,
         **kwargs,
     ):
         super().__init__(priority=90, **kwargs)
-        self.opening_book = opening_book or {}
+        self.reader = reader
+        self.dict_book = dict_book or {}
         self.max_fullmove = max_fullmove
 
     def is_applicable(self, context: StrategyContext) -> bool:
-        return context.fullmove_number <= self.max_fullmove and bool(self.opening_book)
+        return context.fullmove_number <= self.max_fullmove and (
+            self.reader or self.dict_book
+        )
 
     def _normalise_entry(self, entry: Union[str, Sequence[str]]) -> List[str]:
         if isinstance(entry, str):
@@ -666,7 +671,23 @@ class OpeningBookStrategy(MoveStrategy):
     def generate_move(
         self, board: chess.Board, context: StrategyContext
     ) -> Optional[StrategyResult]:
-        entry = self.opening_book.get(board.fen())
+        moves = []
+        source = "dict_book"
+        if self.reader:
+            try:
+                entry = self.reader.weighted_choice(board)
+                move = entry.move.uci()
+                return StrategyResult(
+                    move=move,
+                    strategy_name=self.name,
+                    score=100000.0,
+                    confidence=self.confidence or 1.0,
+                    metadata={"source": "polyglot_book"},
+                )
+            except IndexError:
+                pass  # No entry in polyglot, fallback to dict
+
+        entry = self.dict_book.get(board.fen())
         if not entry:
             return None
         moves = self._normalise_entry(entry)
@@ -678,7 +699,7 @@ class OpeningBookStrategy(MoveStrategy):
             strategy_name=self.name,
             score=100000.0,
             confidence=self.confidence or 1.0,
-            metadata={"source": "opening_book", "book_moves": moves},
+            metadata={"source": source, "book_moves": moves},
         )
 
 
@@ -729,7 +750,9 @@ class EndgameTableStrategy(MoveStrategy):
             metadata={"source": "endgame_table"},
         )
 
-    def _probe_syzygy_move(self, board: chess.Board) -> Tuple[Optional[chess.Move], Dict[str, Any]]:
+    def _probe_syzygy_move(
+        self, board: chess.Board
+    ) -> Tuple[Optional[chess.Move], Dict[str, Any]]:
         if self.syzygy_tablebase is None:
             return None, {}
         try:
@@ -738,7 +761,7 @@ class EndgameTableStrategy(MoveStrategy):
             return None, {}
 
         best_move: Optional[chess.Move] = None
-        best_score = -float('inf')
+        best_score = -float("inf")
         best_child_wdl: Optional[int] = None
         best_dtz: Optional[int] = None
         best_matches_target = False
@@ -836,563 +859,6 @@ class MateInOneStrategy(MoveStrategy):
                     metadata={"pattern": "mate_in_one"},
                 )
         return None
-
-
-class MateThreatEvasionStrategy(MoveStrategy):
-    def __init__(
-        self,
-        safe_move_bonus: float = 250.0,
-        capture_bonus: float = 50.0,
-        promotion_bonus: float = 200.0,
-        logger: Optional[Callable[[str], None]] = None,
-        **kwargs,
-    ):
-        super().__init__(priority=85, short_circuit=True, **kwargs)
-        self.safe_move_bonus = safe_move_bonus
-        self.capture_bonus = capture_bonus
-        self.promotion_bonus = promotion_bonus
-        self._logger = logger or (lambda *_: None)
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        return context.legal_moves_count > 0 and (
-            context.in_check or context.opponent_mate_in_one_threat
-        )
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        best_move: Optional[chess.Move] = None
-        best_score = -float("inf")
-
-        for move in board.legal_moves:
-            capture_value = self._capture_value(board, move)
-            gives_check = board.gives_check(move)
-            board.push(move)
-            allows_mate = self._opponent_has_mate_in_one(board)
-            board.pop()
-
-            if allows_mate:
-                continue
-
-            score = self.safe_move_bonus + capture_value * self.capture_bonus
-            if move.promotion:
-                score += self.promotion_bonus
-                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
-            if gives_check:
-                score += self.capture_bonus
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-        if best_move is None:
-            return None
-
-        uci_move = best_move.uci()
-        self._logger(f"mate-threat evasion chose {uci_move} (score={best_score:.1f})")
-        return StrategyResult(
-            move=uci_move,
-            strategy_name=self.name,
-            score=best_score,
-            confidence=self.confidence or 0.95,
-            metadata={"pattern": "mate_threat_evasion"},
-        )
-
-    def _capture_value(self, board: chess.Board, move: chess.Move) -> float:
-        if not board.is_capture(move):
-            return 0.0
-        if board.is_en_passant(move):
-            return float(EVAL_PIECE_VALUES[chess.PAWN]) / 100.0
-        captured = board.piece_at(move.to_square)
-        if not captured:
-            return 0.0
-        return float(EVAL_PIECE_VALUES.get(captured.piece_type, 0)) / 100.0
-
-    @staticmethod
-    def _opponent_has_mate_in_one(board: chess.Board) -> bool:
-        for reply in board.legal_moves:
-            board.push(reply)
-            is_mate = board.is_checkmate()
-            board.pop()
-            if is_mate:
-                return True
-        return False
-
-
-class RepetitionAvoidanceStrategy(MoveStrategy):
-    def __init__(
-        self,
-        avoid_draw_bonus: float = 150.0,
-        capture_bonus: float = 25.0,
-        check_bonus: float = 40.0,
-        **kwargs,
-    ):
-        super().__init__(priority=72, short_circuit=False, **kwargs)
-        self.avoid_draw_bonus = avoid_draw_bonus
-        self.capture_bonus = capture_bonus
-        self.check_bonus = check_bonus
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        if context.legal_moves_count <= 0:
-            return False
-        repetition_flags = context.repetition_info or {}
-        return (
-            repetition_flags.get("can_claim_threefold", False)
-            and context.material_imbalance >= 0
-        )
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        best_move: Optional[chess.Move] = None
-        best_score = -float("inf")
-        original_fen = board.board_fen()
-
-        for move in board.legal_moves:
-            score = 0.0
-            capture_value = 0.0
-            if board.is_capture(move):
-                capture_value = self._capture_value(board, move)
-                score += capture_value * self.capture_bonus
-            if board.gives_check(move):
-                score += self.check_bonus
-            if move.promotion:
-                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
-
-            board.push(move)
-            avoids_repetition = not (
-                board.can_claim_threefold_repetition() or board.is_repetition()
-            )
-            board.pop()
-
-            if not avoids_repetition:
-                continue
-
-            score += self.avoid_draw_bonus
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-        if best_move is None:
-            return None
-
-        return StrategyResult(
-            move=best_move.uci(),
-            strategy_name=self.name,
-            score=best_score,
-            confidence=self.confidence or 0.7,
-            metadata={
-                "pattern": "avoid_threefold",
-                "board_before": original_fen,
-            },
-        )
-
-    @staticmethod
-    def _capture_value(board: chess.Board, move: chess.Move) -> float:
-        if board.is_en_passant(move):
-            return float(EVAL_PIECE_VALUES[chess.PAWN]) / 100.0
-        captured_piece = board.piece_at(move.to_square)
-        if not captured_piece:
-            return 0.0
-        return float(EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0)) / 100.0
-
-
-class TacticalResponseStrategy(MoveStrategy):
-    def __init__(
-        self,
-        min_tactical_score: float = 150.0,
-        check_bonus: float = 150.0,
-        promotion_bonus: float = 250.0,
-        capture_weight: float = 1.0,
-        logger: Optional[Callable[[str], None]] = None,
-        **kwargs,
-    ):
-        super().__init__(priority=75, **kwargs)
-        self.min_tactical_score = min_tactical_score
-        self.check_bonus = check_bonus
-        self.promotion_bonus = promotion_bonus
-        self.capture_weight = capture_weight
-        self._logger = logger or (lambda *_: None)
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        return context.legal_moves_count > 0
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        mover = board.turn
-        best_move: Optional[chess.Move] = None
-        best_score = -float("inf")
-
-        for move in board.legal_moves:
-            score = 0.0
-            if board.gives_check(move):
-                score += self.check_bonus
-            if move.promotion:
-                score += self.promotion_bonus
-                score += EVAL_PIECE_VALUES.get(move.promotion, 0)
-
-            material_delta = 0.0
-            if board.is_capture(move) or move.promotion:
-                material_delta = self._material_delta(board, move, mover)
-            if material_delta:
-                score += material_delta * self.capture_weight
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-        if best_move and best_score >= self.min_tactical_score:
-            uci_move = best_move.uci()
-            self._logger(f"tactical strategy chose {uci_move} (score={best_score:.1f})")
-            return StrategyResult(
-                move=uci_move,
-                strategy_name=self.name,
-                score=best_score,
-                confidence=self.confidence or 0.9,
-                metadata={
-                    "pattern": "forcing",
-                    "tactical_score": best_score,
-                },
-            )
-
-        return None
-
-    def _material_delta(
-        self, board: chess.Board, move: chess.Move, perspective: bool
-    ) -> float:
-        before = self._material_balance(board, perspective)
-        board.push(move)
-        after = self._material_balance(board, perspective)
-        board.pop()
-        return after - before
-
-    @staticmethod
-    def _material_balance(board: chess.Board, perspective: bool) -> float:
-        balance = 0.0
-        for piece in board.piece_map().values():
-            value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-            if piece.color == chess.WHITE:
-                balance += value
-            else:
-                balance -= value
-        return balance if perspective == chess.WHITE else -balance
-
-
-class MonteCarloTreeSearchStrategy(MoveStrategy):
-    @dataclass
-    class _Node:
-        board: chess.Board
-        parent: Optional["MonteCarloTreeSearchStrategy._Node"] = None
-        move: Optional[chess.Move] = None
-        wins: float = 0.0
-        visits: int = 0
-        children: Dict[chess.Move, "MonteCarloTreeSearchStrategy._Node"] = field(
-            default_factory=dict
-        )
-        unexpanded_moves: List[chess.Move] = field(default_factory=list)
-
-        def __post_init__(self) -> None:
-            if not self.unexpanded_moves:
-                self.unexpanded_moves = list(self.board.legal_moves)
-                random.shuffle(self.unexpanded_moves)
-            self.player_to_move: bool = self.board.turn
-
-        def is_terminal(self) -> bool:
-            return self.board.is_game_over()
-
-        def is_fully_expanded(self) -> bool:
-            return not self.unexpanded_moves
-
-        def expand(self) -> "MonteCarloTreeSearchStrategy._Node":
-            if not self.unexpanded_moves:
-                return self
-            move = self.unexpanded_moves.pop()
-            next_board = self.board.copy(stack=False)
-            next_board.push(move)
-            child = MonteCarloTreeSearchStrategy._Node(
-                board=next_board,
-                parent=self,
-                move=move,
-            )
-            self.children[move] = child
-            return child
-
-        def best_child(
-            self, exploration_constant: float
-        ) -> Optional["MonteCarloTreeSearchStrategy._Node"]:
-            best_score = -float("inf")
-            best_child: Optional["MonteCarloTreeSearchStrategy._Node"] = None
-            parent_visits = max(1, self.visits)
-            for child in self.children.values():
-                if child.visits == 0:
-                    score = float("inf")
-                else:
-                    exploitation = child.wins / child.visits
-                    exploration = exploration_constant * math.sqrt(
-                        math.log(parent_visits) / child.visits
-                    )
-                    score = exploitation + exploration
-                if score > best_score:
-                    best_score = score
-                    best_child = child
-            return best_child
-
-        def most_visited_child(self) -> Optional["MonteCarloTreeSearchStrategy._Node"]:
-            if not self.children:
-                return None
-            return max(self.children.values(), key=lambda node: node.visits)
-
-        def backpropagate(self, value: float, root_player: bool) -> None:
-            node: Optional["MonteCarloTreeSearchStrategy._Node"] = self
-            while node is not None:
-                node.visits += 1
-                if node.player_to_move == root_player:
-                    node.wins += value
-                else:
-                    node.wins -= value
-                node = node.parent
-
-    def __init__(
-        self,
-        max_rollouts: int = 800,
-        min_rollouts: int = 64,
-        rollout_depth: int = 40,
-        exploration_constant: float = math.sqrt(2.0),
-        base_time_limit: float = 0.4,
-        max_time_limit: float = 2.5,
-        min_time_limit: float = 0.03,
-        time_allocation_factor: float = 0.02,
-        rollout_rate_hint: float = 600.0,
-        result_scale: float = 800.0,
-        logger: Optional[Callable[[str], None]] = None,
-        **kwargs,
-    ):
-        super().__init__(priority=70, short_circuit=False, **kwargs)
-        self.max_rollouts = max(1, max_rollouts)
-        self.min_rollouts = max(1, min_rollouts)
-        self.rollout_depth = max(1, rollout_depth)
-        self.exploration_constant = exploration_constant
-        self.base_time_limit = base_time_limit
-        self.max_time_limit = max_time_limit
-        self.min_time_limit = min_time_limit
-        self.time_allocation_factor = time_allocation_factor
-        self.rollout_rate_hint = max(1.0, rollout_rate_hint)
-        self.result_scale = max(1.0, result_scale)
-        self._logger = logger or (lambda *_: None)
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        return context.legal_moves_count > 0
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        if context.legal_moves_count <= 1:
-            return None
-
-        time_budget = self._determine_time_budget(context)
-        rollout_limit = self._resolve_rollout_limit(time_budget)
-        board_copy = board.copy(stack=False)
-        root = self._Node(board=board_copy)
-        root_player = board_copy.turn
-
-        start_time = time.time()
-        deadline = start_time + time_budget if time_budget is not None else None
-        rollouts = 0
-
-        while rollouts < rollout_limit:
-            current_time = time.time()
-            if (
-                deadline is not None
-                and current_time >= deadline
-                and rollouts >= self.min_rollouts
-            ):
-                break
-
-            node = root
-            while not node.is_terminal() and node.is_fully_expanded():
-                child = node.best_child(self.exploration_constant)
-                if child is None:
-                    break
-                node = child
-
-            if not node.is_terminal() and not node.is_fully_expanded():
-                node = node.expand()
-
-            simulation_board = node.board.copy(stack=False)
-            value = self._rollout(simulation_board, root_player, deadline)
-            node.backpropagate(value, root_player)
-            rollouts += 1
-
-            if (
-                deadline is not None
-                and time.time() >= deadline
-                and rollouts >= self.min_rollouts
-            ):
-                break
-
-        elapsed = time.time() - start_time
-        best_child = root.most_visited_child()
-        if best_child is None or best_child.move is None or rollouts == 0:
-            self._logger("mcts strategy could not identify a best child")
-            return None
-
-        average_value = best_child.wins / max(1, best_child.visits)
-        score = average_value * self.result_scale
-        confidence = best_child.visits / max(1, root.visits)
-
-        metadata = {
-            "rollouts": rollouts,
-            "time": elapsed,
-            "average_value": average_value,
-            "visits": best_child.visits,
-            "root_visits": root.visits,
-            "exploration_constant": self.exploration_constant,
-            "rollout_limit": rollout_limit,
-            "time_budget": time_budget,
-        }
-        uci_move = best_child.move.uci()
-        self._logger(
-            "mcts strategy chose %s (rollouts=%d, avg=%.3f, conf=%.2f)"
-            % (uci_move, rollouts, average_value, confidence)
-        )
-
-        return StrategyResult(
-            move=uci_move,
-            strategy_name=self.name,
-            score=score,
-            confidence=confidence,
-            metadata=metadata,
-        )
-
-    def _determine_time_budget(self, context: StrategyContext) -> Optional[float]:
-        if not context.time_controls:
-            return self.base_time_limit
-
-        tc = context.time_controls
-        if tc.get("infinite"):
-            return None
-        if tc.get("movetime"):
-            alloc = tc["movetime"] / 1000.0
-            return min(self.max_time_limit, max(self.min_time_limit, alloc))
-
-        turn_key = "wtime" if context.turn == chess.WHITE else "btime"
-        inc_key = "winc" if context.turn == chess.WHITE else "binc"
-        time_left = tc.get(turn_key)
-        if time_left is None:
-            return self.base_time_limit
-
-        increment = tc.get(inc_key, 0)
-        moves_to_go = tc.get("movestogo")
-        if moves_to_go:
-            allocation = time_left / max(1, moves_to_go)
-        else:
-            allocation = time_left * self.time_allocation_factor
-        allocation += increment
-        seconds = allocation / 1000.0
-        return min(self.max_time_limit, max(self.min_time_limit, seconds))
-
-    def _resolve_rollout_limit(self, time_budget: Optional[float]) -> int:
-        if time_budget is None:
-            return self.max_rollouts
-        estimated = int(time_budget * self.rollout_rate_hint)
-        if estimated < self.min_rollouts:
-            estimated = self.min_rollouts
-        return min(self.max_rollouts, max(self.min_rollouts, estimated))
-
-    def _rollout(
-        self,
-        board: chess.Board,
-        root_player: bool,
-        deadline: Optional[float],
-    ) -> float:
-        depth = 0
-        while depth < self.rollout_depth:
-            if board.is_game_over():
-                break
-            if deadline is not None and time.time() >= deadline and depth > 0:
-                break
-            moves = list(board.legal_moves)
-            if not moves:
-                break
-            move = self._select_rollout_move(board, moves)
-            board.push(move)
-            depth += 1
-
-        return self._evaluate_board(board, root_player)
-
-    def _select_rollout_move(
-        self, board: chess.Board, moves: List[chess.Move]
-    ) -> chess.Move:
-        best_score = -float("inf")
-        best_move = moves[0]
-        for move in moves:
-            score = 0.0
-            if board.is_capture(move):
-                score += 3.0 + self._capture_priority(board, move)
-            if move.promotion:
-                score += 4.0 + (EVAL_PIECE_VALUES.get(move.promotion, 0) / 100.0)
-            if board.gives_check(move):
-                score += 1.5
-            score += random.random()
-            if score > best_score:
-                best_score = score
-                best_move = move
-        return best_move
-
-    def _capture_priority(self, board: chess.Board, move: chess.Move) -> float:
-        if board.is_en_passant(move):
-            return float(EVAL_PIECE_VALUES[chess.PAWN]) / 100.0
-        captured_piece = board.piece_at(move.to_square)
-        if not captured_piece:
-            return 0.0
-        mover = board.piece_at(move.from_square)
-        mover_value = EVAL_PIECE_VALUES.get(mover.piece_type, 0) if mover else 0
-        return (
-            float(EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0) - mover_value)
-            / 100.0
-        )
-
-    def _evaluate_board(self, board: chess.Board, root_player: bool) -> float:
-        if board.is_checkmate():
-            winner = not board.turn
-            if winner == root_player:
-                return 1.0
-            return -1.0
-        if (
-            board.is_stalemate()
-            or board.is_insufficient_material()
-            or board.can_claim_draw()
-        ):
-            return 0.0
-
-        material_score = 0.0
-        pst_score = 0.0
-        for square, piece in board.piece_map().items():
-            value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-            material_score += value if piece.color == chess.WHITE else -value
-            table = PIECE_SQUARE_TABLES.get(piece.piece_type)
-            if table:
-                index = (
-                    square
-                    if piece.color == chess.WHITE
-                    else chess.square_mirror(square)
-                )
-                pst_score += (
-                    table[index] if piece.color == chess.WHITE else -table[index]
-                )
-
-        mobility_score = board.legal_moves.count()
-        board.push(chess.Move.null())
-        opponent_mobility = board.legal_moves.count()
-        board.pop()
-        mobility_delta = mobility_score - opponent_mobility
-
-        total = material_score + pst_score + 5.0 * mobility_delta
-        if root_player == chess.BLACK:
-            total = -total
-        return max(-1.5, min(1.5, total / self.result_scale))
 
 
 class HeuristicSearchStrategy(MoveStrategy):
@@ -2025,6 +1491,9 @@ class ChessEngine:
         *,
         syzygy_paths: Optional[Iterable[str]] = None,
         opening_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+        opening_book_path: Optional[
+            str
+        ] = "books/opening/gm2001.bin",  # Path to polyglot .bin file, e.g., download from https://github.com/gmcheems-org/free-opening-books
     ):
         """Initialize the chess engine with default settings and state."""
         # Engine identification
@@ -2041,6 +1510,16 @@ class ChessEngine:
         self.state_lock = threading.Lock()
 
         self._custom_opening_book = opening_book
+        self._opening_book_path = opening_book_path
+        self._opening_book_reader = None
+        if opening_book_path:
+            try:
+                self._opening_book_reader = chess.polyglot.open_reader(
+                    opening_book_path
+                )
+            except Exception as e:
+                print(f"info string Failed to load polyglot opening book: {e}")
+
         self._syzygy_paths = tuple(self._normalize_syzygy_paths(syzygy_paths))
         self._syzygy_tablebase = self._initialise_syzygy_tablebase(self._syzygy_paths)
 
@@ -2079,14 +1558,14 @@ class ChessEngine:
             )
 
         if STRATEGY_ENABLE_FLAGS.get("opening_book", True):
-            opening_book = self._create_default_opening_book(self._custom_opening_book)
-            if opening_book:
-                strategies_to_register.append(
-                    OpeningBookStrategy(
-                        opening_book=opening_book,
-                        name="OpeningBookStrategy",
-                    )
+            opening_dict = self._create_default_opening_book(self._custom_opening_book)
+            strategies_to_register.append(
+                OpeningBookStrategy(
+                    reader=self._opening_book_reader,
+                    dict_book=opening_dict,
+                    name="OpeningBookStrategy",
                 )
+            )
 
         if STRATEGY_ENABLE_FLAGS.get("endgame_table", True):
             strategies_to_register.append(
@@ -2097,39 +1576,10 @@ class ChessEngine:
                 )
             )
 
-        if STRATEGY_ENABLE_FLAGS.get("mate_threat_evasion", True):
-            strategies_to_register.append(
-                MateThreatEvasionStrategy(
-                    name="MateThreatEvasionStrategy",
-                    logger=self._log_debug,
-                )
-            )
-
-        if STRATEGY_ENABLE_FLAGS.get("tactical", True):
-            strategies_to_register.append(
-                TacticalResponseStrategy(
-                    name="TacticalResponseStrategy",
-                    logger=self._log_debug,
-                )
-            )
-
-        if STRATEGY_ENABLE_FLAGS.get("repetition_avoidance", True):
-            strategies_to_register.append(
-                RepetitionAvoidanceStrategy(name="RepetitionAvoidanceStrategy")
-            )
-
         fallback_strategy: Optional[MoveStrategy] = None
         if STRATEGY_ENABLE_FLAGS.get("fallback_random", True):
             fallback_strategy = FallbackRandomStrategy(
                 self.random_move, name="FallbackRandomStrategy"
-            )
-
-        if STRATEGY_ENABLE_FLAGS.get("mcts", True):
-            strategies_to_register.append(
-                MonteCarloTreeSearchStrategy(
-                    name="MonteCarloTreeSearchStrategy",
-                    logger=self._log_debug,
-                )
             )
 
         if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
@@ -2147,7 +1597,9 @@ class ChessEngine:
         for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
 
-    def _normalize_syzygy_paths(self, explicit_paths: Optional[Iterable[str]]) -> List[str]:
+    def _normalize_syzygy_paths(
+        self, explicit_paths: Optional[Iterable[str]]
+    ) -> List[str]:
         if explicit_paths is not None:
             return [path for path in explicit_paths if path]
         env_value = os.environ.get("SYZYGY_PATH")
@@ -2160,7 +1612,9 @@ class ChessEngine:
         if not paths:
             return None
         if syzygy is None:
-            self._log_debug("Syzygy integration unavailable: python-chess built without tablebase support")
+            self._log_debug(
+                "Syzygy integration unavailable: python-chess built without tablebase support"
+            )
             return None
         tablebase = syzygy.Tablebase()
         for path in paths:
@@ -2464,5 +1918,7 @@ class ChessEngine:
 
 
 if __name__ == "__main__":
+    # Note: No additional installation is needed for polyglot support, as it's included in the python-chess library.
+    # Download a polyglot .bin file from e.g., https://github.com/gmcheems-org/free-opening-books and pass the path to ChessEngine(opening_book_path="path/to/book.bin")
     engine = ChessEngine()
     engine.start()
