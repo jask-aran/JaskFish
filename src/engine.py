@@ -954,7 +954,9 @@ class HeuristicSearchStrategy(MoveStrategy):
                 iteration_best_move: Optional[chess.Move] = None
                 iteration_best_score = -float("inf")
 
-                tt_entry = self._transposition_table.get(board.zobrist_hash())
+                tt_entry = self._transposition_table.get(
+                    chess.polyglot.zobrist_hash(board)
+                )
                 tt_move = tt_entry.move if tt_entry else None
                 moves = self._order_moves(board, 0, tt_move, best_move)
 
@@ -1076,7 +1078,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         if depth == 0:
             return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
 
-        key = board.zobrist_hash()
+        key = chess.polyglot.zobrist_hash(board)
         entry = self._transposition_table.get(key)
         if entry and entry.depth >= depth:
             if entry.flag == TranspositionFlag.EXACT:
