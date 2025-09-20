@@ -5,7 +5,7 @@ import json
 import time
 import os
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QColor, QPalette
+from PySide6.QtGui import QFont, QColor, QPalette, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -191,8 +191,8 @@ class ChessGUI(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("JaskFish")
-        self.resize(560, 600)
-        self.setMinimumSize(560, 600)
+        self.resize(200, 200)
+        self.setMinimumSize(450, 600)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -217,13 +217,13 @@ class ChessGUI(QMainWindow):
         board_widget = QWidget()
         board_widget.setObjectName("boardContainer")
         grid_layout = QGridLayout(board_widget)
-        grid_layout.setSpacing(1)
-        grid_layout.setContentsMargins(4, 4, 4, 4)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(0)
         main_layout.addWidget(board_widget)
 
         # Tighten rank/file label columns
         grid_layout.setColumnStretch(0, 0)
-        grid_layout.setColumnMinimumWidth(0, 18)
+        grid_layout.setColumnMinimumWidth(0, 0)  # was 18
         for col in range(1, 9):
             grid_layout.setColumnStretch(col, 1)
 
