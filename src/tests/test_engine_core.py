@@ -28,14 +28,26 @@ class DummyStrategy(engine_module.MoveStrategy):
 
 @pytest.fixture()
 def deterministic_engine():
-    engine = engine_module.ChessEngine()
+    engine = engine_module.ChessEngine(opening_book_path=None)
     engine.strategy_selector.clear_strategies()
     engine.register_strategy(DummyStrategy("e2e4"))
     return engine
 
 
+@pytest.fixture()
+def engine_with_opening_book():
+    engine = engine_module.ChessEngine(opening_book_path=None)
+    strategies = engine.strategy_selector.get_strategies()
+    opening_strategy = next(
+        strategy
+        for strategy in strategies
+        if isinstance(strategy, engine_module.OpeningBookStrategy)
+    )
+    return engine, opening_strategy
+
+
 def test_handle_uci_reports_identity(capsys):
-    engine = engine_module.ChessEngine()
+    engine = engine_module.ChessEngine(opening_book_path=None)
     engine.handle_uci()
     output_lines = capsys.readouterr().out.strip().splitlines()
     assert output_lines == [
@@ -117,6 +129,46 @@ def test_handle_quit_sets_running_false(capsys, deterministic_engine):
     output = capsys.readouterr().out
     assert "Engine shutting down" in output
     assert deterministic_engine.running is False
+
+
+def test_opening_book_start_position_metadata(engine_with_opening_book):
+    engine, opening_strategy = engine_with_opening_book
+    board = chess.Board()
+    context = engine.create_strategy_context(board.copy(stack=True))
+
+    assert opening_strategy.is_applicable(context)
+
+    result = opening_strategy.generate_move(board, context)
+    assert result is not None
+    assert result.move == "e2e4"
+    assert result.metadata["source"] == "dict_book"
+    assert result.metadata["book_moves"] == ["e2e4", "d2d4", "c2c4", "g1f3"]
+
+
+@pytest.mark.parametrize(
+    "moves, expected",
+    [
+        (["e2e4"], "c7c5"),
+        (["e2e4", "c7c5"], "g1f3"),
+        (["d2d4"], "g8f6"),
+        (["d2d4", "g8f6"], "c2c4"),
+        (["c2c4"], "e7e5"),
+        (["c2c4", "e7e5"], "b1c3"),
+    ],
+)
+def test_opening_book_varied_responses(engine_with_opening_book, moves, expected):
+    engine, opening_strategy = engine_with_opening_book
+    board = chess.Board()
+    for move in moves:
+        board.push_uci(move)
+
+    context = engine.create_strategy_context(board.copy(stack=True))
+    assert opening_strategy.is_applicable(context)
+
+    result = opening_strategy.generate_move(board, context)
+    assert result is not None
+    assert result.move == expected
+    assert result.metadata["source"] == "dict_book"
 
 
 def test_parse_go_args_interprets_time_controls(deterministic_engine):
@@ -250,7 +302,7 @@ def test_register_default_strategies_respects_feature_flags(monkeypatch):
     monkeypatch.setitem(engine_module.STRATEGY_ENABLE_FLAGS, "heuristic", True)
     monkeypatch.setitem(engine_module.STRATEGY_ENABLE_FLAGS, "fallback_random", True)
 
-    engine = engine_module.ChessEngine()
+    engine = engine_module.ChessEngine(opening_book_path=None)
     strategy_names = [strategy.name for strategy in engine.strategy_selector.get_strategies()]
     assert strategy_names == ["HeuristicSearchStrategy", "FallbackRandomStrategy"]
 
@@ -426,7 +478,7 @@ def test_get_legal_moves_count_matches_board_api(deterministic_engine):
 
 
 def test_command_processor_handles_unknown_commands(monkeypatch, capsys):
-    engine = engine_module.ChessEngine()
+    engine = engine_module.ChessEngine(opening_book_path=None)
     commands = io.StringIO("foo\nquit\n")
     monkeypatch.setattr(engine_module.sys, "stdin", commands)
     engine.command_processor()
