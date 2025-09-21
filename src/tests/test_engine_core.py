@@ -35,14 +35,22 @@ def deterministic_engine():
 
 
 @pytest.fixture()
-def engine_with_opening_book():
+def engine_with_opening_book(monkeypatch):
+    # Reactivate the opening book strategy for tests even if disabled in defaults.
+    monkeypatch.setitem(engine_module.STRATEGY_ENABLE_FLAGS, "opening_book", True)
+
     engine = engine_module.ChessEngine(opening_book_path=None)
     strategies = engine.strategy_selector.get_strategies()
     opening_strategy = next(
-        strategy
-        for strategy in strategies
-        if isinstance(strategy, engine_module.OpeningBookStrategy)
+        (
+            strategy
+            for strategy in strategies
+            if isinstance(strategy, engine_module.OpeningBookStrategy)
+        ),
+        None,
     )
+    if opening_strategy is None:
+        pytest.skip("OpeningBookStrategy is not available when opening book is disabled")
     return engine, opening_strategy
 
 

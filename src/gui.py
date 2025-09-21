@@ -4,6 +4,8 @@ import chess
 import json
 import time
 import os
+from typing import Callable, Optional
+
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QColor, QPalette, QFontMetrics
 from PySide6.QtWidgets import (
@@ -81,6 +83,8 @@ class ChessGUI(QMainWindow):
         go_callback=None,
         ready_callback=None,
         restart_engine_callback=None,
+        start_self_play_callback: Optional[Callable[[], bool]] = None,
+        stop_self_play_callback: Optional[Callable[[], bool]] = None,
     ):
         super().__init__()
         self.board = board
@@ -95,6 +99,9 @@ class ChessGUI(QMainWindow):
         self.go_callback = go_callback
         self.ready_callback = ready_callback
         self.restart_engine_callback = restart_engine_callback
+        self.start_self_play_callback = start_self_play_callback
+        self.stop_self_play_callback = stop_self_play_callback
+        self.self_play_active = False
         print(utils.info_text("Starting Game..."))
 
         # Reporting Options
@@ -284,16 +291,25 @@ class ChessGUI(QMainWindow):
         ready_button.clicked.connect(self.ready_command)
         self.style_control_button(ready_button)
         button_layout2.addWidget(ready_button)
+        self.ready_button = ready_button
 
         go_button = QPushButton("Go")
         go_button.clicked.connect(self.go_command)
         self.style_control_button(go_button)
         button_layout2.addWidget(go_button)
+        self.go_button = go_button
 
-        restart_engine_button = QPushButton("Restart Engine")
+        selfplay_button = QPushButton("Start Self-Play")
+        selfplay_button.clicked.connect(self.toggle_self_play)
+        self.style_control_button(selfplay_button)
+        button_layout2.addWidget(selfplay_button)
+        self.self_play_button = selfplay_button
+
+        restart_engine_button = QPushButton("Restart Engines")
         restart_engine_button.clicked.connect(self.restart_engine)
         self.style_control_button(restart_engine_button)
         button_layout2.addWidget(restart_engine_button)
+        self.restart_engine_button = restart_engine_button
 
         self.update_board()
         utils.center_on_screen(self)
@@ -341,7 +357,8 @@ class ChessGUI(QMainWindow):
         self.turn_indicator.setText(
             "White's turn" if self.board.turn == chess.WHITE else "Black's turn"
         )
-        self.info_indicator.setText(info_text) if info_text else None
+        if info_text:
+            self.set_info_message(info_text)
 
         if chess_logic.is_game_over(self.board):
             outcome = chess_logic.get_game_result(self.board)
@@ -552,6 +569,56 @@ class ChessGUI(QMainWindow):
             self.restart_engine_callback()
         else:
             print(utils.debug_text("Restart engine callback not set"))
+
+    def set_self_play_callbacks(
+        self,
+        start_callback: Optional[Callable[[], bool]],
+        stop_callback: Optional[Callable[[], bool]],
+    ) -> None:
+        self.start_self_play_callback = start_callback
+        self.stop_self_play_callback = stop_callback
+
+    def set_self_play_active(self, active: bool) -> None:
+        self.self_play_active = active
+        if hasattr(self, "self_play_button"):
+            self.self_play_button.setText(
+                "Stop Self-Play" if active else "Start Self-Play"
+            )
+
+    def set_board_interaction_enabled(self, enabled: bool) -> None:
+        for button in self.squares.values():
+            button.setEnabled(enabled)
+
+    def set_manual_controls_enabled(self, enabled: bool) -> None:
+        if hasattr(self, "go_button"):
+            self.go_button.setEnabled(enabled)
+        if hasattr(self, "ready_button"):
+            self.ready_button.setEnabled(enabled)
+
+    def set_info_message(self, message: str) -> None:
+        self.info_indicator.setText(message)
+
+    def toggle_self_play(self) -> None:
+        if self.self_play_active:
+            self.stop_self_play()
+        else:
+            self.start_self_play()
+
+    def start_self_play(self) -> None:
+        if self.start_self_play_callback:
+            started = self.start_self_play_callback()
+            if not started:
+                print(utils.debug_text("Self-play already running"))
+        else:
+            print(utils.debug_text("Start self-play callback not set"))
+
+    def stop_self_play(self) -> None:
+        if self.stop_self_play_callback:
+            stopped = self.stop_self_play_callback()
+            if not stopped:
+                print(utils.debug_text("Self-play already stopped"))
+        else:
+            print(utils.debug_text("Stop self-play callback not set"))
 
 
 if __name__ == "__main__":

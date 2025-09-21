@@ -516,11 +516,8 @@ class MoveStrategy(ABC):
 # always fall back to a random legal move if no strategies produce a result.
 STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
-    "opening_book": True,
-    "mate_threat_evasion": False,
-    "tactical": False,
+    "opening_book": False,
     "repetition_avoidance": False,
-    "mcts": False,
     "heuristic": True,
     "fallback_random": True,
 }
