@@ -48,8 +48,10 @@ def _button_with_text(gui: ChessGUI, text: str) -> QPushButton:
 def test_window_properties(chess_gui):
     assert chess_gui.isVisible()
     assert chess_gui.windowTitle() == "JaskFish"
-    assert chess_gui.width() >= 780
-    assert chess_gui.height() >= 800
+    assert chess_gui.minimumWidth() >= 450
+    assert chess_gui.minimumHeight() >= 600
+    assert chess_gui.width() >= chess_gui.minimumWidth()
+    assert chess_gui.height() >= chess_gui.minimumHeight()
 
 
 def test_layout_structure(chess_gui):

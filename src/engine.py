@@ -14,11 +14,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import chess
 import chess.polyglot
 
-try:
-    import chess.syzygy as syzygy
-except ImportError:  # pragma: no cover - optional dependency
-    syzygy = None
-
 
 class _SearchTimeout(Exception):
     """Internal exception used to abort search when the time budget is exhausted."""
@@ -522,7 +517,6 @@ class MoveStrategy(ABC):
 STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
     "opening_book": True,
-    "endgame_table": True,
     "mate_threat_evasion": False,
     "tactical": False,
     "repetition_avoidance": False,
@@ -701,130 +695,6 @@ class OpeningBookStrategy(MoveStrategy):
             confidence=self.confidence or 1.0,
             metadata={"source": source, "book_moves": moves},
         )
-
-
-class EndgameTableStrategy(MoveStrategy):
-    def __init__(
-        self,
-        table: Optional[Dict[str, str]] = None,
-        piece_threshold: int = 7,
-        syzygy_tablebase: Any = None,
-        **kwargs,
-    ):
-        super().__init__(priority=80, **kwargs)
-        self.table = table or {}
-        self.piece_threshold = piece_threshold
-        self.syzygy_tablebase = syzygy_tablebase
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        if context.piece_count > self.piece_threshold:
-            return False
-        return bool(self.table) or self.syzygy_tablebase is not None
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        if (
-            self.syzygy_tablebase is not None
-            and context.piece_count <= self.piece_threshold
-            and board.legal_moves.count() > 0
-        ):
-            move, metadata = self._probe_syzygy_move(board)
-            if move is not None:
-                return StrategyResult(
-                    move=move.uci(),
-                    strategy_name=self.name,
-                    score=self._syzygy_score(metadata),
-                    confidence=1.0,
-                    metadata=metadata,
-                )
-
-        move = self.table.get(board.fen())
-        if not move:
-            return None
-        return StrategyResult(
-            move=move,
-            strategy_name=self.name,
-            score=75000.0,
-            confidence=self.confidence,
-            metadata={"source": "endgame_table"},
-        )
-
-    def _probe_syzygy_move(
-        self, board: chess.Board
-    ) -> Tuple[Optional[chess.Move], Dict[str, Any]]:
-        if self.syzygy_tablebase is None:
-            return None, {}
-        try:
-            root_wdl = int(self.syzygy_tablebase.probe_wdl(board))
-        except KeyError:
-            return None, {}
-
-        best_move: Optional[chess.Move] = None
-        best_score = -float("inf")
-        best_child_wdl: Optional[int] = None
-        best_dtz: Optional[int] = None
-        best_matches_target = False
-        target = root_wdl
-
-        for move in board.legal_moves:
-            board.push(move)
-            try:
-                child_wdl = int(self.syzygy_tablebase.probe_wdl(board))
-            except KeyError:
-                board.pop()
-                continue
-            try:
-                child_dtz = int(self.syzygy_tablebase.probe_dtz(board))
-            except KeyError:
-                child_dtz = None
-            board.pop()
-
-            score = -child_wdl
-            matches_target = score == target
-            better = False
-
-            if best_move is None:
-                better = True
-            elif best_matches_target and not matches_target:
-                better = False
-            elif not best_matches_target and matches_target:
-                better = True
-            elif score > best_score:
-                better = True
-            elif score == best_score and child_dtz is not None:
-                if best_dtz is None:
-                    better = True
-                elif score > 0 and child_dtz < best_dtz:
-                    better = True
-                elif score < 0 and child_dtz > best_dtz:
-                    better = True
-
-            if better:
-                best_move = move
-                best_score = score
-                best_child_wdl = child_wdl
-                best_dtz = child_dtz
-                best_matches_target = matches_target
-
-        if best_move is None:
-            return None, {}
-
-        metadata: Dict[str, Any] = {
-            "source": "syzygy_tablebase",
-            "root_wdl": target,
-            "child_wdl": best_child_wdl,
-        }
-        if best_dtz is not None:
-            metadata["dtz"] = best_dtz
-        return best_move, metadata
-
-    @staticmethod
-    def _syzygy_score(metadata: Dict[str, Any]) -> float:
-        wdl = metadata.get("root_wdl")
-        if isinstance(wdl, int):
-            return float(wdl) * 100000.0
-        return 80000.0
 
 
 class MateInOneStrategy(MoveStrategy):
@@ -1491,7 +1361,6 @@ class ChessEngine:
     def __init__(
         self,
         *,
-        syzygy_paths: Optional[Iterable[str]] = None,
         opening_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
         opening_book_path: Optional[
             str
@@ -1521,9 +1390,6 @@ class ChessEngine:
                 )
             except Exception as e:
                 print(f"info string Failed to load polyglot opening book: {e}")
-
-        self._syzygy_paths = tuple(self._normalize_syzygy_paths(syzygy_paths))
-        self._syzygy_tablebase = self._initialise_syzygy_tablebase(self._syzygy_paths)
 
         # Strategy management
         self.strategy_selector = StrategySelector(
@@ -1569,15 +1435,6 @@ class ChessEngine:
                 )
             )
 
-        if STRATEGY_ENABLE_FLAGS.get("endgame_table", True):
-            strategies_to_register.append(
-                EndgameTableStrategy(
-                    name="EndgameTableStrategy",
-                    syzygy_tablebase=self._syzygy_tablebase,
-                    piece_threshold=7,
-                )
-            )
-
         fallback_strategy: Optional[MoveStrategy] = None
         if STRATEGY_ENABLE_FLAGS.get("fallback_random", True):
             fallback_strategy = FallbackRandomStrategy(
@@ -1598,38 +1455,6 @@ class ChessEngine:
 
         for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
-
-    def _normalize_syzygy_paths(
-        self, explicit_paths: Optional[Iterable[str]]
-    ) -> List[str]:
-        if explicit_paths is not None:
-            return [path for path in explicit_paths if path]
-        env_value = os.environ.get("SYZYGY_PATH")
-        if not env_value:
-            return []
-        return [segment for segment in env_value.split(os.pathsep) if segment]
-
-    def _initialise_syzygy_tablebase(self, paths: Iterable[str]):
-        paths = [path for path in paths if path]
-        if not paths:
-            return None
-        if syzygy is None:
-            self._log_debug(
-                "Syzygy integration unavailable: python-chess built without tablebase support"
-            )
-            return None
-        tablebase = syzygy.Tablebase()
-        for path in paths:
-            try:
-                if os.path.isdir(path):
-                    tablebase.add_directory(path)
-                elif os.path.isfile(path):
-                    tablebase.add_file(path)
-                else:
-                    self._log_debug(f"Syzygy path not found: {path}")
-            except (OSError, IOError) as exc:
-                self._log_debug(f"Failed to load Syzygy data from {path}: {exc}")
-        return tablebase
 
     def _create_default_opening_book(
         self, overrides: Optional[Dict[str, Union[str, Sequence[str]]]] = None
