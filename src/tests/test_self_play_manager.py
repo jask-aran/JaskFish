@@ -62,6 +62,28 @@ def self_play_setup():
     return manager, gui, white_engine, black_engine
 
 
+@pytest.fixture()
+def single_engine_setup():
+    board = chess.Board()
+    gui = DummyGui(board)
+    shared_engine = EngineStub()
+
+    def send_command_stub(engine, command: str) -> None:
+        engine.commands.append(command)
+
+    manager = SelfPlayManager(
+        gui,
+        {chess.WHITE: shared_engine, chess.BLACK: shared_engine},
+        send_command_stub,
+        {
+            chess.WHITE: "Engine 1 [White]",
+            chess.BLACK: "Engine 1 [Black]",
+        },
+    )
+
+    return manager, gui, shared_engine
+
+
 def test_self_play_start_initialises_engines(self_play_setup):
     manager, gui, white_engine, black_engine = self_play_setup
 
@@ -107,3 +129,53 @@ def test_self_play_requests_alternate_engine(self_play_setup):
     assert black_engine.commands[2] == "go"
     assert manager.active is True
     assert gui.info_message == "Self-play: Engine 2 [Black] evaluating…"
+
+
+def test_current_expected_color_tracks_turn(self_play_setup):
+    manager, gui, _, _ = self_play_setup
+
+    manager.start()
+    assert manager.current_expected_color() == chess.WHITE
+
+    move = chess.Move.from_uci("e2e4")
+    gui.board.push(move)
+    manager.on_engine_move(chess.WHITE, "e2e4")
+
+    assert manager.current_expected_color() == chess.BLACK
+
+
+def test_update_engines_reconfigures_active_session(self_play_setup):
+    manager, gui, white_engine, black_engine = self_play_setup
+
+    manager.start()
+    replacement = EngineStub()
+
+    manager.update_engines(
+        {chess.WHITE: replacement, chess.BLACK: black_engine},
+        {chess.WHITE: "Engine A [White]", chess.BLACK: "Engine 2 [Black]"},
+    )
+
+    assert manager.active is False
+    assert white_engine.commands[-1] == "stop"
+    assert manager.current_expected_color() is None
+
+    manager.start()
+    assert replacement.commands[0] == "ucinewgame"
+
+
+def test_self_play_with_single_engine_handles_both_colors(single_engine_setup):
+    manager, gui, shared_engine = single_engine_setup
+
+    assert manager.start() is True
+    assert shared_engine.commands[:3] == [
+        "ucinewgame",
+        f"position fen {gui.board.fen()}",
+        "go",
+    ]
+
+    move = chess.Move.from_uci("e2e4")
+    gui.board.push(move)
+    manager.on_engine_move(chess.WHITE, "e2e4")
+
+    assert shared_engine.commands[3] == f"position fen {gui.board.fen()}"
+    assert shared_engine.commands[4] == "go"

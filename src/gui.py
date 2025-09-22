@@ -4,7 +4,7 @@ import chess
 import json
 import time
 import os
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QColor, QPalette, QFontMetrics
@@ -83,6 +83,8 @@ class ChessGUI(QMainWindow):
         go_callback: Optional[Callable[[str, str, str], None]] = None,
         ready_callback: Optional[Callable[[str, str], None]] = None,
         restart_engine_callback=None,
+        swap_colors_callback: Optional[Callable[[], None]] = None,
+        toggle_engine_callback: Optional[Callable[[str, bool], None]] = None,
         start_self_play_callback: Optional[Callable[[], bool]] = None,
         stop_self_play_callback: Optional[Callable[[], bool]] = None,
     ):
@@ -99,13 +101,18 @@ class ChessGUI(QMainWindow):
         self.go_callback = go_callback
         self.ready_callback = ready_callback
         self.restart_engine_callback = restart_engine_callback
+        self.swap_colors_callback = swap_colors_callback
+        self.toggle_engine_callback = toggle_engine_callback
         self.start_self_play_callback = start_self_play_callback
         self.stop_self_play_callback = stop_self_play_callback
         self.self_play_active = False
         self.manual_engine_busy = False
-        self.engine_selector: Optional[QComboBox] = None
-        self.engine_selector_label: Optional[QLabel] = None
         self.current_engine_context: Optional[Tuple[str, str]] = None
+        self.engine_toggle_buttons: Dict[str, QPushButton] = {}
+        self.swap_button: Optional[QPushButton] = None
+        self.engine_assignment_label: Optional[QLabel] = None
+        self.manual_engine_provider: Optional[Callable[[], Tuple[str, str]]] = None
+        self._swap_allowed = True
         print(utils.info_text("Starting Game..."))
 
         # Reporting Options
@@ -207,7 +214,7 @@ class ChessGUI(QMainWindow):
     def init_ui(self):
         self.setWindowTitle("JaskFish")
         self.resize(200, 200)
-        self.setMinimumSize(450, 600)
+        self.setMinimumSize(450, 675)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -298,23 +305,11 @@ class ChessGUI(QMainWindow):
         manual_controls_layout.setContentsMargins(0, 12, 0, 0)
         main_layout.addLayout(manual_controls_layout)
 
-        selector_row = QHBoxLayout()
-        selector_row.setSpacing(6)
-        selector_label = QLabel("Analysis Engine")
-        selector_label.setFont(QFont("Segoe UI", 10))
-        selector_label.setObjectName("analysisEngineLabel")
-        selector_row.addWidget(selector_label)
-
-        engine_selector = QComboBox()
-        engine_selector.setMinimumWidth(200)
-        engine_selector.setEditable(False)
-        engine_selector.setFocusPolicy(Qt.NoFocus)
-        selector_row.addWidget(engine_selector)
-        selector_row.addStretch(1)
-
-        self.engine_selector = engine_selector
-        self.engine_selector_label = selector_label
-        manual_controls_layout.addLayout(selector_row)
+        assignment_label = QLabel("")
+        assignment_label.setFont(QFont("Segoe UI", 10))
+        assignment_label.setAlignment(Qt.AlignCenter)
+        manual_controls_layout.addWidget(assignment_label)
+        self.engine_assignment_label = assignment_label
 
         manual_buttons_row = QHBoxLayout()
         manual_buttons_row.setSpacing(10)
@@ -343,6 +338,12 @@ class ChessGUI(QMainWindow):
         automation_row.addWidget(selfplay_button)
         self.self_play_button = selfplay_button
 
+        swap_button = QPushButton("Swap Colors")
+        swap_button.clicked.connect(self.swap_engine_colors)
+        self.style_control_button(swap_button)
+        automation_row.addWidget(swap_button)
+        self.swap_button = swap_button
+
         restart_engine_button = QPushButton("Restart Engines")
         restart_engine_button.clicked.connect(self.restart_engine)
         self.style_control_button(restart_engine_button)
@@ -351,6 +352,22 @@ class ChessGUI(QMainWindow):
 
         automation_row.addStretch(1)
         manual_controls_layout.addLayout(automation_row)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(10)
+
+        for engine_id, label in (("engine1", "Engine 1"), ("engine2", "Engine 2")):
+            button = QPushButton(f"Deactivate {label}")
+            button.setProperty("engineId", engine_id)
+            button.setProperty("labelText", label)
+            button.setProperty("active", True)
+            button.clicked.connect(self._handle_toggle_engine)
+            self.style_control_button(button)
+            toggle_row.addWidget(button)
+            self.engine_toggle_buttons[engine_id] = button
+
+        toggle_row.addStretch(1)
+        manual_controls_layout.addLayout(toggle_row)
 
         self.update_board()
         utils.center_on_screen(self)
@@ -598,9 +615,14 @@ class ChessGUI(QMainWindow):
             print(utils.debug_text("Go callback not set"))
             return
 
-        engine_id, engine_label = self._selected_engine_entry()
-        if engine_id is None:
-            print(utils.debug_text("No engine selected for evaluation"))
+        if self.manual_engine_provider is None:
+            print(utils.debug_text("Manual engine provider not set"))
+            return
+
+        try:
+            engine_id, engine_label = self.manual_engine_provider()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(utils.debug_text(f"Manual engine provider failed: {exc}"))
             return
 
         self.manual_engine_busy = True
@@ -613,9 +635,14 @@ class ChessGUI(QMainWindow):
             print(utils.debug_text("Ready callback not set"))
             return
 
-        engine_id, engine_label = self._selected_engine_entry()
-        if engine_id is None:
-            print(utils.debug_text("No engine selected for readiness check"))
+        if self.manual_engine_provider is None:
+            print(utils.debug_text("Manual engine provider not set"))
+            return
+
+        try:
+            engine_id, engine_label = self.manual_engine_provider()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(utils.debug_text(f"Manual engine provider failed: {exc}"))
             return
 
         self.set_info_message(f"Checking readiness: {engine_label}")
@@ -626,6 +653,57 @@ class ChessGUI(QMainWindow):
             self.restart_engine_callback()
         else:
             print(utils.debug_text("Restart engine callback not set"))
+
+    def swap_engine_colors(self) -> None:
+        if self.swap_colors_callback:
+            self.swap_colors_callback()
+        else:
+            print(utils.debug_text("Swap colors callback not set"))
+
+    def _handle_toggle_engine(self):
+        button = self.sender()
+        if not isinstance(button, QPushButton):
+            return
+        engine_id_value = button.property("engineId")
+        if not engine_id_value:
+            return
+        engine_id = str(engine_id_value)
+        active = bool(button.property("active"))
+        if self.toggle_engine_callback:
+            self.toggle_engine_callback(engine_id, not active)
+        else:
+            print(utils.debug_text("Toggle engine callback not set"))
+
+    def set_engine_management_callbacks(
+        self,
+        swap_callback: Optional[Callable[[], None]],
+        toggle_callback: Optional[Callable[[str, bool], None]],
+    ) -> None:
+        self.swap_colors_callback = swap_callback
+        self.toggle_engine_callback = toggle_callback
+
+    def set_engine_activation_states(self, states: Dict[str, bool]) -> None:
+        for engine_id, button in self.engine_toggle_buttons.items():
+            if button is None:
+                continue
+            active = states.get(engine_id, False)
+            button.setProperty("active", active)
+            label_text = button.property("labelText") or engine_id
+            action = "Deactivate" if active else "Activate"
+            button.setText(f"{action} {label_text}")
+
+    def set_swap_button_enabled(self, enabled: bool) -> None:
+        self._swap_allowed = enabled
+        if self.swap_button is not None:
+            effective = enabled and not self.manual_engine_busy and not self.self_play_active
+            self.swap_button.setEnabled(effective)
+
+    def set_engine_assignments(self, white_engine: str, black_engine: str) -> None:
+        if self.engine_assignment_label is None:
+            return
+        self.engine_assignment_label.setText(
+            f"White - {white_engine}    |    Black - {black_engine}"
+        )
 
     def set_self_play_callbacks(
         self,
@@ -652,30 +730,18 @@ class ChessGUI(QMainWindow):
             self.go_button.setEnabled(effective_state)
         if hasattr(self, "ready_button"):
             self.ready_button.setEnabled(effective_state)
-        if self.engine_selector is not None:
-            self.engine_selector.setEnabled(effective_state)
-        if self.engine_selector_label is not None:
-            self.engine_selector_label.setEnabled(effective_state)
+        for button in self.engine_toggle_buttons.values():
+            button.setEnabled(effective_state)
+        if self.swap_button is not None:
+            self.swap_button.setEnabled(effective_state and self._swap_allowed)
 
     def set_info_message(self, message: str) -> None:
         self.info_indicator.setText(message)
 
-    def set_manual_engine_options(self, options: Sequence[Tuple[str, str]]) -> None:
-        if self.engine_selector is None:
-            return
-        self.engine_selector.clear()
-        for engine_id, label in options:
-            self.engine_selector.addItem(label, engine_id)
-        if options:
-            self.engine_selector.setCurrentIndex(0)
-
-    def _selected_engine_entry(self) -> Tuple[Optional[str], str]:
-        if self.engine_selector is None or self.engine_selector.count() == 0:
-            return None, ""
-        index = self.engine_selector.currentIndex()
-        engine_id = self.engine_selector.itemData(index)
-        label = self.engine_selector.itemText(index)
-        return engine_id, label
+    def set_manual_engine_provider(
+        self, provider: Optional[Callable[[], Tuple[str, str]]]
+    ) -> None:
+        self.manual_engine_provider = provider
 
     def indicate_engine_activity(self, engine_label: str, context: str) -> None:
         self.current_engine_context = (engine_label, context)

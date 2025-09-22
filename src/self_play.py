@@ -44,7 +44,7 @@ SendCommand = Callable[[EngineProcess, str], None]
 
 
 class SelfPlayManager:
-    """Coordinates automated play between two engine processes."""
+    """Coordinates automated play between engine processes."""
 
     def __init__(
         self,
@@ -70,6 +70,26 @@ class SelfPlayManager:
     def active(self) -> bool:
         return self._active
 
+    def current_expected_color(self) -> Optional[bool]:
+        if not self._waiting_for_move:
+            return None
+        return self._current_engine_color
+
+    def update_engines(
+        self, engines: Dict[bool, EngineProcess], engine_names: Dict[bool, str]
+    ) -> None:
+        if chess.WHITE not in engines or chess.BLACK not in engines:
+            raise ValueError("SelfPlayManager requires engines for both colors")
+
+        if self._active:
+            self.stop("Self-play stopped (engine assignments updated)")
+
+        self._engines = engines
+        self._engine_names = engine_names
+        self._current_engine_color = None
+        self._pending_ignore_color = None
+        self._waiting_for_move = False
+
     def start(self) -> bool:
         if self._active:
             return False
@@ -84,7 +104,16 @@ class SelfPlayManager:
         self._gui.set_manual_controls_enabled(False)
         self._gui.set_info_message("Self-play running")
 
+        unique_engines = []
+        seen_ids = set()
         for engine in self._engines.values():
+            engine_id = id(engine)
+            if engine_id in seen_ids:
+                continue
+            seen_ids.add(engine_id)
+            unique_engines.append(engine)
+
+        for engine in unique_engines:
             self._dispatch(engine, "ucinewgame")
 
         self._request_move(self._gui.board.turn)
