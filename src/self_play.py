@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Protocol, Any
+from typing import Any, Callable, Dict, Optional, Protocol
 
 import chess
 
-import chess_logic
+try:
+    from src import chess_logic
+except ImportError:  # pragma: no cover - fallback when executed as a script
+    import chess_logic  # type: ignore
 
 
 class _SelfPlayUI(Protocol):
@@ -26,6 +29,15 @@ class _SelfPlayUI(Protocol):
     def set_info_message(self, message: str) -> None:
         ...
 
+    def indicate_engine_activity(self, engine_label: str, context: str) -> None:
+        ...
+
+    def clear_engine_activity(self, message: Optional[str] = None) -> None:
+        ...
+
+    def self_play_evaluation_complete(self, engine_label: str) -> None:
+        ...
+
 
 EngineProcess = Any
 SendCommand = Callable[[EngineProcess, str], None]
@@ -39,6 +51,7 @@ class SelfPlayManager:
         gui: _SelfPlayUI,
         engines: Dict[bool, EngineProcess],
         send_command: SendCommand,
+        engine_names: Dict[bool, str],
     ) -> None:
         if chess.WHITE not in engines or chess.BLACK not in engines:
             raise ValueError("SelfPlayManager requires engines for both colors")
@@ -46,6 +59,7 @@ class SelfPlayManager:
         self._gui = gui
         self._engines = engines
         self._send_command = send_command
+        self._engine_names = engine_names
 
         self._active = False
         self._current_engine_color: Optional[bool] = None
@@ -92,7 +106,7 @@ class SelfPlayManager:
         self._gui.set_self_play_active(False)
         self._gui.set_board_interaction_enabled(True)
         self._gui.set_manual_controls_enabled(True)
-        self._gui.set_info_message(message or "Self-play stopped")
+        self._gui.clear_engine_activity(message or "Self-play stopped")
         return True
 
     def should_apply_move(self, color: bool) -> bool:
@@ -110,6 +124,8 @@ class SelfPlayManager:
             return
 
         self._waiting_for_move = False
+        engine_label = self._engine_names.get(color, "Engine")
+        self._gui.self_play_evaluation_complete(engine_label)
 
         if chess_logic.is_game_over(self._gui.board):
             outcome = chess_logic.get_game_result(self._gui.board)
@@ -130,7 +146,8 @@ class SelfPlayManager:
 
         self._current_engine_color = color
         self._waiting_for_move = True
+        engine_label = self._engine_names.get(color, "Engine")
+        self._gui.indicate_engine_activity(engine_label, "Self-play")
 
     def _dispatch(self, engine: EngineProcess, command: str) -> None:
         self._send_command(engine, command)
-

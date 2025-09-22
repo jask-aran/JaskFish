@@ -4,7 +4,7 @@ import chess
 import json
 import time
 import os
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QColor, QPalette, QFontMetrics
@@ -80,8 +80,8 @@ class ChessGUI(QMainWindow):
         self,
         board,
         dev=False,
-        go_callback=None,
-        ready_callback=None,
+        go_callback: Optional[Callable[[str, str, str], None]] = None,
+        ready_callback: Optional[Callable[[str, str], None]] = None,
         restart_engine_callback=None,
         start_self_play_callback: Optional[Callable[[], bool]] = None,
         stop_self_play_callback: Optional[Callable[[], bool]] = None,
@@ -102,6 +102,10 @@ class ChessGUI(QMainWindow):
         self.start_self_play_callback = start_self_play_callback
         self.stop_self_play_callback = stop_self_play_callback
         self.self_play_active = False
+        self.manual_engine_busy = False
+        self.engine_selector: Optional[QComboBox] = None
+        self.engine_selector_label: Optional[QLabel] = None
+        self.current_engine_context: Optional[Tuple[str, str]] = None
         print(utils.info_text("Starting Game..."))
 
         # Reporting Options
@@ -155,6 +159,10 @@ class ChessGUI(QMainWindow):
                 border: 1px solid #3a414d;
                 border-radius: 8px;
                 padding: 6px 10px;                            /* was 8px 16px */
+            }
+            QLabel#analysisEngineLabel {
+                color: #d5d9e3;
+                font-size: 12px;
             }
             """
         )
@@ -265,7 +273,8 @@ class ChessGUI(QMainWindow):
                 self.squares[chess.square(col, 7 - row)] = button
 
         button_layout = QHBoxLayout()
-        button_layout.setSpacing(8)
+        button_layout.setSpacing(10)
+        button_layout.setContentsMargins(0, 12, 0, 0)
         main_layout.addLayout(button_layout)
 
         undo_button = QPushButton("Undo")
@@ -282,34 +291,66 @@ class ChessGUI(QMainWindow):
         reset_button.clicked.connect(self.reset_game)
         self.style_control_button(reset_button)
         button_layout.addWidget(reset_button)
+        button_layout.addStretch(1)
 
-        button_layout2 = QHBoxLayout()
-        button_layout2.setSpacing(8)
-        main_layout.addLayout(button_layout2)
+        manual_controls_layout = QVBoxLayout()
+        manual_controls_layout.setSpacing(8)
+        manual_controls_layout.setContentsMargins(0, 12, 0, 0)
+        main_layout.addLayout(manual_controls_layout)
+
+        selector_row = QHBoxLayout()
+        selector_row.setSpacing(6)
+        selector_label = QLabel("Analysis Engine")
+        selector_label.setFont(QFont("Segoe UI", 10))
+        selector_label.setObjectName("analysisEngineLabel")
+        selector_row.addWidget(selector_label)
+
+        engine_selector = QComboBox()
+        engine_selector.setMinimumWidth(200)
+        engine_selector.setEditable(False)
+        engine_selector.setFocusPolicy(Qt.NoFocus)
+        selector_row.addWidget(engine_selector)
+        selector_row.addStretch(1)
+
+        self.engine_selector = engine_selector
+        self.engine_selector_label = selector_label
+        manual_controls_layout.addLayout(selector_row)
+
+        manual_buttons_row = QHBoxLayout()
+        manual_buttons_row.setSpacing(10)
 
         ready_button = QPushButton("Ready")
         ready_button.clicked.connect(self.ready_command)
         self.style_control_button(ready_button)
-        button_layout2.addWidget(ready_button)
+        manual_buttons_row.addWidget(ready_button)
         self.ready_button = ready_button
 
         go_button = QPushButton("Go")
         go_button.clicked.connect(self.go_command)
         self.style_control_button(go_button)
-        button_layout2.addWidget(go_button)
+        manual_buttons_row.addWidget(go_button)
         self.go_button = go_button
+
+        manual_buttons_row.addStretch(1)
+        manual_controls_layout.addLayout(manual_buttons_row)
+
+        automation_row = QHBoxLayout()
+        automation_row.setSpacing(10)
 
         selfplay_button = QPushButton("Start Self-Play")
         selfplay_button.clicked.connect(self.toggle_self_play)
         self.style_control_button(selfplay_button)
-        button_layout2.addWidget(selfplay_button)
+        automation_row.addWidget(selfplay_button)
         self.self_play_button = selfplay_button
 
         restart_engine_button = QPushButton("Restart Engines")
         restart_engine_button.clicked.connect(self.restart_engine)
         self.style_control_button(restart_engine_button)
-        button_layout2.addWidget(restart_engine_button)
+        automation_row.addWidget(restart_engine_button)
         self.restart_engine_button = restart_engine_button
+
+        automation_row.addStretch(1)
+        manual_controls_layout.addLayout(automation_row)
 
         self.update_board()
         utils.center_on_screen(self)
@@ -553,16 +594,32 @@ class ChessGUI(QMainWindow):
         print(utils.info_text(f"UCI: {game_state['uci']}"))
 
     def go_command(self):
-        if self.go_callback:
-            self.go_callback(fen_string=self.board.fen())
-        else:
+        if not self.go_callback:
             print(utils.debug_text("Go callback not set"))
+            return
+
+        engine_id, engine_label = self._selected_engine_entry()
+        if engine_id is None:
+            print(utils.debug_text("No engine selected for evaluation"))
+            return
+
+        self.manual_engine_busy = True
+        self.set_manual_controls_enabled(False)
+        self.indicate_engine_activity(engine_label, "Manual evaluation")
+        self.go_callback(engine_id, engine_label, self.board.fen())
 
     def ready_command(self):
-        if self.ready_callback:
-            self.ready_callback()
-        else:
+        if not self.ready_callback:
             print(utils.debug_text("Ready callback not set"))
+            return
+
+        engine_id, engine_label = self._selected_engine_entry()
+        if engine_id is None:
+            print(utils.debug_text("No engine selected for readiness check"))
+            return
+
+        self.set_info_message(f"Checking readiness: {engine_label}")
+        self.ready_callback(engine_id, engine_label)
 
     def restart_engine(self):
         if self.restart_engine_callback:
@@ -590,13 +647,55 @@ class ChessGUI(QMainWindow):
             button.setEnabled(enabled)
 
     def set_manual_controls_enabled(self, enabled: bool) -> None:
+        effective_state = enabled and not self.manual_engine_busy and not self.self_play_active
         if hasattr(self, "go_button"):
-            self.go_button.setEnabled(enabled)
+            self.go_button.setEnabled(effective_state)
         if hasattr(self, "ready_button"):
-            self.ready_button.setEnabled(enabled)
+            self.ready_button.setEnabled(effective_state)
+        if self.engine_selector is not None:
+            self.engine_selector.setEnabled(effective_state)
+        if self.engine_selector_label is not None:
+            self.engine_selector_label.setEnabled(effective_state)
 
     def set_info_message(self, message: str) -> None:
         self.info_indicator.setText(message)
+
+    def set_manual_engine_options(self, options: Sequence[Tuple[str, str]]) -> None:
+        if self.engine_selector is None:
+            return
+        self.engine_selector.clear()
+        for engine_id, label in options:
+            self.engine_selector.addItem(label, engine_id)
+        if options:
+            self.engine_selector.setCurrentIndex(0)
+
+    def _selected_engine_entry(self) -> Tuple[Optional[str], str]:
+        if self.engine_selector is None or self.engine_selector.count() == 0:
+            return None, ""
+        index = self.engine_selector.currentIndex()
+        engine_id = self.engine_selector.itemData(index)
+        label = self.engine_selector.itemText(index)
+        return engine_id, label
+
+    def indicate_engine_activity(self, engine_label: str, context: str) -> None:
+        self.current_engine_context = (engine_label, context)
+        self.set_info_message(f"{context}: {engine_label} evaluating…")
+
+    def clear_engine_activity(self, message: Optional[str] = None) -> None:
+        self.current_engine_context = None
+        if message:
+            self.set_info_message(message)
+        else:
+            self.set_info_message("Engines idle")
+
+    def manual_evaluation_complete(self, engine_label: str) -> None:
+        self.manual_engine_busy = False
+        if not self.self_play_active:
+            self.set_manual_controls_enabled(True)
+        self.clear_engine_activity(f"Manual evaluation finished: {engine_label}")
+
+    def self_play_evaluation_complete(self, engine_label: str) -> None:
+        self.set_info_message(f"Self-play: {engine_label} move received")
 
     def toggle_self_play(self) -> None:
         if self.self_play_active:
