@@ -126,7 +126,7 @@ def start_engine_process(path: str) -> QProcess:
 def main():
     args = parse_args()
     board = chess.Board() if not args.fen else chess.Board(args.fen)
-    dev = args.dev
+    dev = not args.dev
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_engine_path = os.path.join(script_dir, "engine.py")
