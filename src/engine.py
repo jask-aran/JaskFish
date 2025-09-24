@@ -519,7 +519,7 @@ STRATEGY_ENABLE_FLAGS = {
     "opening_book": False,
     "repetition_avoidance": False,
     "heuristic": True,
-    "fallback_random": True,
+    "fallback_random": False,
 }
 
 
@@ -731,7 +731,6 @@ class MateInOneStrategy(MoveStrategy):
 class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
-        fallback: Optional[MoveStrategy] = None,
         search_depth: int = 5,
         quiescence_depth: int = 6,
         mobility_weight: float = 4.0,
@@ -739,15 +738,14 @@ class HeuristicSearchStrategy(MoveStrategy):
         pawn_structure_weight: float = 10.0,
         rook_activity_weight: float = 6.0,
         bishop_pair_bonus: float = 30.0,
-        base_time_limit: float = 2.0,
-        max_time_limit: float = 5.0,
-        min_time_limit: float = 0.05,
-        time_allocation_factor: float = 0.03,
+        base_time_limit: float = 4.0,
+        max_time_limit: float = 12.0,
+        min_time_limit: float = 0.25,
+        time_allocation_factor: float = 0.08,
         transposition_table_size: int = 200000,
         **kwargs,
     ):
         super().__init__(priority=70, **kwargs)
-        self._fallback = fallback
         self.search_depth = max(1, search_depth)
         self.quiescence_depth = max(0, quiescence_depth)
         self.mobility_weight = mobility_weight
@@ -792,8 +790,6 @@ class HeuristicSearchStrategy(MoveStrategy):
                     score=0.0,
                     metadata={"status": "stalemate"},
                 )
-            if self._fallback:
-                return self._fallback.generate_move(board, context)
             return None
 
         depth_limit = self._resolve_depth_limit(context)
@@ -863,9 +859,6 @@ class HeuristicSearchStrategy(MoveStrategy):
             pass
 
         search_time = time.perf_counter() - self._search_start_time
-
-        if best_move is None and self._fallback:
-            return self._fallback.generate_move(board, context)
 
         if best_move is None:
             return None
@@ -1432,23 +1425,20 @@ class ChessEngine:
                 )
             )
 
-        fallback_strategy: Optional[MoveStrategy] = None
-        if STRATEGY_ENABLE_FLAGS.get("fallback_random", True):
-            fallback_strategy = FallbackRandomStrategy(
-                self.random_move, name="FallbackRandomStrategy"
-            )
-
         if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
             strategies_to_register.append(
                 HeuristicSearchStrategy(
-                    fallback=fallback_strategy,
                     name="HeuristicSearchStrategy",
                     search_depth=5,
                 )
             )
 
-        if fallback_strategy is not None:
-            strategies_to_register.append(fallback_strategy)
+        if STRATEGY_ENABLE_FLAGS.get("fallback_random", False):
+            strategies_to_register.append(
+                FallbackRandomStrategy(
+                    self.random_move, name="FallbackRandomStrategy"
+                )
+            )
 
         for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
@@ -1720,11 +1710,6 @@ class ChessEngine:
             else:
                 if self.debug:
                     self._log_debug("no strategy produced a move")
-                move = self.random_move(board_snapshot)
-                if move:
-                    print(
-                        "info string fallback RandomFallback selected move " f"{move}"
-                    )
 
             with self.state_lock:
                 if move:

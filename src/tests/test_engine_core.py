@@ -284,18 +284,23 @@ def test_process_go_command_handles_strategy_exception(capsys, deterministic_eng
     assert deterministic_engine.move_calculating is False
 
 
-def test_process_go_command_falls_back_to_random_move(capsys, deterministic_engine, monkeypatch):
+def test_process_go_command_handles_missing_move(capsys, deterministic_engine, monkeypatch):
     monkeypatch.setattr(
         deterministic_engine.strategy_selector,
         "select_move",
         lambda board, context: None,
     )
-    monkeypatch.setattr(deterministic_engine, "random_move", lambda board: "a2a3")
+
+    def fail_random_move(board):
+        raise AssertionError("random fallback should not be invoked")
+
+    monkeypatch.setattr(deterministic_engine, "random_move", fail_random_move)
     deterministic_engine.move_calculating = True
     deterministic_engine.process_go_command({})
     output_lines = [line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert any("fallback RandomFallback" in line for line in output_lines)
-    assert any(line.startswith("bestmove a2a3") for line in output_lines)
+    assert not any("fallback RandomFallback" in line for line in output_lines)
+    assert "bestmove (none)" in output_lines
+    assert "readyok" in output_lines
     assert deterministic_engine.move_calculating is False
 
 
@@ -500,7 +505,7 @@ def test_parse_go_args_handles_ponder_flag(deterministic_engine):
     assert parsed == {"ponder": True}
 
 
-def test_random_move_fallback_metadata(monkeypatch, deterministic_engine, capsys):
+def test_process_go_command_logs_when_strategies_fail(monkeypatch, deterministic_engine, capsys):
     deterministic_engine.strategy_selector.clear_strategies()
 
     class NullStrategy(engine_module.MoveStrategy):
@@ -514,12 +519,12 @@ def test_random_move_fallback_metadata(monkeypatch, deterministic_engine, capsys
             return None
 
     deterministic_engine.register_strategy(NullStrategy())
-    monkeypatch.setattr(deterministic_engine, "random_move", lambda board: "h2h4")
+    deterministic_engine.debug = True
     deterministic_engine.move_calculating = True
     deterministic_engine.process_go_command({})
-    output = capsys.readouterr().out
-    assert "fallback RandomFallback" in output
-    assert "bestmove h2h4" in output
+    output_lines = [line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert any("strategy produced no result: Null" in line for line in output_lines)
+    assert "bestmove (none)" in output_lines
     assert deterministic_engine.move_calculating is False
 
 
@@ -564,10 +569,9 @@ def test_heuristic_time_budget_derivation():
     assert strategy._determine_time_budget(movetime_context) == strategy.min_time_limit
 
 
-def test_heuristic_timeout_uses_fallback():
-    fallback = DummyStrategy("h2h4")
+def test_heuristic_timeout_returns_none_when_time_exceeded():
     strategy = engine_module.HeuristicSearchStrategy(
-        fallback=fallback, search_depth=2, quiescence_depth=0
+        search_depth=2, quiescence_depth=0
     )
     board = chess.Board()
     setattr(board, "zobrist_hash", lambda: hash(board.fen()))
@@ -583,7 +587,7 @@ def test_heuristic_timeout_uses_fallback():
     strategy._alpha_beta = lambda *args, **kwargs: (_ for _ in ()).throw(engine_module._SearchTimeout())
 
     result = strategy.generate_move(board, context)
-    assert result is not None and result.move == "h2h4"
+    assert result is None
 
 
 def test_quiescence_move_order_prioritizes_captures_and_checks():
