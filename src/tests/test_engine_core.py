@@ -621,3 +621,49 @@ def test_history_scores_decay_when_exceeding_threshold():
     for _ in range(1000):
         strategy._record_history(True, move, depth=30)
     assert strategy._history_scores[key] < 500000
+
+
+def test_history_scores_decay_and_prune_entries():
+    strategy = engine_module.HeuristicSearchStrategy(search_depth=1)
+    keep_key = (True, chess.E2, chess.E4)
+    prune_key = (True, chess.A2, chess.A3)
+    strategy._history_scores[keep_key] = 100.0
+    strategy._history_scores[prune_key] = 0.5
+
+    strategy._decay_history_scores(factor=0.5)
+
+    assert pytest.approx(strategy._history_scores[keep_key], 0.01) == 50.0
+    assert prune_key not in strategy._history_scores
+
+
+def test_heuristic_generate_move_populates_principal_variation():
+    board = chess.Board("8/8/8/3k4/8/8/8/3K4 w - - 0 1")
+    strategy = engine_module.HeuristicSearchStrategy(search_depth=2, quiescence_depth=0)
+    context = engine_module.StrategyContext(
+        fullmove_number=board.fullmove_number,
+        halfmove_clock=board.halfmove_clock,
+        piece_count=len(board.piece_map()),
+        material_imbalance=0,
+        turn=board.turn,
+        fen=board.fen(),
+        legal_moves_count=board.legal_moves.count(),
+    )
+
+    result = strategy.generate_move(board, context)
+    assert result is not None
+    pv_line = result.metadata.get("pv")
+    assert isinstance(pv_line, list)
+    if pv_line:
+        assert pv_line[0] == result.move
+    assert result.metadata["depth"] >= 1
+    assert result.metadata.get("principal_move") == result.move
+
+
+def test_static_exchange_score_falls_back_when_missing_see():
+    strategy = engine_module.HeuristicSearchStrategy(search_depth=1)
+    board = chess.Board()
+    move = chess.Move.from_uci("g1f3")
+    board.see = lambda _move: (_ for _ in ()).throw(ValueError("missing"))
+    assert strategy._static_exchange_score(board, move) == strategy._capture_score(
+        board, move
+    )

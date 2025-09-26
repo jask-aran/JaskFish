@@ -344,7 +344,7 @@ class ChessGUI(QMainWindow):
         automation_row.addWidget(swap_button)
         self.swap_button = swap_button
 
-        restart_engine_button = QPushButton("Restart Engines")
+        restart_engine_button = QPushButton("Restart Engine")
         restart_engine_button.clicked.connect(self.restart_engine)
         self.style_control_button(restart_engine_button)
         automation_row.addWidget(restart_engine_button)

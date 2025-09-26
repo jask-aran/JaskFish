@@ -762,12 +762,24 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._transposition_table_limit = max(1000, transposition_table_size)
         self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
         self._killer_slots = 2
+        self._aspiration_window = 60.0
+        self._aspiration_growth = 2.0
+        self._null_move_min_depth = 3
+        self._null_move_reduction_base = 2
+        self._null_move_depth_scale = 3
+        self._lmr_min_depth = 3
+        self._lmr_min_move_index = 3
+        self._futility_depth_limit = 2
+        self._futility_base_margin = 120.0
+        self._razoring_depth_limit = 2
+        self._razoring_margin = 325.0
 
         # Search state (initialised per search invocation)
         self._search_deadline: Optional[float] = None
         self._search_start_time: float = 0.0
         self._nodes_visited: int = 0
         self._killer_moves: List[List[Optional[chess.Move]]] = []
+        self._principal_variation: List[chess.Move] = []
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -809,48 +821,135 @@ class HeuristicSearchStrategy(MoveStrategy):
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
         completed_depth = 0
+        last_score: Optional[float] = None
+        self._principal_variation = []
 
         try:
             for current_depth in range(1, depth_limit + 1):
-                alpha = -float("inf")
-                beta = float("inf")
-                iteration_best_move: Optional[chess.Move] = None
-                iteration_best_score = -float("inf")
+                if current_depth > 1:
+                    self._decay_history_scores()
+                aspiration = self._aspiration_window
+                alpha_window = -float(self._mate_score)
+                beta_window = float(self._mate_score)
+                if last_score is not None:
+                    alpha_window = max(
+                        last_score - aspiration, -float(self._mate_score)
+                    )
+                    beta_window = min(
+                        last_score + aspiration, float(self._mate_score)
+                    )
 
-                tt_entry = self._transposition_table.get(
-                    chess.polyglot.zobrist_hash(board)
-                )
-                tt_move = tt_entry.move if tt_entry else None
-                moves = self._order_moves(board, 0, tt_move, best_move)
+                while True:
+                    search_alpha = alpha_window
+                    search_beta = beta_window
+                    alpha = search_alpha
+                    beta = search_beta
+                    iteration_best_move: Optional[chess.Move] = None
+                    iteration_best_score = -float("inf")
+                    fail_low = False
+                    fail_high = False
 
-                for move in moves:
+                    tt_entry = self._transposition_table.get(
+                        chess.polyglot.zobrist_hash(board)
+                    )
+                    tt_move = tt_entry.move if tt_entry else None
+                    principal_move = (
+                        self._principal_variation[0]
+                        if self._principal_variation
+                        else best_move
+                    )
+                    moves = self._order_moves(board, 0, tt_move, principal_move)
+
+                    for move_index, move in enumerate(moves):
+                        if self._time_exceeded():
+                            raise _SearchTimeout()
+
+                        color = board.turn
+                        board.push(move)
+                        if move_index == 0:
+                            score = -self._alpha_beta(
+                                board,
+                                depth=current_depth - 1,
+                                alpha=-beta,
+                                beta=-alpha,
+                                ply=1,
+                                is_pv=True,
+                            )
+                        else:
+                            score = -self._alpha_beta(
+                                board,
+                                depth=current_depth - 1,
+                                alpha=-alpha - 1,
+                                beta=-alpha,
+                                ply=1,
+                                is_pv=False,
+                            )
+                            if score > alpha:
+                                score = -self._alpha_beta(
+                                    board,
+                                    depth=current_depth - 1,
+                                    alpha=-beta,
+                                    beta=-alpha,
+                                    ply=1,
+                                    is_pv=True,
+                                )
+                        board.pop()
+
+                        if score > iteration_best_score:
+                            iteration_best_score = score
+                            iteration_best_move = move
+
+                        if score > alpha:
+                            alpha = score
+
+                        if alpha >= beta:
+                            fail_high = True
+                            if not board.is_capture(move):
+                                self._record_history(color, move, current_depth)
+                            break
+
                     if self._time_exceeded():
                         raise _SearchTimeout()
 
-                    color = board.turn
-                    board.push(move)
-                    score = -self._alpha_beta(
-                        board,
-                        depth=current_depth - 1,
-                        alpha=-beta,
-                        beta=-alpha,
-                        ply=1,
-                    )
-                    board.pop()
-
-                    if score > iteration_best_score:
-                        iteration_best_score = score
-                        iteration_best_move = move
-
-                    alpha = max(alpha, score)
-                    if alpha >= beta:
-                        self._record_history(color, move, current_depth)
+                    if iteration_best_move is None:
                         break
 
-                if iteration_best_move is not None:
+                    if iteration_best_score <= search_alpha and search_alpha > -float(
+                        self._mate_score
+                    ):
+                        fail_low = True
+
+                    if iteration_best_score >= search_beta and search_beta < float(
+                        self._mate_score
+                    ):
+                        fail_high = True
+
+                    if fail_low or fail_high:
+                        aspiration *= self._aspiration_growth
+                        alpha_window = max(
+                            -float(self._mate_score),
+                            iteration_best_score - aspiration,
+                        )
+                        beta_window = min(
+                            float(self._mate_score),
+                            iteration_best_score + aspiration,
+                        )
+
+                        if (
+                            alpha_window <= -float(self._mate_score)
+                            and beta_window >= float(self._mate_score)
+                        ):
+                            break
+                        continue
+
                     best_move = iteration_best_move
                     best_score = iteration_best_score
+                    last_score = iteration_best_score
                     completed_depth = current_depth
+                    self._principal_variation = self._extract_principal_variation(
+                        board, current_depth
+                    )
+                    break
 
                 if self._time_exceeded():
                     break
@@ -868,6 +967,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             "nodes": self._nodes_visited,
             "time": search_time,
             "principal_move": best_move.uci(),
+            "pv": [move.uci() for move in self._principal_variation],
         }
         return StrategyResult(
             move=best_move.uci(),
@@ -920,6 +1020,8 @@ class HeuristicSearchStrategy(MoveStrategy):
         alpha: float,
         beta: float,
         ply: int,
+        is_pv: bool,
+        allow_null: bool = True,
     ) -> float:
         self._nodes_visited += 1
 
@@ -935,9 +1037,10 @@ class HeuristicSearchStrategy(MoveStrategy):
         ):
             return 0.0
 
-        if depth == 0:
+        if depth <= 0:
             return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
 
+        in_check = board.is_check()
         key = chess.polyglot.zobrist_hash(board)
         entry = self._transposition_table.get(key)
         if entry and entry.depth >= depth:
@@ -945,29 +1048,135 @@ class HeuristicSearchStrategy(MoveStrategy):
                 return entry.value
             if entry.flag == TranspositionFlag.LOWERBOUND:
                 alpha = max(alpha, entry.value)
-            elif entry.flag == TranspositionFlag.UPPERBOUND:
+            else:
                 beta = min(beta, entry.value)
             if alpha >= beta:
                 return entry.value
 
         tt_move = entry.move if entry else None
-        best_value = -float("inf")
-        best_move: Optional[chess.Move] = None
-        alpha_original = alpha
-        beta_original = beta
+        static_eval: Optional[float] = None
+
+        if not in_check and not is_pv:
+            if depth <= self._razoring_depth_limit:
+                static_eval = static_eval or self._evaluate_board(board)
+                if static_eval + self._razoring_margin <= alpha:
+                    reduced = self._alpha_beta(
+                        board,
+                        depth - 1,
+                        alpha,
+                        beta,
+                        ply,
+                        is_pv,
+                        allow_null,
+                    )
+                    if reduced <= alpha:
+                        return reduced
+
+            if depth <= self._futility_depth_limit:
+                static_eval = static_eval or self._evaluate_board(board)
+                margin = self._futility_margin(depth)
+                if static_eval + margin <= alpha:
+                    return static_eval + margin
+
+        if (
+            allow_null
+            and not is_pv
+            and depth >= self._null_move_min_depth
+            and not in_check
+            and self._has_sufficient_material(board)
+        ):
+            reduction = self._null_move_reduction(depth)
+            board.push(chess.Move.null())
+            try:
+                null_score = -self._alpha_beta(
+                    board,
+                    depth=depth - 1 - reduction,
+                    alpha=-beta,
+                    beta=-beta + 1,
+                    ply=ply + 1,
+                    is_pv=False,
+                    allow_null=False,
+                )
+            finally:
+                board.pop()
+            if null_score >= beta:
+                return beta
 
         moves = self._order_moves(board, ply, tt_move)
         if not moves:
             return self._evaluate_board(board)
 
-        for move in moves:
+        best_value = -float("inf")
+        best_move: Optional[chess.Move] = None
+        alpha_original = alpha
+
+        for move_index, move in enumerate(moves):
             if self._time_exceeded():
                 raise _SearchTimeout()
 
+            is_capture = board.is_capture(move)
+            gives_check = board.gives_check(move)
+            promotion = move.promotion is not None
             color = board.turn
+
+            reduction = 0
+            child_is_pv = is_pv and move_index == 0
+            search_depth = depth - 1
+            new_allow_null = allow_null and not is_capture
+
+            if (
+                depth >= self._lmr_min_depth
+                and move_index >= self._lmr_min_move_index
+                and not child_is_pv
+                and not is_capture
+                and not gives_check
+                and not promotion
+            ):
+                reduction = self._late_move_reduction(depth, move_index)
+                search_depth = max(0, depth - 1 - reduction)
+
             board.push(move)
             try:
-                score = -self._alpha_beta(board, depth - 1, -beta, -alpha, ply + 1)
+                if child_is_pv:
+                    score = -self._alpha_beta(
+                        board,
+                        search_depth,
+                        alpha=-beta,
+                        beta=-alpha,
+                        ply=ply + 1,
+                        is_pv=True,
+                        allow_null=new_allow_null,
+                    )
+                else:
+                    score = -self._alpha_beta(
+                        board,
+                        search_depth,
+                        alpha=-alpha - 1,
+                        beta=-alpha,
+                        ply=ply + 1,
+                        is_pv=False,
+                        allow_null=new_allow_null,
+                    )
+                    if reduction and score > alpha:
+                        score = -self._alpha_beta(
+                            board,
+                            depth - 1,
+                            alpha=-beta,
+                            beta=-alpha,
+                            ply=ply + 1,
+                            is_pv=True,
+                            allow_null=new_allow_null,
+                        )
+                    elif score > alpha:
+                        score = -self._alpha_beta(
+                            board,
+                            depth - 1,
+                            alpha=-beta,
+                            beta=-alpha,
+                            ply=ply + 1,
+                            is_pv=True,
+                            allow_null=new_allow_null,
+                        )
             except _SearchTimeout:
                 board.pop()
                 raise
@@ -981,7 +1190,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                 alpha = score
 
             if alpha >= beta:
-                if not board.is_capture(move):
+                if not is_capture:
                     self._record_killer(ply, move)
                     self._record_history(color, move, depth)
                 self._store_transposition_entry(
@@ -1044,7 +1253,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             if board.is_capture(move) or move.promotion or board.gives_check(move):
                 captures.append(move)
         captures.sort(
-            key=lambda mv: self._capture_score(board, mv)
+            key=lambda mv: self._static_exchange_score(board, mv)
             + (500 if board.gives_check(mv) else 0),
             reverse=True,
         )
@@ -1062,6 +1271,14 @@ class HeuristicSearchStrategy(MoveStrategy):
             EVAL_PIECE_VALUES.get(moving_piece.piece_type, 0) if moving_piece else 0
         )
         return captured_value - moving_value
+
+    def _static_exchange_score(self, board: chess.Board, move: chess.Move) -> float:
+        if hasattr(board, "see"):
+            try:
+                return float(board.see(move))
+            except (ValueError, AttributeError):
+                pass
+        return self._capture_score(board, move)
 
     def _order_moves(
         self,
@@ -1083,15 +1300,16 @@ class HeuristicSearchStrategy(MoveStrategy):
                 return 900_000
 
             score = 0.0
-            if board.is_capture(move):
-                score += 500_000 + self._capture_score(board, move)
+            is_capture = board.is_capture(move)
+            if is_capture:
+                score += 500_000 + self._static_exchange_score(board, move)
             if move in killer_moves:
                 score += 80_000
             history_key = (board.turn, move.from_square, move.to_square)
             score += self._history_scores.get(history_key, 0.0)
             if move.promotion:
                 score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
-            if board.gives_check(move):
+            if not is_capture and board.gives_check(move):
                 score += 40_000
             return score
 
@@ -1114,6 +1332,17 @@ class HeuristicSearchStrategy(MoveStrategy):
         if self._history_scores[key] > 500000:
             self._history_scores[key] *= 0.5
 
+    def _decay_history_scores(self, factor: float = 0.9) -> None:
+        if not self._history_scores:
+            return
+        keys = list(self._history_scores.keys())
+        for key in keys:
+            new_value = self._history_scores[key] * factor
+            if new_value < 1.0:
+                del self._history_scores[key]
+            else:
+                self._history_scores[key] = new_value
+
     def _store_transposition_entry(
         self,
         key: int,
@@ -1128,6 +1357,42 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._transposition_table[key] = TranspositionEntry(depth, value, flag, move)
         if len(self._transposition_table) > self._transposition_table_limit:
             self._transposition_table.pop(next(iter(self._transposition_table)))
+
+    def _futility_margin(self, depth: int) -> float:
+        return self._futility_base_margin * max(1, depth)
+
+    def _null_move_reduction(self, depth: int) -> int:
+        return self._null_move_reduction_base + max(0, depth // max(1, self._null_move_depth_scale))
+
+    def _has_sufficient_material(self, board: chess.Board) -> bool:
+        material = 0
+        for piece in board.piece_map().values():
+            if piece.piece_type == chess.KING:
+                continue
+            material += EVAL_PIECE_VALUES.get(piece.piece_type, 0)
+        return material > 2 * EVAL_PIECE_VALUES[chess.PAWN]
+
+    def _late_move_reduction(self, depth: int, move_index: int) -> int:
+        depth_term = math.log(max(depth, 2), 2)
+        move_term = math.log(move_index + 1, 2)
+        return max(1, int((depth_term * move_term) / 2))
+
+    def _extract_principal_variation(
+        self, board: chess.Board, depth: int
+    ) -> List[chess.Move]:
+        pv: List[chess.Move] = []
+        if depth <= 0:
+            return pv
+        probe_board = board.copy(stack=False)
+        for _ in range(depth):
+            entry = self._transposition_table.get(
+                chess.polyglot.zobrist_hash(probe_board)
+            )
+            if not entry or entry.move is None:
+                break
+            pv.append(entry.move)
+            probe_board.push(entry.move)
+        return pv
 
     def _time_exceeded(self) -> bool:
         if self._search_deadline is None:
