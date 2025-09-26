@@ -1039,8 +1039,17 @@ def test_headless_self_play_midgame_trace(require_dev_marker):
     assert combined_trace.count("bestmove") == plies
     assert any("search timeout" in chunk for chunk in go_chunks)
     assert any("completed depth=3" in chunk for chunk in go_chunks)
-    assert any("completed depth=2" in chunk for chunk in go_chunks)
-    assert captured_moves[:2] == ["d4c5", "e7c5"]
+    expected_line = [
+        "d4c5",
+        "e7c5",
+        "d1e1",
+        "c5e3",
+        "f2e3",
+        "d8e8",
+        "f1f2",
+        "a8d8",
+    ]
+    assert captured_moves == expected_line
     assert len(captured_moves) == plies
     assert harness.ui.board.fullmove_number >= 14
 

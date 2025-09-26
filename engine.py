@@ -6,7 +6,7 @@ import threading
 import math
 import os
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -519,6 +519,7 @@ class MoveStrategy(ABC):
 STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
     "opening_book": False,
+    "forcing_scan": True,
     "repetition_avoidance": False,
     "heuristic": True,
     "fallback_random": False,
@@ -596,8 +597,7 @@ class StrategySelector:
                 if strategy.short_circuit:
                     if self._uses_default_policy:
                         return result
-                    break
-                if self._uses_default_policy:
+                elif self._uses_default_policy:
                     return result
 
         if not strategy_results:
@@ -631,7 +631,7 @@ class StrategySelector:
             confidence = (
                 float(result.confidence) if result.confidence is not None else 0.0
             )
-            key = (float(strategy.priority), score, confidence)
+            key = (score, confidence, float(strategy.priority))
             if best_key is None or key > best_key:
                 best_key = key
                 best_result = result
@@ -730,20 +730,113 @@ class MateInOneStrategy(MoveStrategy):
         return None
 
 
+class ForcingScanStrategy(MoveStrategy):
+    def __init__(self, depth: int = 2, **kwargs: Any) -> None:
+        super().__init__(priority=60, short_circuit=False, **kwargs)
+        self.depth = max(1, depth)
+
+    def is_applicable(self, context: StrategyContext) -> bool:
+        return context.legal_moves_count > 0
+
+    def generate_move(
+        self, board: chess.Board, context: StrategyContext
+    ) -> Optional[StrategyResult]:
+        if context.legal_moves_count == 0:
+            return None
+
+        def forcing_moves(b: chess.Board) -> List[chess.Move]:
+            return [
+                move
+                for move in b.legal_moves
+                if b.is_capture(move) or b.gives_check(move) or move.promotion
+            ]
+
+        def move_see(b: chess.Board, move: chess.Move) -> float:
+            try:
+                return float(b.see(move))
+            except Exception:
+                captured = b.piece_at(move.to_square)
+                if captured is None and b.is_en_passant(move):
+                    captured = chess.Piece(chess.PAWN, not b.turn)
+                moving = b.piece_at(move.from_square)
+                gain = 0.0
+                if captured:
+                    gain += EVAL_PIECE_VALUES.get(captured.piece_type, 0)
+                if moving:
+                    gain -= EVAL_PIECE_VALUES.get(moving.piece_type, 0)
+                return gain
+
+        def move_value(b: chess.Board, move: chess.Move) -> float:
+            value = move_see(b, move)
+            if abs(value) < 10.0:
+                value *= 100.0
+            if b.gives_check(move):
+                value += 20.0
+            if move.promotion:
+                value += 80.0
+            return value
+
+        def search(b: chess.Board, depth: int) -> float:
+            if depth == 0:
+                return 0.0
+            candidates = forcing_moves(b)
+            if not candidates:
+                return 0.0
+            scored_moves = [
+                (move_value(b, move), move)
+                for move in candidates
+            ]
+            scored_moves.sort(key=lambda item: item[0], reverse=True)
+            best = -1e9
+            for base_score, move in scored_moves:
+                b.push(move)
+                reply = search(b, depth - 1)
+                b.pop()
+                total = base_score - reply
+                if total > best:
+                    best = total
+            return 0.0 if best == -1e9 else best
+
+        candidates = forcing_moves(board)
+        if not candidates:
+            return None
+
+        scored_candidates = [
+            (move_value(board, move), move) for move in candidates
+        ]
+        scored_candidates.sort(key=lambda item: item[0], reverse=True)
+
+        best_move: Optional[chess.Move] = None
+        best_score = -1e9
+        for base_score, move in scored_candidates:
+            board.push(move)
+            reply = search(board, self.depth - 1)
+            board.pop()
+            total = base_score - reply
+            if total > best_score:
+                best_score = total
+                best_move = move
+
+        if best_move is None:
+            return None
+
+        return StrategyResult(
+            move=best_move.uci(),
+            strategy_name=self.name,
+            score=best_score,
+            confidence=self.confidence or 0.6,
+        )
+
+
 class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
         search_depth: int = 5,
         quiescence_depth: int = 6,
-        mobility_weight: float = 4.0,
-        king_safety_weight: float = 12.0,
-        pawn_structure_weight: float = 10.0,
-        rook_activity_weight: float = 6.0,
-        bishop_pair_bonus: float = 30.0,
-        base_time_limit: float = 4.0,
-        max_time_limit: float = 12.0,
+        base_time_limit: float = 3.0,
+        max_time_limit: float = 24.0,
         min_time_limit: float = 0.25,
-        time_allocation_factor: float = 0.08,
+        time_allocation_factor: float = 0.10,
         transposition_table_size: int = 200000,
         logger: Optional[Callable[[str], None]] = None,
         **kwargs,
@@ -751,33 +844,28 @@ class HeuristicSearchStrategy(MoveStrategy):
         super().__init__(priority=70, **kwargs)
         self.search_depth = max(1, search_depth)
         self.quiescence_depth = max(0, quiescence_depth)
-        self.mobility_weight = mobility_weight
-        self.king_safety_weight = king_safety_weight
-        self.pawn_structure_weight = pawn_structure_weight
-        self.rook_activity_weight = rook_activity_weight
-        self.bishop_pair_bonus = bishop_pair_bonus
         self.base_time_limit = base_time_limit
-        self.max_time_limit = max_time_limit
         self.min_time_limit = min_time_limit
+        self.max_time_limit = max(max_time_limit, self.min_time_limit)
         self.time_allocation_factor = time_allocation_factor
         self._mate_score = 100000
-        self._transposition_table: Dict[int, TranspositionEntry] = {}
+        self._transposition_table: "OrderedDict[int, TranspositionEntry]" = OrderedDict()
         self._transposition_table_limit = max(1000, transposition_table_size)
         self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
         self._killer_slots = 2
-        self._aspiration_window = 100.0
+        self._aspiration_window = 50.0
         self._aspiration_growth = 2.0
         self._aspiration_fail_reset = 2
         self._null_move_min_depth = 3
-        self._null_move_reduction_base = 2
-        self._null_move_depth_scale = 3
-        self._lmr_min_depth = 3
-        self._lmr_min_move_index = 2
+        self._null_move_reduction_base = 1
+        self._null_move_depth_scale = 4
+        self._lmr_min_depth = 4
+        self._lmr_min_move_index = 4
         self._futility_depth_limit = 2
         self._futility_base_margin = 120.0
         self._razoring_depth_limit = 2
         self._razoring_margin = 325.0
-        self._depth_iteration_stop_ratio = 0.7
+        self._depth_iteration_stop_ratio = 0.8
 
         # Search state (initialised per search invocation)
         self._search_deadline: Optional[float] = None
@@ -788,8 +876,16 @@ class HeuristicSearchStrategy(MoveStrategy):
         # Lightweight per-search cache for expensive static evaluations
         self._eval_cache: Dict[Tuple[int, bool], float] = {}
         # Quiescence pruning: drop clearly losing captures unless they check or promote
-        self._qsearch_see_prune_threshold: float = -50.0
+        self._qsearch_see_prune_threshold: float = -0.5
         self._logger = logger or (lambda *_: None)
+
+        # Evaluation constants (centipawns)
+        self.bishop_pair_bonus = 40.0
+        self._passed_pawn_base_bonus = 20.0
+        self._passed_pawn_rank_bonus = 8.0
+        self._mobility_unit = 2.0
+        self._king_safety_opening_penalty = 12.0
+        self._king_safety_endgame_bonus = 6.0
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -851,7 +947,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                 aspiration = self._aspiration_window
                 alpha_window = -float(self._mate_score)
                 beta_window = float(self._mate_score)
-                if last_score is not None:
+                if last_score is not None and current_depth >= 2:
                     alpha_window = max(
                         last_score - aspiration, -float(self._mate_score)
                     )
@@ -1065,40 +1161,60 @@ class HeuristicSearchStrategy(MoveStrategy):
         return max(1, depth_limit)
 
     def _determine_time_budget(self, context: StrategyContext) -> Optional[float]:
-        if context.time_controls:
-            tc = context.time_controls
-            if tc.get("infinite"):
-                return None
+        tc = context.time_controls or {}
+        if tc.get("infinite"):
+            return None
 
-            if tc.get("movetime"):
-                return min(
-                    self.max_time_limit,
-                    max(self.min_time_limit, tc["movetime"] / 1000.0),
-                )
+        movetime = tc.get("movetime")
+        if movetime is not None:
+            seconds = movetime / 1000.0
+            return float(
+                max(self.min_time_limit, min(self.max_time_limit, seconds))
+            )
 
-            turn_key = "wtime" if context.turn == chess.WHITE else "btime"
-            inc_key = "winc" if context.turn == chess.WHITE else "binc"
-            time_left = tc.get(turn_key)
-            if time_left is not None:
-                increment = tc.get(inc_key, 0)
-                moves_to_go = tc.get("movestogo")
-                if moves_to_go:
-                    allocation = time_left / max(1, moves_to_go)
-                else:
-                    allocation = time_left * self.time_allocation_factor
-                allocation += increment
-                seconds = allocation / 1000.0
-                return min(self.max_time_limit, max(self.min_time_limit, seconds))
+        turn_key = "wtime" if context.turn == chess.WHITE else "btime"
+        inc_key = "winc" if context.turn == chess.WHITE else "binc"
+        if turn_key in tc:
+            time_left = max(0, tc.get(turn_key, 0))
+            increment = max(0, tc.get(inc_key, 0))
+            moves_to_go = tc.get("movestogo")
+            if moves_to_go:
+                budget_ms = time_left / max(1, moves_to_go)
+            else:
+                budget_ms = time_left * self.time_allocation_factor
+            budget_ms += increment
+            seconds = budget_ms / 1000.0
+            return float(
+                max(self.min_time_limit, min(self.max_time_limit, seconds))
+            )
 
-        dynamic_budget = self.base_time_limit
-        if context.legal_moves_count:
-            move_ratio = min(1.0, context.legal_moves_count / 40.0)
-            dynamic_budget *= 0.55 + 0.45 * (1.0 - move_ratio)
-        if context.piece_count <= 20:
-            dynamic_budget *= 1.2
-        if context.piece_count <= 12:
-            dynamic_budget *= 1.4
-        return min(self.max_time_limit, max(self.min_time_limit, dynamic_budget))
+        fallback = max(self.min_time_limit, min(self.max_time_limit, self.base_time_limit))
+
+        if context is not None:
+            complexity = context.legal_moves_count
+            phase = context.piece_count
+            # Normalise piece count to an opening/endgame scale (0.3 - 1.0)
+            phase_factor = 0.3 + min(1.0, max(0.0, (phase - 2) / 30.0)) * 0.7
+
+            if complexity <= 10:
+                complexity_factor = 0.25
+            elif complexity <= 20:
+                complexity_factor = 0.5
+            elif complexity <= 35:
+                complexity_factor = 0.9
+            elif complexity <= 60:
+                complexity_factor = 1.4
+            else:
+                complexity_factor = 1.8 + min(0.6, (complexity - 60) * 0.01)
+
+            tension_factor = 1.0
+            if context.in_check or context.opponent_mate_in_one_threat:
+                tension_factor = max(tension_factor, 1.35)
+
+            dynamic_budget = fallback * complexity_factor * phase_factor * tension_factor
+            fallback = max(self.min_time_limit, min(self.max_time_limit, dynamic_budget))
+
+        return float(fallback)
 
     def _alpha_beta(
         self,
@@ -1141,7 +1257,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                 return entry.value
 
         tt_move = entry.move if entry else None
-        static_eval: Optional[float] = None
+        static_eval: Optional[float] = entry.static_eval if entry else None
 
         if not in_check and not is_pv:
             if depth <= self._razoring_depth_limit:
@@ -1286,6 +1402,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                     best_value,
                     TranspositionFlag.LOWERBOUND,
                     best_move,
+                    static_eval,
                 )
                 return best_value
 
@@ -1293,7 +1410,17 @@ class HeuristicSearchStrategy(MoveStrategy):
         if best_value <= alpha_original:
             flag = TranspositionFlag.UPPERBOUND
 
-        self._store_transposition_entry(key, depth, best_value, flag, best_move)
+        if static_eval is None and not in_check:
+            static_eval = self._evaluate_board(board)
+
+        self._store_transposition_entry(
+            key,
+            depth,
+            best_value,
+            flag,
+            best_move,
+            static_eval,
+        )
         return best_value
 
     def _quiescence(
@@ -1454,19 +1581,23 @@ class HeuristicSearchStrategy(MoveStrategy):
         value: float,
         flag: TranspositionFlag,
         move: Optional[chess.Move],
+        static_eval: Optional[float] = None,
     ) -> None:
         existing = self._transposition_table.get(key)
         if existing and existing.depth > depth:
             return
-        self._transposition_table[key] = TranspositionEntry(depth, value, flag, move)
-        if len(self._transposition_table) > self._transposition_table_limit:
-            # Evict oldest entry (approximate FIFO) to keep memory bounded
-            try:
-                # Python 3.8+: pop oldest when last=False
-                self._transposition_table.popitem(last=False)
-            except TypeError:
-                # Fallback for environments without ordered popitem signature
-                self._transposition_table.pop(next(iter(self._transposition_table)))
+        if static_eval is None and existing:
+            static_eval = existing.static_eval
+        self._transposition_table[key] = TranspositionEntry(
+            depth,
+            value,
+            flag,
+            move,
+            static_eval,
+        )
+        self._transposition_table.move_to_end(key, last=True)
+        while len(self._transposition_table) > self._transposition_table_limit:
+            self._transposition_table.popitem(last=False)
 
     def _futility_margin(self, depth: int) -> float:
         return self._futility_base_margin * max(1, depth)
@@ -1475,12 +1606,30 @@ class HeuristicSearchStrategy(MoveStrategy):
         return self._null_move_reduction_base + max(0, depth // max(1, self._null_move_depth_scale))
 
     def _has_sufficient_material(self, board: chess.Board) -> bool:
-        material = 0
+        minor_or_rook_present = False
+        pawn_counts = {chess.WHITE: 0, chess.BLACK: 0}
+        queen_counts = {chess.WHITE: 0, chess.BLACK: 0}
+
         for piece in board.piece_map().values():
-            if piece.piece_type == chess.KING:
-                continue
-            material += EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-        return material > 2 * EVAL_PIECE_VALUES[chess.PAWN]
+            if piece.piece_type in (chess.BISHOP, chess.KNIGHT, chess.ROOK):
+                minor_or_rook_present = True
+            elif piece.piece_type == chess.PAWN:
+                pawn_counts[piece.color] += 1
+            elif piece.piece_type == chess.QUEEN:
+                queen_counts[piece.color] += 1
+
+        if minor_or_rook_present:
+            return True
+
+        total_pawns = pawn_counts[chess.WHITE] + pawn_counts[chess.BLACK]
+        total_queens = queen_counts[chess.WHITE] + queen_counts[chess.BLACK]
+
+        if total_queens:
+            if queen_counts[chess.WHITE] != queen_counts[chess.BLACK]:
+                return True
+            return total_pawns >= 3
+
+        return total_pawns >= 3
 
     def _late_move_reduction(self, depth: int, move_index: int) -> int:
         depth_term = math.log(max(depth, 2), 2)
@@ -1510,8 +1659,6 @@ class HeuristicSearchStrategy(MoveStrategy):
         return time.perf_counter() >= self._search_deadline
 
     def _evaluate_board(self, board: chess.Board) -> float:
-        # Cache expensive static evaluations for the current search using
-        # a side-to-move-aware Zobrist key to avoid recomputation.
         try:
             key = (chess.polyglot.zobrist_hash(board), board.turn)
             cached = self._eval_cache.get(key)
@@ -1521,15 +1668,8 @@ class HeuristicSearchStrategy(MoveStrategy):
             key = None
 
         material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        piece_square = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        pawn_files = {
-            chess.WHITE: [0] * 8,
-            chess.BLACK: [0] * 8,
-        }
-        bishop_counts = {
-            chess.WHITE: len(board.pieces(chess.BISHOP, chess.WHITE)),
-            chess.BLACK: len(board.pieces(chess.BISHOP, chess.BLACK)),
-        }
+        pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
+        bishops = {chess.WHITE: 0, chess.BLACK: 0}
 
         for square, piece in board.piece_map().items():
             value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
@@ -1537,145 +1677,93 @@ class HeuristicSearchStrategy(MoveStrategy):
             color = piece.color
             material[color] += value
             if table:
-                pst_index = (
-                    square if color == chess.WHITE else chess.square_mirror(square)
-                )
-                piece_square[color] += table[pst_index]
-            if piece.piece_type == chess.PAWN:
-                pawn_files[color][chess.square_file(square)] += 1
+                index = square if color == chess.WHITE else chess.square_mirror(square)
+                pst[color] += table[index]
+            if piece.piece_type == chess.BISHOP:
+                bishops[color] += 1
 
-        material_score = material[chess.WHITE] - material[chess.BLACK]
-        piece_square_score = piece_square[chess.WHITE] - piece_square[chess.BLACK]
+        score = (material[chess.WHITE] - material[chess.BLACK]) + (
+            pst[chess.WHITE] - pst[chess.BLACK]
+        )
 
-        pawn_structure_score = self._evaluate_pawn_structure(board, pawn_files)
-        rook_activity_score = self._evaluate_rook_activity(board)
-        bishop_pair_score = 0.0
-        if bishop_counts[chess.WHITE] >= 2:
-            bishop_pair_score += self.bishop_pair_bonus
-        if bishop_counts[chess.BLACK] >= 2:
-            bishop_pair_score -= self.bishop_pair_bonus
+        if bishops[chess.WHITE] >= 2:
+            score += self.bishop_pair_bonus
+        if bishops[chess.BLACK] >= 2:
+            score -= self.bishop_pair_bonus
 
-        mobility_score = self._mobility_score(board)
-        king_safety_score = self._king_safety_score(board)
+        # Passed pawns
+        for color in (chess.WHITE, chess.BLACK):
+            sign = 1 if color == chess.WHITE else -1
+            enemy_pawns = set(board.pieces(chess.PAWN, not color))
+            for pawn_square in board.pieces(chess.PAWN, color):
+                file_index = chess.square_file(pawn_square)
+                rank = chess.square_rank(pawn_square)
+                direction = 1 if color == chess.WHITE else -1
+                passed = True
+                for file_delta in (-1, 0, 1):
+                    nf = file_index + file_delta
+                    if not 0 <= nf < 8:
+                        continue
+                    r = rank + direction
+                    while 0 <= r < 8:
+                        sq = chess.square(nf, r)
+                        if sq in enemy_pawns:
+                            passed = False
+                            break
+                        r += direction
+                    if not passed:
+                        break
+                if passed:
+                    advancement = rank - 1 if color == chess.WHITE else 6 - rank
+                    bonus = self._passed_pawn_base_bonus + self._passed_pawn_rank_bonus * max(0, advancement)
+                    score += sign * bonus
 
+        # Mobility
+        current_mobility = board.legal_moves.count()
+        try:
+            board.push(chess.Move.null())
+            opponent_mobility = board.legal_moves.count()
+            board.pop()
+        except ValueError:
+            opponent_mobility = current_mobility
+        score += (current_mobility - opponent_mobility) * self._mobility_unit
+
+        # King safety
         phase = self._game_phase(board)
         opening_weight = phase
         endgame_weight = 1.0 - phase
-
-        positional = (
-            piece_square_score
-            + self.pawn_structure_weight * pawn_structure_score
-            + self.rook_activity_weight * rook_activity_score
-            + bishop_pair_score
-        )
-
-        dynamic = (
-            self.mobility_weight * mobility_score * opening_weight
-            + self.king_safety_weight * king_safety_score * opening_weight
-        )
-
-        endgame_terms = king_safety_score * endgame_weight * 0.5
-
-        total = material_score + positional + dynamic + endgame_terms
-        score = total if board.turn == chess.WHITE else -total
-
-        if key is not None:
-            self._eval_cache[key] = score
-        return score
-
-    def _mobility_score(self, board: chess.Board) -> float:
-        current_mobility = board.legal_moves.count()
-        board.push(chess.Move.null())
-        opponent_mobility = board.legal_moves.count()
-        board.pop()
-        return current_mobility - opponent_mobility
-
-    def _king_safety_score(self, board: chess.Board) -> float:
-        score = 0.0
         for color in (chess.WHITE, chess.BLACK):
+            sign = 1 if color == chess.WHITE else -1
             king_square = board.king(color)
             if king_square is None:
                 continue
-            opposing_attackers = len(board.attackers(not color, king_square))
-            friendly_cover = 0
+            attackers = len(board.attackers(not color, king_square))
+            ring = 0
             king_file = chess.square_file(king_square)
             king_rank = chess.square_rank(king_square)
             for file_delta in (-1, 0, 1):
                 for rank_delta in (-1, 0, 1):
+                    if file_delta == 0 and rank_delta == 0:
+                        continue
                     nf = king_file + file_delta
                     nr = king_rank + rank_delta
                     if 0 <= nf < 8 and 0 <= nr < 8:
                         neighbour = chess.square(nf, nr)
                         piece = board.piece_at(neighbour)
                         if piece and piece.color == color:
-                            friendly_cover += 1
-            penalty = opposing_attackers * 10 - friendly_cover * 2
-            if color == chess.WHITE:
-                score -= penalty
-            else:
-                score += penalty
-        return score
+                            ring += 1
+            opening_term = opening_weight * (
+                -self._king_safety_opening_penalty * attackers + 2.0 * ring
+            )
+            central_distance = abs(king_file - 3.5) + abs(king_rank - 3.5)
+            activity = self._king_safety_endgame_bonus * (3.5 - central_distance)
+            endgame_term = endgame_weight * activity
+            score += sign * (opening_term + endgame_term)
 
-    def _evaluate_pawn_structure(
-        self, board: chess.Board, pawn_files: Dict[bool, List[int]]
-    ) -> float:
-        score = 0.0
-        for color in (chess.WHITE, chess.BLACK):
-            pawns = board.pieces(chess.PAWN, color)
-            opponent_pawns = board.pieces(chess.PAWN, not color)
-            for file_index, count in enumerate(pawn_files[color]):
-                if count > 1:
-                    penalty = 8 * (count - 1)
-                    score -= penalty if color == chess.WHITE else -penalty
-                if count == 0:
-                    continue
-                adjacent_counts = 0
-                if file_index > 0:
-                    adjacent_counts += pawn_files[color][file_index - 1]
-                if file_index < 7:
-                    adjacent_counts += pawn_files[color][file_index + 1]
-                if adjacent_counts == 0:
-                    penalty = 12
-                    score -= penalty if color == chess.WHITE else -penalty
-
-            for pawn_square in pawns:
-                file_index = chess.square_file(pawn_square)
-                rank_range = (
-                    range(chess.square_rank(pawn_square) + 1, 8)
-                    if color == chess.WHITE
-                    else range(chess.square_rank(pawn_square) - 1, -1, -1)
-                )
-                blocked = False
-                for rank in rank_range:
-                    sq = chess.square(file_index, rank)
-                    if sq in opponent_pawns:
-                        blocked = True
-                        break
-                if not blocked:
-                    bonus = 15
-                    score += bonus if color == chess.WHITE else -bonus
-
-        return score / 100.0
-
-    def _evaluate_rook_activity(self, board: chess.Board) -> float:
-        score = 0.0
-        for color in (chess.WHITE, chess.BLACK):
-            friendly_pawns = board.pieces(chess.PAWN, color)
-            enemy_pawns = board.pieces(chess.PAWN, not color)
-            friendly_files = {chess.square_file(sq) for sq in friendly_pawns}
-            enemy_files = {chess.square_file(sq) for sq in enemy_pawns}
-            for rook_square in board.pieces(chess.ROOK, color):
-                file_index = chess.square_file(rook_square)
-                friendly_blockers = file_index in friendly_files
-                enemy_blockers = file_index in enemy_files
-                if not friendly_blockers and not enemy_blockers:
-                    bonus = 20
-                elif not friendly_blockers and enemy_blockers:
-                    bonus = 10
-                else:
-                    bonus = 0
-                score += bonus if color == chess.WHITE else -bonus
-        return score / 100.0
+        result = score if board.turn == chess.WHITE else -score
+        if key is not None:
+            self._eval_cache[key] = result
+        return result
 
     def _game_phase(self, board: chess.Board) -> float:
         phase_values = {
@@ -1814,6 +1902,13 @@ class ChessEngine:
                 )
             )
 
+        if STRATEGY_ENABLE_FLAGS.get("forcing_scan", True):
+            strategies_to_register.append(
+                ForcingScanStrategy(
+                    name="ForcingScanStrategy",
+                )
+            )
+
         if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
             strategies_to_register.append(
                 HeuristicSearchStrategy(
@@ -1888,13 +1983,18 @@ class ChessEngine:
 
     def detect_opponent_mate_in_one_threat(self, board: chess.Board) -> bool:
         board_copy = board.copy()
-        board_copy.turn = not board.turn
+        try:
+            board_copy.push(chess.Move.null())
+        except ValueError:
+            return False
+
         for move in board_copy.legal_moves:
             board_copy.push(move)
-            is_mate = board_copy.is_checkmate()
-            board_copy.pop()
-            if is_mate:
-                return True
+            try:
+                if board_copy.is_checkmate():
+                    return True
+            finally:
+                board_copy.pop()
         return False
 
     def compute_material_imbalance(self, board: chess.Board) -> int:
