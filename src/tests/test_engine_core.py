@@ -1,9 +1,14 @@
+import contextlib
+from collections import deque
 import io
+import re
+from typing import Optional
 
 import chess
 import pytest
 
 from src import engine as engine_module
+from src.self_play import SelfPlayManager
 
 
 class DummyStrategy(engine_module.MoveStrategy):
@@ -742,3 +747,284 @@ def test_generate_move_expands_aspiration_window_on_failures():
         if depth == 1
     }
     assert len(depth_one_windows) >= 2
+
+
+def test_heuristic_trace_logging_across_positions():
+    messages: list[str] = []
+    strategy = engine_module.HeuristicSearchStrategy(
+        search_depth=2,
+        quiescence_depth=0,
+        base_time_limit=0.4,
+        max_time_limit=0.6,
+        min_time_limit=0.05,
+        logger=messages.append,
+    )
+
+    fens = [
+        chess.STARTING_FEN,
+        "rnbqkb1r/pppp1ppp/5n2/4p3/1P6/2P5/P2PPPPP/RNBQKBNR w KQkq - 0 3",
+        "2r2rk1/1b2bppp/p2p1n2/1p1Pp3/1P2P3/P1N1BN2/1B3PPP/2RR2K1 w - - 0 21",
+    ]
+
+    for fen in fens:
+        board = chess.Board(fen)
+        context = engine_module.StrategyContext(
+            fullmove_number=board.fullmove_number,
+            halfmove_clock=board.halfmove_clock,
+            piece_count=len(board.piece_map()),
+            material_imbalance=0,
+            turn=board.turn,
+            fen=board.fen(),
+            legal_moves_count=board.legal_moves.count(),
+        )
+        result = strategy.generate_move(board, context)
+        assert result is not None
+
+    assert any("depth=1" in msg for msg in messages)
+    assert any("completed depth" in msg for msg in messages)
+
+
+def test_heuristic_stops_when_depth_consumes_budget(monkeypatch):
+    messages: list[str] = []
+    strategy = engine_module.HeuristicSearchStrategy(
+        search_depth=3,
+        quiescence_depth=0,
+        base_time_limit=1.0,
+        max_time_limit=1.0,
+        min_time_limit=0.1,
+        logger=messages.append,
+    )
+    strategy._depth_iteration_stop_ratio = 0.2
+
+    class FakeTimer:
+        def __init__(self, step: float = 0.3):
+            self.current = 0.0
+            self.step = step
+
+        def perf_counter(self) -> float:
+            value = self.current
+            self.current += self.step
+            return value
+
+    fake_timer = FakeTimer()
+    monkeypatch.setattr(engine_module.time, "perf_counter", fake_timer.perf_counter)
+
+    root_move = chess.Move.from_uci("e2e4")
+    strategy._order_moves = lambda *args, **kwargs: [root_move]
+    strategy._generate_quiescence_moves = lambda board: []
+
+    def scripted_alpha_beta(board, depth, alpha, beta, ply, is_pv, allow_null=True):
+        strategy._nodes_visited += 1
+        return 0.0
+
+    strategy._alpha_beta = scripted_alpha_beta
+
+    board = chess.Board()
+    context = engine_module.StrategyContext(
+        fullmove_number=board.fullmove_number,
+        halfmove_clock=board.halfmove_clock,
+        piece_count=len(board.piece_map()),
+        material_imbalance=0,
+        turn=board.turn,
+        fen=board.fen(),
+        legal_moves_count=board.legal_moves.count(),
+        time_controls={"movetime": 1000},
+    )
+
+    result = strategy.generate_move(board, context)
+    assert result is not None
+    assert any("consumed" in msg for msg in messages)
+    assert not any("depth=2" in msg for msg in messages)
+
+
+@pytest.fixture
+def require_dev_marker(request):
+    marker_expression = request.config.getoption("-m")
+    if not marker_expression or "dev" not in marker_expression:
+        pytest.skip("Run with -m dev to execute dev-only tests")
+
+
+class HeadlessSelfPlayUI:
+    def __init__(self, board: Optional[chess.Board] = None) -> None:
+        self.board = board or chess.Board()
+        self.self_play_active = False
+        self.board_enabled = True
+        self.manual_enabled = True
+        self.info_message = ""
+        self.last_activity: Optional[tuple[str, str]] = None
+
+    def set_self_play_active(self, active: bool) -> None:
+        self.self_play_active = active
+
+    def set_board_interaction_enabled(self, enabled: bool) -> None:
+        self.board_enabled = enabled
+
+    def set_manual_controls_enabled(self, enabled: bool) -> None:
+        self.manual_enabled = enabled
+
+    def set_info_message(self, message: str) -> None:
+        self.info_message = message
+
+    def indicate_engine_activity(self, engine_label: str, context: str) -> None:
+        self.last_activity = (engine_label, context)
+        self.info_message = f"{context}: {engine_label} evaluating…"
+
+    def clear_engine_activity(self, message: Optional[str] = None) -> None:
+        self.last_activity = None
+        self.info_message = message or "Engines idle"
+
+    def self_play_evaluation_complete(self, engine_label: str) -> None:
+        self.info_message = f"Self-play: {engine_label} move received"
+
+
+class EngineHarness:
+    def __init__(self) -> None:
+        self.engine = engine_module.ChessEngine(opening_book_path=None)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.engine.handle_debug("on")
+        self.bootstrap_output = buffer.getvalue()
+
+    def process_command(self, command: str) -> str:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self._dispatch(command)
+        return buffer.getvalue()
+
+    def _dispatch(self, command: str) -> None:
+        if command == "ucinewgame":
+            self.engine.handle_ucinewgame("")
+            return
+        if command.startswith("position "):
+            self.engine.handle_position(command[len("position "):])
+            return
+        if command == "go":
+            self.engine.move_calculating = True
+            self.engine.process_go_command({})
+            return
+        if command == "isready":
+            self.engine.handle_isready("")
+            return
+        if command.startswith("debug"):
+            self.engine.handle_debug(command[5:].strip())
+            return
+        if command == "stop":
+            return
+        self.engine.handle_unknown(command)
+
+
+class SelfPlayTestHarness:
+    def __init__(self, ui: Optional[HeadlessSelfPlayUI] = None) -> None:
+        self.ui = ui or HeadlessSelfPlayUI()
+        self.white_engine = EngineHarness()
+        self.black_engine = EngineHarness()
+
+        assert "Debug:True" in self.white_engine.bootstrap_output
+        assert "Debug:True" in self.black_engine.bootstrap_output
+
+        self.pending_go_outputs = {chess.WHITE: deque(), chess.BLACK: deque()}
+
+        engines = {chess.WHITE: self.white_engine, chess.BLACK: self.black_engine}
+        self._reverse_lookup = {self.white_engine: chess.WHITE, self.black_engine: chess.BLACK}
+
+        def send_command(engine_handle: EngineHarness, command: str) -> None:
+            chunk = engine_handle.process_command(command)
+            color = self._reverse_lookup[engine_handle]
+            if command == "go":
+                self.pending_go_outputs[color].append(chunk)
+
+        self.manager = SelfPlayManager(
+            self.ui,
+            engines,
+            send_command,
+            {chess.WHITE: "White - Engine 1", chess.BLACK: "Black - Engine 2"},
+        )
+
+    def start(self) -> None:
+        assert self.manager.start() is True
+        assert self.ui.self_play_active is True
+        assert self.ui.board_enabled is False
+        assert self.ui.manual_enabled is False
+
+    def play_plies(self, plies: int) -> tuple[list[str], list[str]]:
+        captured_moves: list[str] = []
+        go_chunks: list[str] = []
+        for _ in range(plies):
+            color = self.manager.current_expected_color()
+            assert color is not None
+            assert self.pending_go_outputs[color], "Expected pending search output"
+            go_chunk = self.pending_go_outputs[color].popleft()
+            go_chunks.append(go_chunk)
+            match = re.search(r"bestmove\s+(\S+)", go_chunk)
+            assert match, "Expected bestmove output from engine"
+            move_uci = match.group(1)
+            move = chess.Move.from_uci(move_uci)
+            assert move in self.ui.board.legal_moves, "Engine produced illegal move"
+            self.ui.board.push(move)
+            captured_moves.append(move_uci)
+            self.manager.on_engine_move(color, move_uci)
+        return captured_moves, go_chunks
+
+    def stop(self) -> None:
+        assert self.manager.stop("test complete") is True
+        assert self.ui.self_play_active is False
+        assert self.ui.board_enabled is True
+        assert self.ui.manual_enabled is True
+
+
+@pytest.mark.dev
+def test_headless_self_play_debug_trace(require_dev_marker):
+    harness = SelfPlayTestHarness()
+    harness.start()
+
+    plies = 12
+    captured_moves, go_chunks = harness.play_plies(plies)
+    harness.stop()
+
+    combined_trace = "".join(go_chunks)
+    assert combined_trace.count("bestmove") == plies
+    assert all("HeuristicSearchStrategy: start search" in chunk for chunk in go_chunks)
+    assert any("completed depth=5" in chunk for chunk in go_chunks)
+    assert "time_budget=" in combined_trace
+    assert captured_moves[:6] == [
+        "g1f3",
+        "g8f6",
+        "f3d4",
+        "b8c6",
+        "d4c6",
+        "b7c6",
+    ]
+    assert len(captured_moves) == plies
+    assert harness.ui.board.fullmove_number >= 7
+
+
+@pytest.mark.dev
+def test_headless_self_play_midgame_trace(require_dev_marker):
+    ui = HeadlessSelfPlayUI()
+    midgame_fen = "r2q1rk1/pp2bppp/2n1pn2/2pp4/3P4/2P1PN2/PP1NBPPP/R1BQ1RK1 w - - 0 10"
+    ui.board.set_fen(midgame_fen)
+
+    harness = SelfPlayTestHarness(ui)
+    harness.start()
+
+    plies = 8
+    captured_moves, go_chunks = harness.play_plies(plies)
+    harness.stop()
+
+    combined_trace = "".join(go_chunks)
+    assert combined_trace.count("bestmove") == plies
+    assert any("search timeout" in chunk for chunk in go_chunks)
+    assert any("completed depth=3" in chunk for chunk in go_chunks)
+    assert any("completed depth=2" in chunk for chunk in go_chunks)
+    assert captured_moves == [
+        "d4c5",
+        "e7c5",
+        "d1e1",
+        "c5b6",
+        "e2d1",
+        "a8b8",
+        "d1b3",
+        "d8c7",
+    ]
+    assert len(captured_moves) == plies
+    assert harness.ui.board.fullmove_number >= 14

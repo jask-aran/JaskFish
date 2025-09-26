@@ -765,17 +765,19 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._transposition_table_limit = max(1000, transposition_table_size)
         self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
         self._killer_slots = 2
-        self._aspiration_window = 60.0
+        self._aspiration_window = 100.0
         self._aspiration_growth = 2.0
+        self._aspiration_fail_reset = 2
         self._null_move_min_depth = 3
         self._null_move_reduction_base = 2
         self._null_move_depth_scale = 3
         self._lmr_min_depth = 3
-        self._lmr_min_move_index = 3
+        self._lmr_min_move_index = 2
         self._futility_depth_limit = 2
         self._futility_base_margin = 120.0
         self._razoring_depth_limit = 2
         self._razoring_margin = 325.0
+        self._depth_iteration_stop_ratio = 0.7
 
         # Search state (initialised per search invocation)
         self._search_deadline: Optional[float] = None
@@ -786,7 +788,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         # Lightweight per-search cache for expensive static evaluations
         self._eval_cache: Dict[Tuple[int, bool], float] = {}
         # Quiescence pruning: drop clearly losing captures unless they check or promote
-        self._qsearch_see_prune_threshold: float = -100.0
+        self._qsearch_see_prune_threshold: float = -50.0
         self._logger = logger or (lambda *_: None)
 
     def is_applicable(self, context: StrategyContext) -> bool:
@@ -840,6 +842,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._principal_variation = []
 
         search_interrupted = False
+        capped_by_budget = False
         current_depth = 0
         try:
             for current_depth in range(1, depth_limit + 1):
@@ -858,6 +861,8 @@ class HeuristicSearchStrategy(MoveStrategy):
 
                 depth_start_nodes = self._nodes_visited
                 depth_start_time = time.perf_counter()
+
+                failure_count = 0
 
                 while True:
                     search_alpha = alpha_window
@@ -945,6 +950,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                         fail_high = True
 
                     if fail_low or fail_high:
+                        failure_count += 1
                         cause = "fail-high" if fail_high else "fail-low"
                         aspiration *= self._aspiration_growth
                         alpha_window = max(
@@ -960,6 +966,15 @@ class HeuristicSearchStrategy(MoveStrategy):
                             f"{self.name}: depth={current_depth} {cause} "
                             f"aspiration -> [{alpha_window:.1f}, {beta_window:.1f}]"
                         )
+
+                        if failure_count >= self._aspiration_fail_reset:
+                            alpha_window = -float(self._mate_score)
+                            beta_window = float(self._mate_score)
+                            aspiration = float(self._mate_score)
+                            failure_count = 0
+                            self._logger(
+                                f"{self.name}: depth={current_depth} switching to full-window search"
+                            )
 
                         if (
                             alpha_window <= -float(self._mate_score)
@@ -986,9 +1001,22 @@ class HeuristicSearchStrategy(MoveStrategy):
                         f"nodes={self._nodes_visited} (+{depth_nodes}) time={depth_time:.2f}s "
                         f"pv={pv_line or iteration_best_move.uci()}"
                     )
+
+                    if self._search_deadline is not None:
+                        total_budget = self._search_deadline - self._search_start_time
+                        if total_budget > 0 and depth_time >= total_budget * self._depth_iteration_stop_ratio:
+                            usage = depth_time / total_budget
+                            capped_by_budget = True
+                            self._logger(
+                                f"{self.name}: depth={current_depth} consumed {usage:.0%} of budget; halting deeper search"
+                            )
+                            break
                     break
 
                 if self._time_exceeded():
+                    break
+
+                if capped_by_budget:
                     break
 
         except _SearchTimeout:
@@ -1003,14 +1031,14 @@ class HeuristicSearchStrategy(MoveStrategy):
 
         if best_move is None:
             self._logger(
-                f"{self.name}: no move found (interrupted={search_interrupted})"
+                f"{self.name}: no move found (interrupted={search_interrupted or capped_by_budget})"
             )
             return None
 
         self._logger(
             f"{self.name}: completed depth={completed_depth} score={best_score:.1f} "
             f"best={best_move.uci()} nodes={self._nodes_visited} time={search_time:.2f}s "
-            f"interrupted={search_interrupted}"
+            f"interrupted={search_interrupted} capped={capped_by_budget}"
         )
 
         metadata = {
@@ -1062,7 +1090,15 @@ class HeuristicSearchStrategy(MoveStrategy):
                 seconds = allocation / 1000.0
                 return min(self.max_time_limit, max(self.min_time_limit, seconds))
 
-        return self.base_time_limit
+        dynamic_budget = self.base_time_limit
+        if context.legal_moves_count:
+            move_ratio = min(1.0, context.legal_moves_count / 40.0)
+            dynamic_budget *= 0.55 + 0.45 * (1.0 - move_ratio)
+        if context.piece_count <= 20:
+            dynamic_budget *= 1.2
+        if context.piece_count <= 12:
+            dynamic_budget *= 1.4
+        return min(self.max_time_limit, max(self.min_time_limit, dynamic_budget))
 
     def _alpha_beta(
         self,
@@ -1449,7 +1485,7 @@ class HeuristicSearchStrategy(MoveStrategy):
     def _late_move_reduction(self, depth: int, move_index: int) -> int:
         depth_term = math.log(max(depth, 2), 2)
         move_term = math.log(move_index + 1, 2)
-        return max(1, int((depth_term * move_term) / 2))
+        return max(1, int((depth_term * move_term) / 1.5))
 
     def _extract_principal_variation(
         self, board: chess.Board, depth: int
