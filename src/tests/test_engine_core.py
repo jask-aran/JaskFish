@@ -574,7 +574,6 @@ def test_heuristic_timeout_returns_none_when_time_exceeded():
         search_depth=2, quiescence_depth=0
     )
     board = chess.Board()
-    setattr(board, "zobrist_hash", lambda: hash(board.fen()))
     context = engine_module.StrategyContext(
         fullmove_number=1,
         halfmove_clock=0,
@@ -584,7 +583,7 @@ def test_heuristic_timeout_returns_none_when_time_exceeded():
         legal_moves_count=board.legal_moves.count(),
     )
 
-    strategy._alpha_beta = lambda *args, **kwargs: (_ for _ in ()).throw(engine_module._SearchTimeout())
+    strategy._time_exceeded = lambda: True
 
     result = strategy.generate_move(board, context)
     assert result is None
@@ -667,3 +666,79 @@ def test_static_exchange_score_falls_back_when_missing_see():
     assert strategy._static_exchange_score(board, move) == strategy._capture_score(
         board, move
     )
+
+
+def test_alpha_beta_triggers_null_move_pruning():
+    board = chess.Board("4k3/8/8/8/8/8/4PPP1/3K4 w - - 0 1")
+    strategy = engine_module.HeuristicSearchStrategy(search_depth=3, quiescence_depth=0)
+    strategy._futility_depth_limit = 0
+    strategy._razoring_depth_limit = 0
+    strategy._null_move_min_depth = 2
+    strategy._lmr_min_depth = 10
+    null_depths: list[int] = []
+    strategy._null_move_reduction = lambda depth: null_depths.append(depth) or 1
+
+    strategy._alpha_beta(board, depth=3, alpha=-1000, beta=1000, ply=0, is_pv=False)
+
+    assert null_depths and all(depth >= 2 for depth in null_depths)
+
+
+def test_alpha_beta_applies_late_move_reductions():
+    board = chess.Board("4k3/8/8/8/8/8/4PPP1/3K4 w - - 0 1")
+    strategy = engine_module.HeuristicSearchStrategy(search_depth=3, quiescence_depth=0)
+    strategy._null_move_min_depth = 99  # disable null-move pruning to focus on LMR
+    strategy._lmr_min_depth = 2
+    strategy._lmr_min_move_index = 1
+    strategy._futility_depth_limit = 0
+    strategy._razoring_depth_limit = 0
+    strategy._evaluate_board = lambda _board: 0.0
+    reductions: list[tuple[int, int]] = []
+    strategy._late_move_reduction = (
+        lambda depth, index: reductions.append((depth, index)) or 1
+    )
+
+    strategy._alpha_beta(board, depth=2, alpha=-1000, beta=1000, ply=0, is_pv=False)
+
+    assert any(index >= 1 for _, index in reductions)
+
+
+def test_generate_move_expands_aspiration_window_on_failures():
+    board = chess.Board()
+    strategy = engine_module.HeuristicSearchStrategy(search_depth=3, quiescence_depth=0)
+    strategy._resolve_depth_limit = lambda _context: 2
+    root_move = chess.Move.from_uci("h2h3")
+    strategy._order_moves = (
+        lambda *args, **kwargs: [root_move]
+    )
+
+    outputs = iter([-50.0, -500.0, -150.0, -150.0])
+    windows: list[tuple[float, float, int]] = []
+
+    def scripted_alpha_beta(board, depth, alpha, beta, ply, is_pv, allow_null=True):
+        windows.append((alpha, beta, depth))
+        try:
+            return next(outputs)
+        except StopIteration:
+            return -150.0
+
+    strategy._alpha_beta = scripted_alpha_beta
+
+    context = engine_module.StrategyContext(
+        fullmove_number=1,
+        halfmove_clock=0,
+        piece_count=len(board.piece_map()),
+        material_imbalance=0,
+        turn=board.turn,
+        fen=board.fen(),
+        legal_moves_count=board.legal_moves.count(),
+    )
+
+    result = strategy.generate_move(board, context)
+
+    assert result is not None and result.move == root_move.uci()
+    depth_one_windows = {
+        (alpha, beta)
+        for alpha, beta, depth in windows
+        if depth == 1
+    }
+    assert len(depth_one_windows) >= 2
