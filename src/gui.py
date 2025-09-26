@@ -635,18 +635,28 @@ class ChessGUI(QMainWindow):
             print(utils.debug_text("Ready callback not set"))
             return
 
-        if self.manual_engine_provider is None:
-            print(utils.debug_text("Manual engine provider not set"))
+        active_engines = []
+        for engine_id, button in self.engine_toggle_buttons.items():
+            if button is None:
+                continue
+            if not bool(button.property("active")):
+                continue
+            label_text = button.property("labelText") or engine_id
+            active_engines.append((engine_id, str(label_text)))
+
+        if not active_engines:
+            self.set_info_message("No active engines to check")
             return
 
-        try:
-            engine_id, engine_label = self.manual_engine_provider()
-        except Exception as exc:  # pragma: no cover - defensive logging
-            print(utils.debug_text(f"Manual engine provider failed: {exc}"))
-            return
+        display_label = (
+            active_engines[0][1]
+            if len(active_engines) == 1
+            else ", ".join(label for _, label in active_engines)
+        )
+        self.set_info_message(f"Checking readiness: {display_label}")
 
-        self.set_info_message(f"Checking readiness: {engine_label}")
-        self.ready_callback(engine_id, engine_label)
+        for engine_id, engine_label in active_engines:
+            self.ready_callback(engine_id, engine_label)
 
     def restart_engine(self):
         if self.restart_engine_callback:
