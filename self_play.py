@@ -8,10 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
 import chess
 
-try:
-    from src import chess_logic
-except ImportError:  # pragma: no cover - fallback when executed as a script
-    import chess_logic  # type: ignore
+import chess_logic
 
 
 class _SelfPlayUI(Protocol):

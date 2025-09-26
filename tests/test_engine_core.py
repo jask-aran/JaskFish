@@ -9,8 +9,8 @@ from typing import Optional
 import chess
 import pytest
 
-from src import engine as engine_module
-from src.self_play import SelfPlayManager
+import engine as engine_module
+from self_play import SelfPlayManager
 
 
 class DummyStrategy(engine_module.MoveStrategy):

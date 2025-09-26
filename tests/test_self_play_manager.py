@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from src.self_play import SelfPlayManager
+from self_play import SelfPlayManager
 
 
 class DummyGui:
