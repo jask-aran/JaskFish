@@ -484,6 +484,8 @@ class TranspositionEntry:
     value: float
     flag: TranspositionFlag
     move: Optional[chess.Move]
+    # Optional cached static evaluation for this node (side-to-move aware)
+    static_eval: Optional[float] = None
 
 
 class MoveStrategy(ABC):
@@ -780,6 +782,10 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._nodes_visited: int = 0
         self._killer_moves: List[List[Optional[chess.Move]]] = []
         self._principal_variation: List[chess.Move] = []
+        # Lightweight per-search cache for expensive static evaluations
+        self._eval_cache: Dict[Tuple[int, bool], float] = {}
+        # Quiescence pruning: drop clearly losing captures unless they check or promote
+        self._qsearch_see_prune_threshold: float = -100.0
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -817,6 +823,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._killer_moves = [
             list() for _ in range(depth_limit + self.quiescence_depth + 4)
         ]
+        self._eval_cache.clear()
 
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
@@ -1248,13 +1255,21 @@ class HeuristicSearchStrategy(MoveStrategy):
         return alpha
 
     def _generate_quiescence_moves(self, board: chess.Board) -> List[chess.Move]:
-        captures = []
+        captures: List[chess.Move] = []
+        is_capture = board.is_capture
+        gives_check = board.gives_check
+        append = captures.append
+        see = self._static_exchange_score
+        threshold = self._qsearch_see_prune_threshold
         for move in board.legal_moves:
-            if board.is_capture(move) or move.promotion or board.gives_check(move):
-                captures.append(move)
+            if is_capture(move):
+                # Prune clearly losing captures to keep qsearch lean
+                if see(board, move) >= threshold:
+                    append(move)
+            elif move.promotion or gives_check(move):
+                append(move)
         captures.sort(
-            key=lambda mv: self._static_exchange_score(board, mv)
-            + (500 if board.gives_check(mv) else 0),
+            key=lambda mv: see(board, mv) + (500 if gives_check(mv) else 0),
             reverse=True,
         )
         return captures
@@ -1292,6 +1307,9 @@ class HeuristicSearchStrategy(MoveStrategy):
             return moves
 
         killer_moves = self._killer_moves[ply] if ply < len(self._killer_moves) else []
+        is_capture = board.is_capture
+        gives_check = board.gives_check
+        history_scores = self._history_scores
 
         def score_move(move: chess.Move) -> float:
             if tt_move and move == tt_move:
@@ -1300,16 +1318,15 @@ class HeuristicSearchStrategy(MoveStrategy):
                 return 900_000
 
             score = 0.0
-            is_capture = board.is_capture(move)
-            if is_capture:
+            if is_capture(move):
                 score += 500_000 + self._static_exchange_score(board, move)
             if move in killer_moves:
                 score += 80_000
             history_key = (board.turn, move.from_square, move.to_square)
-            score += self._history_scores.get(history_key, 0.0)
+            score += history_scores.get(history_key, 0.0)
             if move.promotion:
                 score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
-            if not is_capture and board.gives_check(move):
+            if not is_capture(move) and gives_check(move):
                 score += 40_000
             return score
 
@@ -1356,7 +1373,13 @@ class HeuristicSearchStrategy(MoveStrategy):
             return
         self._transposition_table[key] = TranspositionEntry(depth, value, flag, move)
         if len(self._transposition_table) > self._transposition_table_limit:
-            self._transposition_table.pop(next(iter(self._transposition_table)))
+            # Evict oldest entry (approximate FIFO) to keep memory bounded
+            try:
+                # Python 3.8+: pop oldest when last=False
+                self._transposition_table.popitem(last=False)
+            except TypeError:
+                # Fallback for environments without ordered popitem signature
+                self._transposition_table.pop(next(iter(self._transposition_table)))
 
     def _futility_margin(self, depth: int) -> float:
         return self._futility_base_margin * max(1, depth)
@@ -1400,6 +1423,16 @@ class HeuristicSearchStrategy(MoveStrategy):
         return time.perf_counter() >= self._search_deadline
 
     def _evaluate_board(self, board: chess.Board) -> float:
+        # Cache expensive static evaluations for the current search using
+        # a side-to-move-aware Zobrist key to avoid recomputation.
+        try:
+            key = (chess.polyglot.zobrist_hash(board), board.turn)
+            cached = self._eval_cache.get(key)
+            if cached is not None:
+                return cached
+        except Exception:
+            key = None
+
         material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
         piece_square = {chess.WHITE: 0.0, chess.BLACK: 0.0}
         pawn_files = {
@@ -1457,7 +1490,11 @@ class HeuristicSearchStrategy(MoveStrategy):
         endgame_terms = king_safety_score * endgame_weight * 0.5
 
         total = material_score + positional + dynamic + endgame_terms
-        return total if board.turn == chess.WHITE else -total
+        score = total if board.turn == chess.WHITE else -total
+
+        if key is not None:
+            self._eval_cache[key] = score
+        return score
 
     def _mobility_score(self, board: chess.Board) -> float:
         current_mobility = board.legal_moves.count()
