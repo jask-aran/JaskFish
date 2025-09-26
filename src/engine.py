@@ -745,6 +745,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         min_time_limit: float = 0.25,
         time_allocation_factor: float = 0.08,
         transposition_table_size: int = 200000,
+        logger: Optional[Callable[[str], None]] = None,
         **kwargs,
     ):
         super().__init__(priority=70, **kwargs)
@@ -786,6 +787,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._eval_cache: Dict[Tuple[int, bool], float] = {}
         # Quiescence pruning: drop clearly losing captures unless they check or promote
         self._qsearch_see_prune_threshold: float = -100.0
+        self._logger = logger or (lambda *_: None)
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -813,6 +815,12 @@ class HeuristicSearchStrategy(MoveStrategy):
         depth_limit = self._resolve_depth_limit(context)
         time_budget = self._determine_time_budget(context)
 
+        self._logger(
+            f"{self.name}: start search depth_limit={depth_limit} "
+            f"time_budget={'infinite' if time_budget is None else f'{time_budget:.2f}s'} "
+            f"legal_moves={context.legal_moves_count}"
+        )
+
         self._search_start_time = time.perf_counter()
         self._search_deadline = (
             None
@@ -831,6 +839,8 @@ class HeuristicSearchStrategy(MoveStrategy):
         last_score: Optional[float] = None
         self._principal_variation = []
 
+        search_interrupted = False
+        current_depth = 0
         try:
             for current_depth in range(1, depth_limit + 1):
                 if current_depth > 1:
@@ -845,6 +855,9 @@ class HeuristicSearchStrategy(MoveStrategy):
                     beta_window = min(
                         last_score + aspiration, float(self._mate_score)
                     )
+
+                depth_start_nodes = self._nodes_visited
+                depth_start_time = time.perf_counter()
 
                 while True:
                     search_alpha = alpha_window
@@ -932,6 +945,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                         fail_high = True
 
                     if fail_low or fail_high:
+                        cause = "fail-high" if fail_high else "fail-low"
                         aspiration *= self._aspiration_growth
                         alpha_window = max(
                             -float(self._mate_score),
@@ -940,6 +954,11 @@ class HeuristicSearchStrategy(MoveStrategy):
                         beta_window = min(
                             float(self._mate_score),
                             iteration_best_score + aspiration,
+                        )
+
+                        self._logger(
+                            f"{self.name}: depth={current_depth} {cause} "
+                            f"aspiration -> [{alpha_window:.1f}, {beta_window:.1f}]"
                         )
 
                         if (
@@ -956,18 +975,43 @@ class HeuristicSearchStrategy(MoveStrategy):
                     self._principal_variation = self._extract_principal_variation(
                         board, current_depth
                     )
+
+                    depth_time = time.perf_counter() - depth_start_time
+                    depth_nodes = self._nodes_visited - depth_start_nodes
+                    pv_line = " ".join(
+                        move.uci() for move in self._principal_variation
+                    )
+                    self._logger(
+                        f"{self.name}: depth={current_depth} score={iteration_best_score:.1f} "
+                        f"nodes={self._nodes_visited} (+{depth_nodes}) time={depth_time:.2f}s "
+                        f"pv={pv_line or iteration_best_move.uci()}"
+                    )
                     break
 
                 if self._time_exceeded():
                     break
 
         except _SearchTimeout:
-            pass
+            search_interrupted = True
+            elapsed = time.perf_counter() - self._search_start_time
+            self._logger(
+                f"{self.name}: search timeout at depth={current_depth} "
+                f"nodes={self._nodes_visited} time={elapsed:.2f}s"
+            )
 
         search_time = time.perf_counter() - self._search_start_time
 
         if best_move is None:
+            self._logger(
+                f"{self.name}: no move found (interrupted={search_interrupted})"
+            )
             return None
+
+        self._logger(
+            f"{self.name}: completed depth={completed_depth} score={best_score:.1f} "
+            f"best={best_move.uci()} nodes={self._nodes_visited} time={search_time:.2f}s "
+            f"interrupted={search_interrupted}"
+        )
 
         metadata = {
             "depth": completed_depth,
@@ -1255,24 +1299,31 @@ class HeuristicSearchStrategy(MoveStrategy):
         return alpha
 
     def _generate_quiescence_moves(self, board: chess.Board) -> List[chess.Move]:
-        captures: List[chess.Move] = []
+        moves: List[chess.Move] = []
         is_capture = board.is_capture
         gives_check = board.gives_check
-        append = captures.append
+        append = moves.append
         see = self._static_exchange_score
+        in_check = board.is_check()
         threshold = self._qsearch_see_prune_threshold
+
         for move in board.legal_moves:
+            if in_check:
+                append(move)
+                continue
             if is_capture(move):
-                # Prune clearly losing captures to keep qsearch lean
+                # Prune clearly losing captures to keep qsearch lean unless they are the
+                # only way to address check (handled above).
                 if see(board, move) >= threshold:
                     append(move)
             elif move.promotion or gives_check(move):
                 append(move)
-        captures.sort(
+
+        moves.sort(
             key=lambda mv: see(board, mv) + (500 if gives_check(mv) else 0),
             reverse=True,
         )
-        return captures
+        return moves
 
     def _capture_score(self, board: chess.Board, move: chess.Move) -> float:
         captured_piece = board.piece_at(move.to_square)
@@ -1732,6 +1783,7 @@ class ChessEngine:
                 HeuristicSearchStrategy(
                     name="HeuristicSearchStrategy",
                     search_depth=5,
+                    logger=self._log_debug,
                 )
             )
 
