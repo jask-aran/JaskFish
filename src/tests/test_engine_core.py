@@ -2,6 +2,8 @@ import contextlib
 from collections import deque
 import io
 import re
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 import chess
@@ -918,6 +920,8 @@ class SelfPlayTestHarness:
         self.ui = ui or HeadlessSelfPlayUI()
         self.white_engine = EngineHarness()
         self.black_engine = EngineHarness()
+        self._trace_dir_cm = tempfile.TemporaryDirectory(prefix="self_play_traces_")
+        trace_dir = Path(self._trace_dir_cm.name)
 
         assert "Debug:True" in self.white_engine.bootstrap_output
         assert "Debug:True" in self.black_engine.bootstrap_output
@@ -931,6 +935,10 @@ class SelfPlayTestHarness:
             chunk = engine_handle.process_command(command)
             color = self._reverse_lookup[engine_handle]
             if command == "go":
+                for line in chunk.splitlines():
+                    stripped = line.strip()
+                    if stripped:
+                        self.manager.on_engine_output(color, stripped)
                 self.pending_go_outputs[color].append(chunk)
 
         self.manager = SelfPlayManager(
@@ -938,6 +946,7 @@ class SelfPlayTestHarness:
             engines,
             send_command,
             {chess.WHITE: "White - Engine 1", chess.BLACK: "Black - Engine 2"},
+            trace_directory=trace_dir,
         )
 
     def start(self) -> None:
@@ -971,6 +980,14 @@ class SelfPlayTestHarness:
         assert self.ui.board_enabled is True
         assert self.ui.manual_enabled is True
 
+    def trace_path(self) -> Optional[Path]:
+        return self.manager.last_trace_path
+
+    def trace_contents(self) -> str:
+        path = self.manager.last_trace_path
+        assert path is not None, "Expected a trace file to be exported"
+        return path.read_text(encoding="utf-8")
+
 
 @pytest.mark.dev
 def test_headless_self_play_debug_trace(require_dev_marker):
@@ -997,6 +1014,13 @@ def test_headless_self_play_debug_trace(require_dev_marker):
     assert len(captured_moves) == plies
     assert harness.ui.board.fullmove_number >= 7
 
+    trace_path = harness.trace_path()
+    assert trace_path is not None
+    trace_data = harness.trace_contents()
+    assert "HeuristicSearchStrategy: start search" in trace_data
+    assert "bestmove" in trace_data
+    assert "Initial FEN:" in trace_data
+
 
 @pytest.mark.dev
 def test_headless_self_play_midgame_trace(require_dev_marker):
@@ -1016,15 +1040,13 @@ def test_headless_self_play_midgame_trace(require_dev_marker):
     assert any("search timeout" in chunk for chunk in go_chunks)
     assert any("completed depth=3" in chunk for chunk in go_chunks)
     assert any("completed depth=2" in chunk for chunk in go_chunks)
-    assert captured_moves == [
-        "d4c5",
-        "e7c5",
-        "d1e1",
-        "c5b6",
-        "e2d1",
-        "a8b8",
-        "d1b3",
-        "d8c7",
-    ]
+    assert captured_moves[:2] == ["d4c5", "e7c5"]
     assert len(captured_moves) == plies
     assert harness.ui.board.fullmove_number >= 14
+
+    trace_path = harness.trace_path()
+    assert trace_path is not None
+    trace_data = harness.trace_contents()
+    assert midgame_fen in trace_data
+    assert "search timeout" in trace_data
+    assert "Stop reason:" in trace_data

@@ -111,6 +111,8 @@ def engine_output_processor(
 
         if output.startswith("bestmove"):
             if self_play_manager and expected_color is not None:
+                self_play_manager.on_engine_output(expected_color, output)
+            if self_play_manager and expected_color is not None:
                 if not self_play_manager.should_apply_move(expected_color):
                     continue
 
@@ -126,6 +128,8 @@ def engine_output_processor(
                         manual_pending_color[engine_id] = None
                     gui.manual_evaluation_complete(engine_label)
         else:
+            if self_play_manager and expected_color is not None:
+                self_play_manager.on_engine_output(expected_color, output)
             print(recieved_text(f"[{engine_label}] {output}"))
 
 

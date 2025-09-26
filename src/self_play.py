@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Protocol
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
 import chess
 
@@ -52,6 +54,8 @@ class SelfPlayManager:
         engines: Dict[bool, EngineProcess],
         send_command: SendCommand,
         engine_names: Dict[bool, str],
+        *,
+        trace_directory: Optional[Union[Path, str]] = None,
     ) -> None:
         if chess.WHITE not in engines or chess.BLACK not in engines:
             raise ValueError("SelfPlayManager requires engines for both colors")
@@ -65,6 +69,11 @@ class SelfPlayManager:
         self._current_engine_color: Optional[bool] = None
         self._pending_ignore_color: Optional[bool] = None
         self._waiting_for_move = False
+        self._trace_directory = Path(trace_directory) if trace_directory else Path.cwd() / "self_play_traces"
+        self._session_traces: Dict[bool, List[str]] = {chess.WHITE: [], chess.BLACK: []}
+        self._session_start_fen: Optional[str] = None
+        self._session_started_at: Optional[datetime] = None
+        self._last_trace_path: Optional[Path] = None
 
     @property
     def active(self) -> bool:
@@ -98,6 +107,10 @@ class SelfPlayManager:
         self._pending_ignore_color = None
         self._current_engine_color = None
         self._waiting_for_move = False
+        self._session_traces = {chess.WHITE: [], chess.BLACK: []}
+        self._session_start_fen = self._gui.board.fen()
+        self._session_started_at = datetime.utcnow()
+        self._last_trace_path = None
 
         self._gui.set_self_play_active(True)
         self._gui.set_board_interaction_enabled(False)
@@ -136,6 +149,7 @@ class SelfPlayManager:
         self._gui.set_board_interaction_enabled(True)
         self._gui.set_manual_controls_enabled(True)
         self._gui.clear_engine_activity(message or "Self-play stopped")
+        self._export_traces(message)
         return True
 
     def should_apply_move(self, color: bool) -> bool:
@@ -164,6 +178,13 @@ class SelfPlayManager:
         next_color = not color
         self._request_move(next_color)
 
+    def on_engine_output(self, color: bool, line: str) -> None:
+        if not (self._active or self._waiting_for_move):
+            return
+        if color not in self._session_traces:
+            self._session_traces[color] = []
+        self._session_traces[color].append(line)
+
     def _request_move(self, color: bool) -> None:
         if not self._active:
             return
@@ -180,3 +201,45 @@ class SelfPlayManager:
 
     def _dispatch(self, engine: EngineProcess, command: str) -> None:
         self._send_command(engine, command)
+
+    @property
+    def last_trace_path(self) -> Optional[Path]:
+        return self._last_trace_path
+
+    def _export_traces(self, stop_message: Optional[str]) -> None:
+        has_trace = any(self._session_traces[color] for color in self._session_traces)
+        if not has_trace:
+            return
+        try:
+            self._trace_directory.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+
+        timestamp = self._session_started_at or datetime.utcnow()
+        filename = timestamp.strftime("self_play_%Y%m%dT%H%M%S.log")
+        path = self._trace_directory / filename
+        header_lines = [
+            f"Self-play trace recorded at {timestamp.isoformat()}Z",
+            f"Initial FEN: {self._session_start_fen or 'unknown'}",
+            f"Final FEN: {self._gui.board.fen()}",
+        ]
+        if stop_message:
+            header_lines.append(f"Stop reason: {stop_message}")
+
+        try:
+            with path.open("w", encoding="utf-8") as trace_file:
+                trace_file.write("\n".join(header_lines))
+                trace_file.write("\n\n")
+                for color in (chess.WHITE, chess.BLACK):
+                    label = self._engine_names.get(color, "Engine")
+                    trace_file.write(f"[{label}]\n")
+                    for line in self._session_traces.get(color, []):
+                        trace_file.write(f"  {line}\n")
+                    trace_file.write("\n")
+        except Exception:
+            return
+
+        self._last_trace_path = path
+        self._session_traces = {chess.WHITE: [], chess.BLACK: []}
+        self._session_started_at = None
+        self._session_start_fen = None
