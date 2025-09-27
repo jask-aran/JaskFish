@@ -56,6 +56,7 @@ def engine_output_processor(
     resolve_log_label,
     resolve_expected_color,
     resolve_color_label,
+    resolve_monitor_label,
     self_play_manager: Optional[SelfPlayManager] = None,
     manual_pending: Optional[Dict[str, bool]] = None,
     manual_pending_color: Optional[Dict[str, Optional[bool]]] = None,
@@ -76,11 +77,19 @@ def engine_output_processor(
             expected_color = manual_pending_color.get(engine_id)
 
         engine_label = "Engine"
+        monitor_label = "Engine"
         if engine_id:
             if expected_color is not None and resolve_color_label is not None:
                 engine_label = resolve_color_label(engine_id, expected_color)
             elif resolve_log_label is not None:
                 engine_label = resolve_log_label(engine_id)
+            if resolve_monitor_label is not None:
+                monitor_label = resolve_monitor_label(engine_id, expected_color)
+            else:
+                monitor_label = engine_label
+        else:
+            if resolve_monitor_label is not None:
+                monitor_label = resolve_monitor_label(engine_id, expected_color)
 
         if output.startswith("bestmove"):
             if self_play_manager and expected_color is not None:
@@ -89,7 +98,7 @@ def engine_output_processor(
                 if not self_play_manager.should_apply_move(expected_color):
                     continue
 
-            print(recieved_text(f"[{engine_label}] {output}"))
+            print(recieved_text(f"{monitor_label} {output}"))
             move_uci = handle_bestmove_line(output, gui, engine_label)
             if move_uci and self_play_manager and expected_color is not None:
                 self_play_manager.on_engine_move(expected_color, move_uci)
@@ -103,7 +112,7 @@ def engine_output_processor(
         else:
             if self_play_manager and expected_color is not None:
                 self_play_manager.on_engine_output(expected_color, output)
-            print(recieved_text(f"[{engine_label}] {output}"))
+            print(recieved_text(f"{monitor_label} {output}"))
 
 
 def start_engine_process(path: str) -> QProcess:
@@ -136,7 +145,8 @@ def main():
         preferred_color = spec["preferred_color"]
         color_assignments.setdefault(preferred_color, engine_id)
         number = int(spec["number"])
-        caption = f"{engine_name} [#{number}]" if number else engine_name
+        caption = f"{engine_name} [{number}]" if number else engine_name
+        monitor_token = f"{engine_name}[{number}]" if number else engine_name
         engine_slots[engine_id] = {
             "id": engine_id,
             "name": engine_name,
@@ -147,6 +157,7 @@ def main():
             "process": None,
             "active": True,
             "caption": caption,
+            "monitor": monitor_token,
         }
 
     primary_engine = ENGINE_ID_ORDER[0]
@@ -162,8 +173,35 @@ def main():
         number = slot.get("number")
         base_name = str(name) if name else engine_id
         if isinstance(number, int) and number:
-            return f"{base_name} [#{number}]"
+            return f"{base_name} [{number}]"
         return base_name
+
+    def engine_monitor_token(engine_id: str) -> str:
+        slot = engine_slots.get(engine_id, {})
+        token = slot.get("monitor")
+        if isinstance(token, str) and token:
+            return token
+        name = slot.get("name")
+        number = slot.get("number")
+        base_name = str(name) if name else engine_id
+        if isinstance(number, int) and number:
+            return f"{base_name}[{number}]"
+        return base_name
+
+    def engine_monitor_label(engine_id: Optional[str], color: Optional[bool]) -> str:
+        if not engine_id or engine_id not in engine_slots:
+            return "Engine"
+        token = engine_monitor_token(engine_id)
+        if color is not None:
+            suffix = "[W]" if color == chess.WHITE else "[B]"
+            return f"{token}{suffix}"
+        assigned = colors_for_engine(engine_id)
+        if len(assigned) == 1:
+            suffix = "[W]" if assigned[0] == chess.WHITE else "[B]"
+            return f"{token}{suffix}"
+        if len(assigned) > 1:
+            return f"{token}[WB]"
+        return token
 
     manual_pending: Dict[str, bool] = {engine_id: False for engine_id in ENGINE_ID_ORDER}
     manual_pending_color: Dict[str, Optional[bool]] = {
@@ -240,8 +278,8 @@ def main():
 
     def send_command_with_lookup(proc: QProcess, command: str) -> None:
         engine_id = process_slot_lookup.get(id(proc))
-        label = engine_log_label(engine_id)
-        print(sending_text(f"[{label}] {command}"))
+        monitor_label = engine_monitor_label(engine_id, None)
+        print(sending_text(f"{monitor_label} {command}"))
         proc.write((command + "\n").encode())
         proc.waitForBytesWritten()
 
@@ -266,6 +304,7 @@ def main():
                 resolve_log_label=engine_log_label,
                 resolve_expected_color=resolve_expected_color,
                 resolve_color_label=color_specific_label,
+                resolve_monitor_label=engine_monitor_label,
                 self_play_manager=self_play_manager,
                 manual_pending=manual_pending,
                 manual_pending_color=manual_pending_color,
