@@ -36,37 +36,7 @@ def parse_args():
         "-fen", help="Set the initial board state to the given FEN string"
     )
     parser.add_argument("-dev", action="store_true", help="Enable debug mode")
-    parser.add_argument(
-        "--engine1",
-        dest="engine1",
-        help="Path to the engine executable/script used for Engine 1",
-    )
-    parser.add_argument(
-        "--engine2",
-        dest="engine2",
-        help="Path to the engine executable/script used for Engine 2",
-    )
-    parser.add_argument(
-        "--engine1-name",
-        dest="engine1_name",
-        help="Display label for Engine 1",
-    )
-    parser.add_argument(
-        "--engine2-name",
-        dest="engine2_name",
-        help="Display label for Engine 2",
-    )
     return parser.parse_args()
-
-
-def resolve_engine_path(default_path: str, override: Optional[str]) -> str:
-    if not override:
-        return default_path
-    candidate = os.path.abspath(override)
-    if not os.path.exists(candidate):
-        print(info_text(f"Engine path not found: {candidate}. Falling back to {default_path}"))
-        return default_path
-    return candidate
 
 def handle_bestmove_line(bestmove_line: str, gui: ChessGUI, engine_label: str) -> Optional[str]:
     parts = bestmove_line.strip().split()
@@ -154,52 +124,46 @@ def main():
 
     app = QApplication(sys.argv)
 
-    color_assignments: Dict[bool, str] = {
-        chess.WHITE: ENGINE_ID_ORDER[0],
-        chess.BLACK: ENGINE_ID_ORDER[0],
-    }
+    color_assignments: Dict[bool, str] = {}
 
     engine_slots: Dict[str, Dict[str, object]] = {}
     for engine_id in ENGINE_ID_ORDER:
         spec = ENGINE_SPECS[engine_id]
-        override_path = getattr(args, engine_id)
-        default_path = os.path.join(script_dir, spec["default_script"])
-        friendly_override = getattr(args, f"{engine_id}_name")
-        engine_name = friendly_override or spec.get("default_name") or f"Engine {spec['number']}"
-        engine_path = resolve_engine_path(default_path, override_path)
-        color_assignments[spec["preferred_color"]] = engine_id
+        engine_path = os.path.join(script_dir, spec["default_script"])
+        if not os.path.exists(engine_path):
+            raise FileNotFoundError(f"Engine script not found: {engine_path}")
+        engine_name = spec.get("default_name") or f"Engine {spec['number']}"
+        preferred_color = spec["preferred_color"]
+        color_assignments.setdefault(preferred_color, engine_id)
+        number = int(spec["number"])
+        caption = f"{engine_name} [#{number}]" if number else engine_name
         engine_slots[engine_id] = {
             "id": engine_id,
             "name": engine_name,
-            "number": spec["number"],
-            "preferred_color": spec["preferred_color"],
+            "number": number,
+            "preferred_color": preferred_color,
             "default_script": spec["default_script"],
             "path": engine_path,
             "process": None,
             "active": True,
+            "caption": caption,
         }
 
-    def engine_number(engine_id: str) -> int:
-        slot = engine_slots.get(engine_id, {})
-        number = slot.get("number", 0)
-        try:
-            return int(number)
-        except (TypeError, ValueError):
-            return 0
-
-    def engine_name(engine_id: str) -> str:
-        slot = engine_slots.get(engine_id, {})
-        name = slot.get("name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-        number = engine_number(engine_id)
-        return f"Engine {number}" if number else "Engine"
+    primary_engine = ENGINE_ID_ORDER[0]
+    for color in (chess.WHITE, chess.BLACK):
+        color_assignments.setdefault(color, primary_engine)
 
     def engine_caption(engine_id: str) -> str:
-        number = engine_number(engine_id)
-        base_name = engine_name(engine_id)
-        suffix = f" [#{number}]" if number else ""
-        return f"{base_name}{suffix}"
+        slot = engine_slots.get(engine_id, {})
+        caption = slot.get("caption")
+        if isinstance(caption, str) and caption:
+            return caption
+        name = slot.get("name")
+        number = slot.get("number")
+        base_name = str(name) if name else engine_id
+        if isinstance(number, int) and number:
+            return f"{base_name} [#{number}]"
+        return base_name
 
     manual_pending: Dict[str, bool] = {engine_id: False for engine_id in ENGINE_ID_ORDER}
     manual_pending_color: Dict[str, Optional[bool]] = {
