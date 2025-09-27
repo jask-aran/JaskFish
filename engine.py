@@ -12,7 +12,6 @@ from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import chess
-import chess.polyglot
 
 
 class _SearchTimeout(Exception):
@@ -34,401 +33,65 @@ EVAL_PIECE_VALUES = {piece: value * 100 for piece, value in PIECE_VALUES.items()
 
 PIECE_SQUARE_TABLES = {
     chess.PAWN: [
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        50,
-        50,
-        50,
-        50,
-        50,
-        50,
-        50,
-        50,
-        10,
-        10,
-        20,
-        30,
-        30,
-        20,
-        10,
-        10,
-        5,
-        5,
-        10,
-        25,
-        25,
-        10,
-        5,
-        5,
-        0,
-        0,
-        0,
-        20,
-        20,
-        0,
-        0,
-        0,
-        5,
-        -5,
-        -10,
-        0,
-        0,
-        -10,
-        -5,
-        5,
-        5,
-        10,
-        10,
-        -20,
-        -20,
-        10,
-        10,
-        5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        50, 50, 50, 50, 50, 50, 50, 50,
+        10, 10, 20, 30, 30, 20, 10, 10,
+        5, 5, 10, 25, 25, 10, 5, 5,
+        0, 0, 0, 20, 20, 0, 0, 0,
+        5, -5, -10, 0, 0, -10, -5, 5,
+        5, 10, 10, -20, -20, 10, 10, 5,
+        0, 0, 0, 0, 0, 0, 0, 0
     ],
     chess.KNIGHT: [
-        -50,
-        -40,
-        -30,
-        -30,
-        -30,
-        -30,
-        -40,
-        -50,
-        -40,
-        -20,
-        0,
-        0,
-        0,
-        0,
-        -20,
-        -40,
-        -30,
-        0,
-        10,
-        15,
-        15,
-        10,
-        0,
-        -30,
-        -30,
-        5,
-        15,
-        20,
-        20,
-        15,
-        5,
-        -30,
-        -30,
-        0,
-        15,
-        20,
-        20,
-        15,
-        0,
-        -30,
-        -30,
-        5,
-        10,
-        15,
-        15,
-        10,
-        5,
-        -30,
-        -40,
-        -20,
-        0,
-        5,
-        5,
-        0,
-        -20,
-        -40,
-        -50,
-        -40,
-        -30,
-        -30,
-        -30,
-        -30,
-        -40,
-        -50,
+        -50, -40, -30, -30, -30, -30, -40, -50,
+        -40, -20, 0, 0, 0, 0, -20, -40,
+        -30, 0, 10, 15, 15, 10, 0, -30,
+        -30, 5, 15, 20, 20, 15, 5, -30,
+        -30, 0, 15, 20, 20, 15, 0, -30,
+        -30, 5, 10, 15, 15, 10, 5, -30,
+        -40, -20, 0, 5, 5, 0, -20, -40,
+        -50, -40, -30, -30, -30, -30, -40, -50
     ],
     chess.BISHOP: [
-        -20,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -20,
-        -10,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -10,
-        -10,
-        0,
-        5,
-        10,
-        10,
-        5,
-        0,
-        -10,
-        -10,
-        5,
-        5,
-        10,
-        10,
-        5,
-        5,
-        -10,
-        -10,
-        0,
-        10,
-        10,
-        10,
-        10,
-        0,
-        -10,
-        -10,
-        10,
-        10,
-        10,
-        10,
-        10,
-        10,
-        -10,
-        -10,
-        5,
-        0,
-        0,
-        0,
-        0,
-        5,
-        -10,
-        -20,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -20,
+        -20, -10, -10, -10, -10, -10, -10, -20,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -10, 0, 5, 10, 10, 5, 0, -10,
+        -10, 5, 5, 10, 10, 5, 5, -10,
+        -10, 0, 10, 10, 10, 10, 0, -10,
+        -10, 10, 10, 10, 10, 10, 10, -10,
+        -10, 5, 0, 0, 0, 0, 5, -10,
+        -20, -10, -10, -10, -10, -10, -10, -20
     ],
     chess.ROOK: [
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        5,
-        10,
-        10,
-        10,
-        10,
-        10,
-        10,
-        5,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -5,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -5,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -5,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -5,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -5,
-        0,
-        0,
-        0,
-        5,
-        5,
-        0,
-        0,
-        0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        5, 10, 10, 10, 10, 10, 10, 5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        0, 0, 0, 5, 5, 0, 0, 0
     ],
     chess.QUEEN: [
-        -20,
-        -10,
-        -10,
-        -5,
-        -5,
-        -10,
-        -10,
-        -20,
-        -10,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -10,
-        -10,
-        0,
-        5,
-        5,
-        5,
-        5,
-        0,
-        -10,
-        -5,
-        0,
-        5,
-        5,
-        5,
-        5,
-        0,
-        -5,
-        0,
-        0,
-        5,
-        5,
-        5,
-        5,
-        0,
-        -5,
-        -10,
-        0,
-        5,
-        5,
-        5,
-        5,
-        0,
-        -10,
-        -10,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -10,
-        -20,
-        -10,
-        -10,
-        -5,
-        -5,
-        -10,
-        -10,
-        -20,
+        -20, -10, -10, -5, -5, -10, -10, -20,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -10, 0, 5, 5, 5, 5, 0, -10,
+        -5, 0, 5, 5, 5, 5, 0, -5,
+        0, 0, 5, 5, 5, 5, 0, -5,
+        -10, 0, 5, 5, 5, 5, 0, -10,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -20, -10, -10, -5, -5, -10, -10, -20
     ],
     chess.KING: [
-        -30,
-        -40,
-        -40,
-        -50,
-        -50,
-        -40,
-        -40,
-        -30,
-        -30,
-        -40,
-        -40,
-        -50,
-        -50,
-        -40,
-        -40,
-        -30,
-        -30,
-        -30,
-        -30,
-        -40,
-        -40,
-        -30,
-        -30,
-        -30,
-        -20,
-        -20,
-        -20,
-        -20,
-        -20,
-        -20,
-        -20,
-        -20,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        -10,
-        20,
-        20,
-        0,
-        0,
-        0,
-        0,
-        20,
-        20,
-        20,
-        30,
-        10,
-        0,
-        0,
-        10,
-        30,
-        20,
-        20,
-        30,
-        10,
-        0,
-        0,
-        10,
-        30,
-        20,
-    ],
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -30, -30, -40, -40, -30, -30, -30,
+        -20, -20, -20, -20, -20, -20, -20, -20,
+        -10, -10, -10, -10, -10, -10, -10, -10,
+        20, 20, 0, 0, 0, 0, 20, 20,
+        20, 30, 10, 0, 0, 10, 30, 20,
+        20, 30, 10, 0, 0, 10, 30, 20
+    ]
 }
 
 
@@ -518,9 +181,7 @@ class MoveStrategy(ABC):
 # always fall back to a random legal move if no strategies produce a result.
 STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
-    "opening_book": False,
-    "forcing_scan": True,
-    "repetition_avoidance": False,
+    "repetition_avoidance": True,
     "heuristic": True,
     "fallback_random": False,
 }
@@ -638,64 +299,6 @@ class StrategySelector:
         return best_result
 
 
-class OpeningBookStrategy(MoveStrategy):
-    def __init__(
-        self,
-        reader: Optional[chess.polyglot.MemoryMappedReader] = None,
-        dict_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
-        max_fullmove: int = 12,
-        **kwargs,
-    ):
-        super().__init__(priority=90, **kwargs)
-        self.reader = reader
-        self.dict_book = dict_book or {}
-        self.max_fullmove = max_fullmove
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        return context.fullmove_number <= self.max_fullmove and (
-            self.reader or self.dict_book
-        )
-
-    def _normalise_entry(self, entry: Union[str, Sequence[str]]) -> List[str]:
-        if isinstance(entry, str):
-            return [entry]
-        return [move for move in entry if move]
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        moves = []
-        source = "dict_book"
-        if self.reader:
-            try:
-                entry = self.reader.weighted_choice(board)
-                move = entry.move.uci()
-                return StrategyResult(
-                    move=move,
-                    strategy_name=self.name,
-                    score=100000.0,
-                    confidence=self.confidence or 1.0,
-                    metadata={"source": "polyglot_book"},
-                )
-            except IndexError:
-                pass  # No entry in polyglot, fallback to dict
-
-        entry = self.dict_book.get(board.fen())
-        if not entry:
-            return None
-        moves = self._normalise_entry(entry)
-        if not moves:
-            return None
-        move = moves[0]
-        return StrategyResult(
-            move=move,
-            strategy_name=self.name,
-            score=100000.0,
-            confidence=self.confidence or 1.0,
-            metadata={"source": source, "book_moves": moves},
-        )
-
-
 class MateInOneStrategy(MoveStrategy):
     def __init__(
         self,
@@ -730,104 +333,6 @@ class MateInOneStrategy(MoveStrategy):
         return None
 
 
-class ForcingScanStrategy(MoveStrategy):
-    def __init__(self, depth: int = 2, **kwargs: Any) -> None:
-        super().__init__(priority=60, short_circuit=False, **kwargs)
-        self.depth = max(1, depth)
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        return context.legal_moves_count > 0
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        if context.legal_moves_count == 0:
-            return None
-
-        def forcing_moves(b: chess.Board) -> List[chess.Move]:
-            return [
-                move
-                for move in b.legal_moves
-                if b.is_capture(move) or b.gives_check(move) or move.promotion
-            ]
-
-        def move_see(b: chess.Board, move: chess.Move) -> float:
-            try:
-                return float(b.see(move))
-            except Exception:
-                captured = b.piece_at(move.to_square)
-                if captured is None and b.is_en_passant(move):
-                    captured = chess.Piece(chess.PAWN, not b.turn)
-                moving = b.piece_at(move.from_square)
-                gain = 0.0
-                if captured:
-                    gain += EVAL_PIECE_VALUES.get(captured.piece_type, 0)
-                if moving:
-                    gain -= EVAL_PIECE_VALUES.get(moving.piece_type, 0)
-                return gain
-
-        def move_value(b: chess.Board, move: chess.Move) -> float:
-            value = move_see(b, move)
-            if abs(value) < 10.0:
-                value *= 100.0
-            if b.gives_check(move):
-                value += 20.0
-            if move.promotion:
-                value += 80.0
-            return value
-
-        def search(b: chess.Board, depth: int) -> float:
-            if depth == 0:
-                return 0.0
-            candidates = forcing_moves(b)
-            if not candidates:
-                return 0.0
-            scored_moves = [
-                (move_value(b, move), move)
-                for move in candidates
-            ]
-            scored_moves.sort(key=lambda item: item[0], reverse=True)
-            best = -1e9
-            for base_score, move in scored_moves:
-                b.push(move)
-                reply = search(b, depth - 1)
-                b.pop()
-                total = base_score - reply
-                if total > best:
-                    best = total
-            return 0.0 if best == -1e9 else best
-
-        candidates = forcing_moves(board)
-        if not candidates:
-            return None
-
-        scored_candidates = [
-            (move_value(board, move), move) for move in candidates
-        ]
-        scored_candidates.sort(key=lambda item: item[0], reverse=True)
-
-        best_move: Optional[chess.Move] = None
-        best_score = -1e9
-        for base_score, move in scored_candidates:
-            board.push(move)
-            reply = search(board, self.depth - 1)
-            board.pop()
-            total = base_score - reply
-            if total > best_score:
-                best_score = total
-                best_move = move
-
-        if best_move is None:
-            return None
-
-        return StrategyResult(
-            move=best_move.uci(),
-            strategy_name=self.name,
-            score=best_score,
-            confidence=self.confidence or 0.6,
-        )
-
-
 class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
@@ -838,6 +343,9 @@ class HeuristicSearchStrategy(MoveStrategy):
         min_time_limit: float = 0.25,
         time_allocation_factor: float = 0.10,
         transposition_table_size: int = 200000,
+        avoid_repetition: bool = False,
+        repetition_penalty: float = 45.0,
+        repetition_strong_penalty: float = 90.0,
         logger: Optional[Callable[[str], None]] = None,
         **kwargs,
     ):
@@ -849,7 +357,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self.max_time_limit = max(max_time_limit, self.min_time_limit)
         self.time_allocation_factor = time_allocation_factor
         self._mate_score = 100000
-        self._transposition_table: "OrderedDict[int, TranspositionEntry]" = OrderedDict()
+        self._transposition_table: "OrderedDict[str, TranspositionEntry]" = OrderedDict()
         self._transposition_table_limit = max(1000, transposition_table_size)
         self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
         self._killer_slots = 2
@@ -866,6 +374,9 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._razoring_depth_limit = 2
         self._razoring_margin = 325.0
         self._depth_iteration_stop_ratio = 0.8
+        self._avoid_repetition = avoid_repetition
+        self._repetition_penalty = repetition_penalty
+        self._repetition_strong_penalty = repetition_strong_penalty
 
         # Search state (initialised per search invocation)
         self._search_deadline: Optional[float] = None
@@ -874,7 +385,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._killer_moves: List[List[Optional[chess.Move]]] = []
         self._principal_variation: List[chess.Move] = []
         # Lightweight per-search cache for expensive static evaluations
-        self._eval_cache: Dict[Tuple[int, bool], float] = {}
+        self._eval_cache: Dict[str, float] = {}
         # Quiescence pruning: drop clearly losing captures unless they check or promote
         self._qsearch_see_prune_threshold: float = -0.5
         self._logger = logger or (lambda *_: None)
@@ -886,6 +397,13 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._mobility_unit = 2.0
         self._king_safety_opening_penalty = 12.0
         self._king_safety_endgame_bonus = 6.0
+
+    def _position_key(self, board: chess.Board) -> str:
+        castling = board.castling_xfen()
+        ep_square = board.ep_square
+        ep_target = "-" if ep_square is None else chess.square_name(ep_square)
+        turn = "w" if board.turn else "b"
+        return f"{board.board_fen()} {turn} {castling} {ep_target}"
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -970,9 +488,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                     fail_low = False
                     fail_high = False
 
-                    tt_entry = self._transposition_table.get(
-                        chess.polyglot.zobrist_hash(board)
-                    )
+                    root_key = self._position_key(board)
+                    tt_entry = self._transposition_table.get(root_key)
                     tt_move = tt_entry.move if tt_entry else None
                     principal_move = (
                         self._principal_variation[0]
@@ -986,26 +503,10 @@ class HeuristicSearchStrategy(MoveStrategy):
                             raise _SearchTimeout()
 
                         color = board.turn
+                        penalty = 0.0
                         board.push(move)
-                        if move_index == 0:
-                            score = -self._alpha_beta(
-                                board,
-                                depth=current_depth - 1,
-                                alpha=-beta,
-                                beta=-alpha,
-                                ply=1,
-                                is_pv=True,
-                            )
-                        else:
-                            score = -self._alpha_beta(
-                                board,
-                                depth=current_depth - 1,
-                                alpha=-alpha - 1,
-                                beta=-alpha,
-                                ply=1,
-                                is_pv=False,
-                            )
-                            if score > alpha:
+                        try:
+                            if move_index == 0:
                                 score = -self._alpha_beta(
                                     board,
                                     depth=current_depth - 1,
@@ -1014,7 +515,38 @@ class HeuristicSearchStrategy(MoveStrategy):
                                     ply=1,
                                     is_pv=True,
                                 )
-                        board.pop()
+                            else:
+                                score = -self._alpha_beta(
+                                    board,
+                                    depth=current_depth - 1,
+                                    alpha=-alpha - 1,
+                                    beta=-alpha,
+                                    ply=1,
+                                    is_pv=False,
+                                )
+                                if score > alpha:
+                                    score = -self._alpha_beta(
+                                        board,
+                                        depth=current_depth - 1,
+                                        alpha=-beta,
+                                        beta=-alpha,
+                                        ply=1,
+                                        is_pv=True,
+                                    )
+
+                            if self._avoid_repetition:
+                                try:
+                                    penalty = self._repetition_penalty_value(board)
+                                except Exception as exc:  # pragma: no cover - defensive
+                                    self._logger(
+                                        f"{self.name}: repetition penalty evaluation failed: {exc}"
+                                    )
+                                    penalty = 0.0
+                        finally:
+                            board.pop()
+
+                        if penalty:
+                            score -= penalty
 
                         if score > iteration_best_score:
                             iteration_best_score = score
@@ -1137,6 +669,19 @@ class HeuristicSearchStrategy(MoveStrategy):
             f"interrupted={search_interrupted} capped={capped_by_budget}"
         )
 
+        repetition_penalty = 0.0
+        if self._avoid_repetition and best_move is not None:
+            board.push(best_move)
+            try:
+                repetition_penalty = self._repetition_penalty_value(board)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._logger(
+                    f"{self.name}: repetition penalty evaluation failed: {exc}"
+                )
+                repetition_penalty = 0.0
+            finally:
+                board.pop()
+
         metadata = {
             "depth": completed_depth,
             "nodes": self._nodes_visited,
@@ -1144,6 +689,10 @@ class HeuristicSearchStrategy(MoveStrategy):
             "principal_move": best_move.uci(),
             "pv": [move.uci() for move in self._principal_variation],
         }
+        if self._avoid_repetition:
+            metadata["avoid_repetition"] = True
+            if repetition_penalty:
+                metadata["repetition_penalty"] = repetition_penalty
         return StrategyResult(
             move=best_move.uci(),
             strategy_name=self.name,
@@ -1244,7 +793,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
 
         in_check = board.is_check()
-        key = chess.polyglot.zobrist_hash(board)
+        key = self._position_key(board)
         entry = self._transposition_table.get(key)
         if entry and entry.depth >= depth:
             if entry.flag == TranspositionFlag.EXACT:
@@ -1576,7 +1125,7 @@ class HeuristicSearchStrategy(MoveStrategy):
 
     def _store_transposition_entry(
         self,
-        key: int,
+        key: str,
         depth: int,
         value: float,
         flag: TranspositionFlag,
@@ -1644,9 +1193,8 @@ class HeuristicSearchStrategy(MoveStrategy):
             return pv
         probe_board = board.copy(stack=False)
         for _ in range(depth):
-            entry = self._transposition_table.get(
-                chess.polyglot.zobrist_hash(probe_board)
-            )
+            probe_key = self._position_key(probe_board)
+            entry = self._transposition_table.get(probe_key)
             if not entry or entry.move is None:
                 break
             pv.append(entry.move)
@@ -1658,14 +1206,39 @@ class HeuristicSearchStrategy(MoveStrategy):
             return False
         return time.perf_counter() >= self._search_deadline
 
-    def _evaluate_board(self, board: chess.Board) -> float:
+    def _repetition_penalty_value(self, board: chess.Board) -> float:
+        if not self._avoid_repetition:
+            return 0.0
+
+        penalty = 0.0
+
+        if board.is_fivefold_repetition():
+            return float(self._mate_score)
+
+        if board.can_claim_fifty_moves():
+            penalty = max(penalty, self._repetition_strong_penalty)
+
         try:
-            key = (chess.polyglot.zobrist_hash(board), board.turn)
-            cached = self._eval_cache.get(key)
-            if cached is not None:
-                return cached
-        except Exception:
-            key = None
+            if board.is_repetition():
+                penalty = max(penalty, self._repetition_strong_penalty)
+            elif board.can_claim_threefold_repetition():
+                penalty = max(penalty, self._repetition_strong_penalty * 0.8)
+        except ValueError:
+            penalty = max(penalty, self._repetition_strong_penalty * 0.8)
+
+        try:
+            if board.is_repetition(2):
+                penalty = max(penalty, self._repetition_penalty)
+        except ValueError:
+            penalty = max(penalty, self._repetition_penalty)
+
+        return penalty
+
+    def _evaluate_board(self, board: chess.Board) -> float:
+        key = self._position_key(board)
+        cached = self._eval_cache.get(key)
+        if cached is not None:
+            return cached
 
         material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
         pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
@@ -1761,8 +1334,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             score += sign * (opening_term + endgame_term)
 
         result = score if board.turn == chess.WHITE else -score
-        if key is not None:
-            self._eval_cache[key] = result
+        self._eval_cache[key] = result
         return result
 
     def _game_phase(self, board: chess.Board) -> float:
@@ -1825,14 +1397,7 @@ class ChessEngine:
     It can process commands to set up positions, calculate moves, and manage engine state.
     """
 
-    def __init__(
-        self,
-        *,
-        opening_book: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
-        opening_book_path: Optional[
-            str
-        ] = "books/opening/gm2001.bin",  # Path to polyglot .bin file, e.g., download from https://github.com/gmcheems-org/free-opening-books
-    ):
+    def __init__(self) -> None:
         """Initialize the chess engine with default settings and state."""
         # Engine identification
         self.engine_name = "JaskFish"
@@ -1846,17 +1411,6 @@ class ChessEngine:
 
         # Lock to manage concurrent access to engine state
         self.state_lock = threading.Lock()
-
-        self._custom_opening_book = opening_book
-        self._opening_book_path = opening_book_path
-        self._opening_book_reader = None
-        if opening_book_path:
-            try:
-                self._opening_book_reader = chess.polyglot.open_reader(
-                    opening_book_path
-                )
-            except Exception as e:
-                print(f"info string Failed to load polyglot opening book: {e}")
 
         # Strategy management
         self.strategy_selector = StrategySelector(
@@ -1892,22 +1446,7 @@ class ChessEngine:
                 )
             )
 
-        if STRATEGY_ENABLE_FLAGS.get("opening_book", True):
-            opening_dict = self._create_default_opening_book(self._custom_opening_book)
-            strategies_to_register.append(
-                OpeningBookStrategy(
-                    reader=self._opening_book_reader,
-                    dict_book=opening_dict,
-                    name="OpeningBookStrategy",
-                )
-            )
-
-        if STRATEGY_ENABLE_FLAGS.get("forcing_scan", True):
-            strategies_to_register.append(
-                ForcingScanStrategy(
-                    name="ForcingScanStrategy",
-                )
-            )
+        repetition_enabled = STRATEGY_ENABLE_FLAGS.get("repetition_avoidance", False)
 
         if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
             strategies_to_register.append(
@@ -1915,6 +1454,7 @@ class ChessEngine:
                     name="HeuristicSearchStrategy",
                     search_depth=5,
                     logger=self._log_debug,
+                    avoid_repetition=repetition_enabled,
                 )
             )
 
@@ -1927,30 +1467,6 @@ class ChessEngine:
 
         for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
-
-    def _create_default_opening_book(
-        self, overrides: Optional[Dict[str, Union[str, Sequence[str]]]] = None
-    ) -> Dict[str, Union[str, Sequence[str]]]:
-        book: Dict[str, Union[str, Sequence[str]]] = {
-            chess.STARTING_FEN: ["e2e4", "d2d4", "c2c4", "g1f3"],
-            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1": "c7c5",
-            "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2": "g1f3",
-            "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2": "d7d6",
-            "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1": "g8f6",
-            "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 1 2": "c2c4",
-            "rnbqkb1r/pppppppp/5n2/8/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2": "e7e6",
-            "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2": "c2c4",
-            "rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2": "e7e6",
-            "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq - 0 1": "e7e5",
-            "rnbqkbnr/pppp1ppp/8/4p3/2P5/8/PP1PPPPP/RNBQKBNR w KQkq - 0 2": "b1c3",
-            "rnbqkbnr/pppp1ppp/8/4p3/2P5/2N5/PP1PPPPP/R1BQKBNR b KQkq - 1 2": "g8f6",
-            "rnbqkbnr/ppp1pppp/8/3p4/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 2": "g2g3",
-            "rnbqkbnr/ppp1pppp/8/3p4/8/5NP1/PPPPPP1P/RNBQKB1R b KQkq - 0 2": "g7g6",
-        }
-        if overrides:
-            for fen, moves in overrides.items():
-                book[fen] = moves
-        return book
 
     def create_strategy_context(
         self, board: chess.Board, time_controls: Optional[Dict[str, int]] = None
@@ -2217,7 +1733,5 @@ class ChessEngine:
 
 
 if __name__ == "__main__":
-    # Note: No additional installation is needed for polyglot support, as it's included in the python-chess library.
-    # Download a polyglot .bin file from e.g., https://github.com/gmcheems-org/free-opening-books and pass the path to ChessEngine(opening_book_path="path/to/book.bin")
     engine = ChessEngine()
     engine.start()

@@ -10,21 +10,19 @@ This document captures how the engine, GUI, and tooling in JaskFish fit together
 - **Shared helpers**
   - `src/chess_logic.py` supplies board utilities (move validation, repetition/fivefold detection, exporting PGN/SAN/uci histories).
   - `src/utils.py` contains ANSI logging helpers, Qt process cleanup, Unicode glyph mapping, and window placement helpers.
-  - Opening books live under `src/books/` (default `books/opening/gm2001.bin`), while reproducible positions sit in `gamestates/`. The `legacy/` tree is reference-only.
+  - Reproducible positions sit in `gamestates/`. The `legacy/` tree is reference-only.
 
 ## 2. Engine Internals
 - **Strategy orchestration** – `MoveStrategy` defines the interface; `StrategySelector` maintains a priority-ordered list and chooses the first strategy that returns a `StrategyResult`. If all strategies decline, the engine falls back to `random_move` to keep the protocol legal.
 - **Default toggle flags (`STRATEGY_ENABLE_FLAGS`)**
   - `mate_in_one` → `True`
-  - `opening_book` → `False` (polyglot reader is available but disabled by default)
-  - `repetition_avoidance` → `False` (stub slot for future work)
+  - `repetition_avoidance` → `True` (adds repetition penalties into the heuristic search)
   - `heuristic` → `True`
   - `fallback_random` → `False`
 - **Built-in strategies**
   1. `MateInOneStrategy` (priority 100, short-circuits) – brute-forces legal replies from the opponent’s perspective to find immediate mates.
-  2. `OpeningBookStrategy` (priority 90) – queries the on-disk polyglot book if the flag is enabled, otherwise falls back to a curated FEN dictionary.
-  3. `HeuristicSearchStrategy` (priority 70) – iterative deepening alpha-beta with quiescence, killer/history heuristics, null-move pruning, LMR, aspiration windows, and a transposition table capped by `transposition_table_size`.
-  4. `FallbackRandomStrategy` (priority 0) – injected only when the `fallback_random` flag is enabled; ensures a legal move is always produced.
+  2. `HeuristicSearchStrategy` (priority 70) – iterative deepening alpha-beta with quiescence, killer/history heuristics, null-move pruning, LMR, aspiration windows, and a transposition table capped by `transposition_table_size`. When repetition avoidance is enabled it penalises root moves that repeat positions to keep analysis moving forward.
+  3. `FallbackRandomStrategy` (priority 0) – injected only when the `fallback_random` flag is enabled; ensures a legal move is always produced.
 - **Search budgeting** – `HeuristicSearchStrategy` resolves a time budget each `go` based on explicit time controls or a dynamic heuristic that considers the move count, material, and branching factor. Budgets are clamped between `min_time_limit` (0.25 s) and `max_time_limit` (12 s) with a default `base_time_limit` of 4 s. When `debug on` is active the engine prints per-depth summaries (`depth=`, `nodes`, `time`, principal variation) and reports when a depth is cut short due to time.
 - **Strategy context** – `StrategyContext` snapshots everything a strategy might need (`fen`, repetition claims, legal move count, material imbalance, check status, opponent mate threat, time controls). The same context instance is passed to all strategies to keep evaluation deterministic.
 - **Threading model** – `handle_go` spawns a worker thread that calls `process_go_command`. The thread selects a move, prints `bestmove <uci>`, then prints `readyok`. `state_lock` protects access to the shared board and bookkeeping (`move_calculating`, debug mode, etc.).
@@ -59,7 +57,6 @@ Because these are marked `dev`, they only run when explicitly requested (`-m dev
 
 ## 5. Default Behaviours & Operational Tips
 - **Debug logging** – `debug on` is the main switch. In GUI launches it’s controlled by the “Debug Mode” toggle; in tests it is enabled within `EngineHarness` for deterministic traces.
-- **Opening book** – disabled by default via `STRATEGY_ENABLE_FLAGS`. To enable globally, flip the flag before instantiating the engine or pass `ChessEngine(opening_book_path="books/opening/gm2001.bin")`.
 - **Random fallback** – also disabled by default. To guarantee a move even when every other strategy fails, enable `fallback_random` or register `FallbackRandomStrategy` manually.
 - **Time controls** – supplying explicit `go` arguments (`wtime`, `btime`, `movetime`, etc.) overrides the adaptive heuristics. The GUI’s self-play loop sends bare `go`, so the adaptive budget dominates.
 - **Thread safety** – if you script direct access to `ChessEngine`, use the provided handlers (`handle_position`, `handle_go`, etc.) and respect `readyok` responses. Modifying `.board` directly without the lock can desynchronise strategies.
