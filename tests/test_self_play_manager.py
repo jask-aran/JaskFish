@@ -56,7 +56,10 @@ def self_play_setup():
         gui,
         {chess.WHITE: white_engine, chess.BLACK: black_engine},
         send_command_stub,
-        {chess.WHITE: "Engine 1 [White]", chess.BLACK: "Engine 2 [Black]"},
+        {
+            chess.WHITE: "White - Engine Alpha [#1]",
+            chess.BLACK: "Black - Engine Beta [#2]",
+        },
     )
 
     return manager, gui, white_engine, black_engine
@@ -76,8 +79,8 @@ def single_engine_setup():
         {chess.WHITE: shared_engine, chess.BLACK: shared_engine},
         send_command_stub,
         {
-            chess.WHITE: "Engine 1 [White]",
-            chess.BLACK: "Engine 1 [Black]",
+            chess.WHITE: "White - Engine Solo [#1]",
+            chess.BLACK: "Black - Engine Solo [#1]",
         },
     )
 
@@ -91,7 +94,7 @@ def test_self_play_start_initialises_engines(self_play_setup):
     assert gui.self_play_active is True
     assert gui.board_enabled is False
     assert gui.manual_enabled is False
-    assert gui.info_message == "Self-play: Engine 1 [White] evaluating…"
+    assert gui.info_message == "Self-play: White - Engine Alpha [#1] evaluating…"
 
     assert white_engine.commands[0] == "ucinewgame"
     assert white_engine.commands[1] == f"position fen {gui.board.fen()}"
@@ -128,7 +131,7 @@ def test_self_play_requests_alternate_engine(self_play_setup):
     assert black_engine.commands[1] == f"position fen {gui.board.fen()}"
     assert black_engine.commands[2] == "go"
     assert manager.active is True
-    assert gui.info_message == "Self-play: Engine 2 [Black] evaluating…"
+    assert gui.info_message == "Self-play: Black - Engine Beta [#2] evaluating…"
 
 
 def test_current_expected_color_tracks_turn(self_play_setup):
@@ -152,7 +155,10 @@ def test_update_engines_reconfigures_active_session(self_play_setup):
 
     manager.update_engines(
         {chess.WHITE: replacement, chess.BLACK: black_engine},
-        {chess.WHITE: "Engine A [White]", chess.BLACK: "Engine 2 [Black]"},
+        {
+            chess.WHITE: "White - Engine Gamma [#3]",
+            chess.BLACK: "Black - Engine Beta [#2]",
+        },
     )
 
     assert manager.active is False

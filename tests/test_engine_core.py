@@ -885,7 +885,10 @@ class SelfPlayTestHarness:
             self.ui,
             engines,
             send_command,
-            {chess.WHITE: "White - Engine 1", chess.BLACK: "Black - Engine 2"},
+            {
+                chess.WHITE: "White - Engine Harness [#1]",
+                chess.BLACK: "Black - Engine Harness [#2]",
+            },
             trace_directory=trace_dir,
         )
 

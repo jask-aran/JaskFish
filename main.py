@@ -12,9 +12,21 @@ from gui import ChessGUI
 from self_play import SelfPlayManager
 from utils import cleanup, debug_text, info_text, recieved_text, sending_text
 
-ENGINE_ID_ORDER = ("engine1", "engine2")
-ENGINE_ID_TO_NUMBER = {"engine1": 1, "engine2": 2}
-ENGINE_PREFERRED_COLORS = {"engine1": chess.WHITE, "engine2": chess.BLACK}
+ENGINE_SPECS = {
+    "engine1": {
+        "number": 1,
+        "default_script": "engine.py",
+        "default_name": "JaskFish",
+        "preferred_color": chess.WHITE,
+    },
+    "engine2": {
+        "number": 2,
+        "default_script": "simple_engine.py",
+        "default_name": "SimpleEngine",
+        "preferred_color": chess.BLACK,
+    },
+}
+ENGINE_ID_ORDER = tuple(ENGINE_SPECS.keys())
 COLOR_NAME = {chess.WHITE: "White", chess.BLACK: "Black"}
 
 
@@ -55,15 +67,6 @@ def resolve_engine_path(default_path: str, override: Optional[str]) -> str:
         print(info_text(f"Engine path not found: {candidate}. Falling back to {default_path}"))
         return default_path
     return candidate
-
-
-def build_engine_base_label(engine_id: str, friendly_name: Optional[str]) -> str:
-    number = ENGINE_ID_TO_NUMBER[engine_id]
-    base = f"Engine {number}"
-    if friendly_name:
-        base = f"{base} – {friendly_name}"
-    return base
-
 
 def handle_bestmove_line(bestmove_line: str, gui: ChessGUI, engine_label: str) -> Optional[str]:
     parts = bestmove_line.strip().split()
@@ -148,28 +151,55 @@ def main():
     dev = not args.dev
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_engine_path = os.path.join(script_dir, "engine.py")
 
     app = QApplication(sys.argv)
 
     color_assignments: Dict[bool, str] = {
-        chess.WHITE: "engine1",
-        chess.BLACK: "engine2",
+        chess.WHITE: ENGINE_ID_ORDER[0],
+        chess.BLACK: ENGINE_ID_ORDER[0],
     }
 
     engine_slots: Dict[str, Dict[str, object]] = {}
     for engine_id in ENGINE_ID_ORDER:
+        spec = ENGINE_SPECS[engine_id]
         override_path = getattr(args, engine_id)
-        friendly_name = getattr(args, f"{engine_id}_name")
-        engine_path = resolve_engine_path(default_engine_path, override_path)
+        default_path = os.path.join(script_dir, spec["default_script"])
+        friendly_override = getattr(args, f"{engine_id}_name")
+        engine_name = friendly_override or spec.get("default_name") or f"Engine {spec['number']}"
+        engine_path = resolve_engine_path(default_path, override_path)
+        color_assignments[spec["preferred_color"]] = engine_id
         engine_slots[engine_id] = {
             "id": engine_id,
+            "name": engine_name,
+            "number": spec["number"],
+            "preferred_color": spec["preferred_color"],
+            "default_script": spec["default_script"],
             "path": engine_path,
             "process": None,
             "active": True,
-            "base_label": build_engine_base_label(engine_id, friendly_name),
-            "preferred_color": ENGINE_PREFERRED_COLORS.get(engine_id, chess.WHITE),
         }
+
+    def engine_number(engine_id: str) -> int:
+        slot = engine_slots.get(engine_id, {})
+        number = slot.get("number", 0)
+        try:
+            return int(number)
+        except (TypeError, ValueError):
+            return 0
+
+    def engine_name(engine_id: str) -> str:
+        slot = engine_slots.get(engine_id, {})
+        name = slot.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        number = engine_number(engine_id)
+        return f"Engine {number}" if number else "Engine"
+
+    def engine_caption(engine_id: str) -> str:
+        number = engine_number(engine_id)
+        base_name = engine_name(engine_id)
+        suffix = f" [#{number}]" if number else ""
+        return f"{base_name}{suffix}"
 
     manual_pending: Dict[str, bool] = {engine_id: False for engine_id in ENGINE_ID_ORDER}
     manual_pending_color: Dict[str, Optional[bool]] = {
@@ -185,29 +215,25 @@ def main():
             color for color, assigned in color_assignments.items() if assigned == engine_id
         )
 
-    def engine_number_label(engine_id: str) -> str:
-        number = ENGINE_ID_TO_NUMBER.get(engine_id, 0)
-        return f"Engine {number}" if number else "Engine"
-
     def engine_log_label(engine_id: Optional[str]) -> str:
         if not engine_id or engine_id not in engine_slots:
             return "Engine"
         colors = colors_for_engine(engine_id)
         if not colors:
-            return f"Inactive - {engine_number_label(engine_id)}"
+            return f"Inactive - {engine_caption(engine_id)}"
         color_text = "/".join(COLOR_NAME[color] for color in colors)
-        return f"{color_text} - {engine_number_label(engine_id)}"
+        return f"{color_text} - {engine_caption(engine_id)}"
 
     def color_specific_label(engine_id: str, color: bool) -> str:
-        return f"{COLOR_NAME[color]} - {engine_number_label(engine_id)}"
+        return f"{COLOR_NAME[color]} - {engine_caption(engine_id)}"
 
     def color_assignment_label(color: bool) -> str:
         engine_id = color_assignments[color]
-        return engine_number_label(engine_id)
+        return engine_caption(engine_id)
 
     def manual_engine_provider() -> Tuple[str, str]:
         if gui is None:
-            return ENGINE_ID_ORDER[0], engine_number_label(ENGINE_ID_ORDER[0])
+            return ENGINE_ID_ORDER[0], engine_caption(ENGINE_ID_ORDER[0])
         turn_color = gui.board.turn
         engine_id = color_assignments.get(turn_color, ENGINE_ID_ORDER[0])
         slot = engine_slots.get(engine_id)
@@ -221,7 +247,7 @@ def main():
             label_color = "/".join(COLOR_NAME[color] for color in assigned_colors)
         else:
             label_color = "Engine"
-        return engine_id, f"{label_color} - {engine_number_label(engine_id)}"
+        return engine_id, f"{label_color} - {engine_caption(engine_id)}"
 
     def build_self_play_engine_map() -> Dict[bool, QProcess]:
         engines: Dict[bool, QProcess] = {}
@@ -385,13 +411,16 @@ def main():
                 engine_labels_by_color.copy(),
             )
         if gui:
+            gui.set_engine_labels(
+                {engine_id: engine_caption(engine_id) for engine_id in ENGINE_ID_ORDER}
+            )
             gui.set_engine_activation_states(
                 {engine_id: engine_slots[engine_id].get("active", False) for engine_id in ENGINE_ID_ORDER}
             )
             gui.set_swap_button_enabled(can_swap_colors())
             gui.set_engine_assignments(
-                engine_number_label(color_assignments[chess.WHITE]),
-                engine_number_label(color_assignments[chess.BLACK]),
+                engine_caption(color_assignments[chess.WHITE]),
+                engine_caption(color_assignments[chess.BLACK]),
             )
             gui.set_manual_engine_provider(manual_engine_provider)
             if info_message:
@@ -454,7 +483,7 @@ def main():
             slot["active"] = True
             preferred = slot["preferred_color"]
             color_assignments[preferred] = engine_id
-            refresh_engine_configuration(f"{slot['base_label']} activated")
+            refresh_engine_configuration(f"{engine_caption(engine_id)} activated")
         else:
             remaining = [eid for eid in active_engine_ids() if eid != engine_id]
             if not remaining:
@@ -477,7 +506,7 @@ def main():
             for color, assigned in list(color_assignments.items()):
                 if assigned == engine_id:
                     color_assignments[color] = replacement
-            refresh_engine_configuration(f"{slot['base_label']} deactivated")
+            refresh_engine_configuration(f"{engine_caption(engine_id)} deactivated")
 
     def restart_engines() -> None:
         print(info_text("Restarting engines..."))

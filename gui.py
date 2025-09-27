@@ -113,6 +113,7 @@ class ChessGUI(QMainWindow):
         self.engine_assignment_label: Optional[QLabel] = None
         self.manual_engine_provider: Optional[Callable[[], Tuple[str, str]]] = None
         self._swap_allowed = True
+        self.engine_labels: Dict[str, str] = {}
         print(utils.info_text("Starting Game..."))
 
         # Reporting Options
@@ -357,6 +358,7 @@ class ChessGUI(QMainWindow):
         toggle_row.setSpacing(10)
 
         for engine_id, label in (("engine1", "Engine 1"), ("engine2", "Engine 2")):
+            self.engine_labels[engine_id] = label
             button = QPushButton(f"Deactivate {label}")
             button.setProperty("engineId", engine_id)
             button.setProperty("labelText", label)
@@ -641,7 +643,7 @@ class ChessGUI(QMainWindow):
                 continue
             if not bool(button.property("active")):
                 continue
-            label_text = button.property("labelText") or engine_id
+            label_text = self.engine_labels.get(engine_id) or button.property("labelText") or engine_id
             active_engines.append((engine_id, str(label_text)))
 
         if not active_engines:
@@ -692,13 +694,24 @@ class ChessGUI(QMainWindow):
         self.swap_colors_callback = swap_callback
         self.toggle_engine_callback = toggle_callback
 
+    def set_engine_labels(self, labels: Dict[str, str]) -> None:
+        self.engine_labels.update(labels)
+        for engine_id, label in labels.items():
+            button = self.engine_toggle_buttons.get(engine_id)
+            if button is None:
+                continue
+            button.setProperty("labelText", label)
+            is_active = bool(button.property("active"))
+            action = "Deactivate" if is_active else "Activate"
+            button.setText(f"{action} {label}")
+
     def set_engine_activation_states(self, states: Dict[str, bool]) -> None:
         for engine_id, button in self.engine_toggle_buttons.items():
             if button is None:
                 continue
             active = states.get(engine_id, False)
             button.setProperty("active", active)
-            label_text = button.property("labelText") or engine_id
+            label_text = self.engine_labels.get(engine_id) or button.property("labelText") or engine_id
             action = "Deactivate" if active else "Activate"
             button.setText(f"{action} {label_text}")
 
