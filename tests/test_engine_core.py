@@ -944,7 +944,7 @@ def test_headless_self_play_debug_trace(require_dev_marker):
 
     combined_trace = "".join(go_chunks)
     assert combined_trace.count("bestmove") == plies
-    assert all("HeuristicSearchStrategy: start search" in chunk for chunk in go_chunks)
+    assert all("HS: start search" in chunk for chunk in go_chunks)
     assert any("completed depth=5" in chunk for chunk in go_chunks)
     assert "time_budget=" in combined_trace
     assert captured_moves[:6] == [
@@ -961,7 +961,7 @@ def test_headless_self_play_debug_trace(require_dev_marker):
     trace_path = harness.trace_path()
     assert trace_path is not None
     trace_data = harness.trace_contents()
-    assert "HeuristicSearchStrategy: start search" in trace_data
+    assert "HS: start search" in trace_data
     assert "bestmove" in trace_data
     assert "Initial FEN:" in trace_data
 

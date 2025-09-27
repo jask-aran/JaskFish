@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 import chess
 
+NSEC_PER_SEC = 1_000_000_000
+
 
 class _SearchTimeout(Exception):
     """Internal exception used to abort search when the time budget is exhausted."""
@@ -209,8 +211,9 @@ class StrategySelector:
 
         self._strategies.append(strategy)
         self._strategies.sort(key=lambda item: item.priority, reverse=True)
+        display_name = getattr(strategy, "log_tag", strategy.name)
         self._logger(
-            f"strategy registered: {strategy.name} (priority={strategy.priority})"
+            f"strategy registered: {display_name} (priority={strategy.priority})"
         )
 
     def clear_strategies(self) -> None:
@@ -238,19 +241,20 @@ class StrategySelector:
 
         strategy_results: List[Tuple[MoveStrategy, StrategyResult]] = []
         for strategy in self._strategies:
+            display_name = getattr(strategy, "log_tag", strategy.name)
             if not strategy.is_applicable(context):
-                self._logger(f"strategy skipped (not applicable): {strategy.name}")
+                self._logger(f"strategy skipped (not applicable): {display_name}")
                 continue
 
-            self._logger(f"strategy evaluating: {strategy.name}")
+            self._logger(f"strategy evaluating: {display_name}")
             try:
                 result = strategy.generate_move(board, context)
             except Exception as exc:  # pragma: no cover - defensive logging
-                self._logger(f"strategy error in {strategy.name}: {exc}")
+                self._logger(f"strategy error in {display_name}: {exc}")
                 continue
 
             if result is None:
-                self._logger(f"strategy produced no result: {strategy.name}")
+                self._logger(f"strategy produced no result: {display_name}")
                 continue
 
             strategy_results.append((strategy, result))
@@ -349,6 +353,8 @@ class HeuristicSearchStrategy(MoveStrategy):
         logger: Optional[Callable[[str], None]] = None,
         **kwargs,
     ):
+        self._log_tag = kwargs.pop("log_tag", "HS")
+        self.log_tag = self._log_tag
         super().__init__(priority=70, **kwargs)
         self.search_depth = max(1, search_depth)
         self.quiescence_depth = max(0, quiescence_depth)
@@ -389,6 +395,8 @@ class HeuristicSearchStrategy(MoveStrategy):
         # Quiescence pruning: drop clearly losing captures unless they check or promote
         self._qsearch_see_prune_threshold: float = -0.5
         self._logger = logger or (lambda *_: None)
+        # Lazily populated timing buckets for telemetry (ns units)
+        self._timing_totals: Optional[Dict[str, int]] = None
 
         # Evaluation constants (centipawns)
         self.bishop_pair_bonus = 40.0
@@ -432,7 +440,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         time_budget = self._determine_time_budget(context)
 
         self._logger(
-            f"{self.name}: start search depth_limit={depth_limit} "
+            f"{self._log_tag}: start search depth_limit={depth_limit} "
             f"time_budget={'infinite' if time_budget is None else f'{time_budget:.2f}s'} "
             f"legal_moves={context.legal_moves_count}"
         )
@@ -448,6 +456,13 @@ class HeuristicSearchStrategy(MoveStrategy):
             list() for _ in range(depth_limit + self.quiescence_depth + 4)
         ]
         self._eval_cache.clear()
+        timing_totals = {
+            "alpha_beta": 0,
+            "order_moves": 0,
+            "quiescence": 0,
+            "evaluate": 0,
+        }
+        self._timing_totals = timing_totals
 
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
@@ -475,6 +490,10 @@ class HeuristicSearchStrategy(MoveStrategy):
 
                 depth_start_nodes = self._nodes_visited
                 depth_start_time = time.perf_counter()
+                alpha_start_ns = timing_totals["alpha_beta"]
+                order_start_ns = timing_totals["order_moves"]
+                eval_start_ns = timing_totals["evaluate"]
+                q_start_ns = timing_totals["quiescence"]
 
                 failure_count = 0
 
@@ -485,6 +504,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                     beta = search_beta
                     iteration_best_move: Optional[chess.Move] = None
                     iteration_best_score = -float("inf")
+                    iteration_best_index = -1
                     fail_low = False
                     fail_high = False
 
@@ -539,7 +559,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                                     penalty = self._repetition_penalty_value(board)
                                 except Exception as exc:  # pragma: no cover - defensive
                                     self._logger(
-                                        f"{self.name}: repetition penalty evaluation failed: {exc}"
+                                        f"{self._log_tag}: repetition penalty evaluation failed: {exc}"
                                     )
                                     penalty = 0.0
                         finally:
@@ -551,6 +571,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                         if score > iteration_best_score:
                             iteration_best_score = score
                             iteration_best_move = move
+                            iteration_best_index = move_index
 
                         if score > alpha:
                             alpha = score
@@ -591,7 +612,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                         )
 
                         self._logger(
-                            f"{self.name}: depth={current_depth} {cause} "
+                            f"{self._log_tag}: depth={current_depth} {cause} "
                             f"aspiration -> [{alpha_window:.1f}, {beta_window:.1f}]"
                         )
 
@@ -601,7 +622,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                             aspiration = float(self._mate_score)
                             failure_count = 0
                             self._logger(
-                                f"{self.name}: depth={current_depth} switching to full-window search"
+                                f"{self._log_tag}: depth={current_depth} switching to full-window search"
                             )
 
                         if (
@@ -624,10 +645,29 @@ class HeuristicSearchStrategy(MoveStrategy):
                     pv_line = " ".join(
                         move.uci() for move in self._principal_variation
                     )
+                    nps = int(depth_nodes / depth_time) if depth_time > 0 else 0
+                    alpha_delta_ms = (
+                        timing_totals["alpha_beta"] - alpha_start_ns
+                    ) / 1_000_000
+                    order_delta_ms = (
+                        timing_totals["order_moves"] - order_start_ns
+                    ) / 1_000_000
+                    eval_delta_ms = (
+                        timing_totals["evaluate"] - eval_start_ns
+                    ) / 1_000_000
+                    q_delta_ms = (
+                        timing_totals["quiescence"] - q_start_ns
+                    ) / 1_000_000
+                    perf_line = (
+                        f"perf nps={nps} best_index={iteration_best_index} "
+                        f"alpha_ms={alpha_delta_ms:.3f} order_ms={order_delta_ms:.3f} "
+                        f"eval_ms={eval_delta_ms:.3f} q_ms={q_delta_ms:.3f}"
+                    )
                     self._logger(
-                        f"{self.name}: depth={current_depth} score={iteration_best_score:.1f} "
-                        f"nodes={self._nodes_visited} (+{depth_nodes}) time={depth_time:.2f}s "
-                        f"pv={pv_line or iteration_best_move.uci()}"
+                        f"{self._log_tag}: depth={current_depth} "
+                        f"score={iteration_best_score:.1f} nodes={self._nodes_visited} "
+                        f"(+{depth_nodes}) time={depth_time:.2f}s "
+                        f"pv={pv_line or iteration_best_move.uci()}\n{perf_line}"
                     )
 
                     if self._search_deadline is not None:
@@ -636,7 +676,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                             usage = depth_time / total_budget
                             capped_by_budget = True
                             self._logger(
-                                f"{self.name}: depth={current_depth} consumed {usage:.0%} of budget; halting deeper search"
+                                f"{self._log_tag}: depth={current_depth} consumed {usage:.0%} of budget; halting deeper search"
                             )
                             break
                     break
@@ -651,7 +691,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             search_interrupted = True
             elapsed = time.perf_counter() - self._search_start_time
             self._logger(
-                f"{self.name}: search timeout at depth={current_depth} "
+                f"{self._log_tag}: search timeout at depth={current_depth} "
                 f"nodes={self._nodes_visited} time={elapsed:.2f}s"
             )
 
@@ -659,15 +699,37 @@ class HeuristicSearchStrategy(MoveStrategy):
 
         if best_move is None:
             self._logger(
-                f"{self.name}: no move found (interrupted={search_interrupted or capped_by_budget})"
+                f"{self._log_tag}: no move found (interrupted={search_interrupted or capped_by_budget})"
             )
+            self._timing_totals = None
             return None
 
         self._logger(
-            f"{self.name}: completed depth={completed_depth} score={best_score:.1f} "
+            f"{self._log_tag}: completed depth={completed_depth} score={best_score:.1f} "
             f"best={best_move.uci()} nodes={self._nodes_visited} time={search_time:.2f}s "
             f"interrupted={search_interrupted} capped={capped_by_budget}"
         )
+
+        timing_totals_sec: Optional[Dict[str, float]] = None
+        if self._timing_totals:
+            timing_totals_sec = {
+                key: value / NSEC_PER_SEC for key, value in self._timing_totals.items()
+            }
+            nps_total = int(self._nodes_visited / search_time) if search_time else 0
+            summary_segments = [
+                f"info string perf summary depth={completed_depth}",
+                f"nodes={self._nodes_visited}",
+                f"time={search_time:.3f}s",
+                f"nps={nps_total}",
+            ]
+            timer_parts = [
+                f"{key.split('_')[0]}={timing_totals_sec[key]:.3f}s"
+                for key in ("alpha_beta", "order_moves", "evaluate", "quiescence")
+                if key in timing_totals_sec
+            ]
+            if timer_parts:
+                summary_segments.append("timers=" + ",".join(timer_parts))
+            print(" ".join(summary_segments))
 
         repetition_penalty = 0.0
         if self._avoid_repetition and best_move is not None:
@@ -676,7 +738,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                 repetition_penalty = self._repetition_penalty_value(board)
             except Exception as exc:  # pragma: no cover - defensive logging
                 self._logger(
-                    f"{self.name}: repetition penalty evaluation failed: {exc}"
+                    f"{self._log_tag}: repetition penalty evaluation failed: {exc}"
                 )
                 repetition_penalty = 0.0
             finally:
@@ -693,6 +755,10 @@ class HeuristicSearchStrategy(MoveStrategy):
             metadata["avoid_repetition"] = True
             if repetition_penalty:
                 metadata["repetition_penalty"] = repetition_penalty
+        if timing_totals_sec is not None:
+            metadata["timing"] = timing_totals_sec
+        metadata["label"] = self._log_tag
+        self._timing_totals = None
         return StrategyResult(
             move=best_move.uci(),
             strategy_name=self.name,
@@ -775,202 +841,208 @@ class HeuristicSearchStrategy(MoveStrategy):
         is_pv: bool,
         allow_null: bool = True,
     ) -> float:
-        self._nodes_visited += 1
+        timing = self._timing_totals
+        start_ns = time.perf_counter_ns() if timing is not None else 0
+        try:
+            self._nodes_visited += 1
 
-        if self._time_exceeded():
-            raise _SearchTimeout()
-
-        if board.is_checkmate():
-            return -float(self._mate_score) + ply
-        if (
-            board.is_stalemate()
-            or board.is_insufficient_material()
-            or board.can_claim_draw()
-        ):
-            return 0.0
-
-        if depth <= 0:
-            return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
-
-        in_check = board.is_check()
-        key = self._position_key(board)
-        entry = self._transposition_table.get(key)
-        if entry and entry.depth >= depth:
-            if entry.flag == TranspositionFlag.EXACT:
-                return entry.value
-            if entry.flag == TranspositionFlag.LOWERBOUND:
-                alpha = max(alpha, entry.value)
-            else:
-                beta = min(beta, entry.value)
-            if alpha >= beta:
-                return entry.value
-
-        tt_move = entry.move if entry else None
-        static_eval: Optional[float] = entry.static_eval if entry else None
-
-        if not in_check and not is_pv:
-            if depth <= self._razoring_depth_limit:
-                static_eval = static_eval or self._evaluate_board(board)
-                if static_eval + self._razoring_margin <= alpha:
-                    reduced = self._alpha_beta(
-                        board,
-                        depth - 1,
-                        alpha,
-                        beta,
-                        ply,
-                        is_pv,
-                        allow_null,
-                    )
-                    if reduced <= alpha:
-                        return reduced
-
-            if depth <= self._futility_depth_limit:
-                static_eval = static_eval or self._evaluate_board(board)
-                margin = self._futility_margin(depth)
-                if static_eval + margin <= alpha:
-                    return static_eval + margin
-
-        if (
-            allow_null
-            and not is_pv
-            and depth >= self._null_move_min_depth
-            and not in_check
-            and self._has_sufficient_material(board)
-        ):
-            reduction = self._null_move_reduction(depth)
-            board.push(chess.Move.null())
-            try:
-                null_score = -self._alpha_beta(
-                    board,
-                    depth=depth - 1 - reduction,
-                    alpha=-beta,
-                    beta=-beta + 1,
-                    ply=ply + 1,
-                    is_pv=False,
-                    allow_null=False,
-                )
-            finally:
-                board.pop()
-            if null_score >= beta:
-                return beta
-
-        moves = self._order_moves(board, ply, tt_move)
-        if not moves:
-            return self._evaluate_board(board)
-
-        best_value = -float("inf")
-        best_move: Optional[chess.Move] = None
-        alpha_original = alpha
-
-        for move_index, move in enumerate(moves):
             if self._time_exceeded():
                 raise _SearchTimeout()
 
-            is_capture = board.is_capture(move)
-            gives_check = board.gives_check(move)
-            promotion = move.promotion is not None
-            color = board.turn
+            if board.is_checkmate():
+                return -float(self._mate_score) + ply
+            if (
+                board.is_stalemate()
+                or board.is_insufficient_material()
+                or board.can_claim_draw()
+            ):
+                return 0.0
 
-            reduction = 0
-            child_is_pv = is_pv and move_index == 0
-            search_depth = depth - 1
-            new_allow_null = allow_null and not is_capture
+            if depth <= 0:
+                return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
+
+            in_check = board.is_check()
+            key = self._position_key(board)
+            entry = self._transposition_table.get(key)
+            if entry and entry.depth >= depth:
+                if entry.flag == TranspositionFlag.EXACT:
+                    return entry.value
+                if entry.flag == TranspositionFlag.LOWERBOUND:
+                    alpha = max(alpha, entry.value)
+                else:
+                    beta = min(beta, entry.value)
+                if alpha >= beta:
+                    return entry.value
+
+            tt_move = entry.move if entry else None
+            static_eval: Optional[float] = entry.static_eval if entry else None
+
+            if not in_check and not is_pv:
+                if depth <= self._razoring_depth_limit:
+                    static_eval = static_eval or self._evaluate_board(board)
+                    if static_eval + self._razoring_margin <= alpha:
+                        reduced = self._alpha_beta(
+                            board,
+                            depth - 1,
+                            alpha,
+                            beta,
+                            ply,
+                            is_pv,
+                            allow_null,
+                        )
+                        if reduced <= alpha:
+                            return reduced
+
+                if depth <= self._futility_depth_limit:
+                    static_eval = static_eval or self._evaluate_board(board)
+                    margin = self._futility_margin(depth)
+                    if static_eval + margin <= alpha:
+                        return static_eval + margin
 
             if (
-                depth >= self._lmr_min_depth
-                and move_index >= self._lmr_min_move_index
-                and not child_is_pv
-                and not is_capture
-                and not gives_check
-                and not promotion
+                allow_null
+                and not is_pv
+                and depth >= self._null_move_min_depth
+                and not in_check
+                and self._has_sufficient_material(board)
             ):
-                reduction = self._late_move_reduction(depth, move_index)
-                search_depth = max(0, depth - 1 - reduction)
-
-            board.push(move)
-            try:
-                if child_is_pv:
-                    score = -self._alpha_beta(
+                reduction = self._null_move_reduction(depth)
+                board.push(chess.Move.null())
+                try:
+                    null_score = -self._alpha_beta(
                         board,
-                        search_depth,
+                        depth=depth - 1 - reduction,
                         alpha=-beta,
-                        beta=-alpha,
-                        ply=ply + 1,
-                        is_pv=True,
-                        allow_null=new_allow_null,
-                    )
-                else:
-                    score = -self._alpha_beta(
-                        board,
-                        search_depth,
-                        alpha=-alpha - 1,
-                        beta=-alpha,
+                        beta=-beta + 1,
                         ply=ply + 1,
                         is_pv=False,
-                        allow_null=new_allow_null,
+                        allow_null=False,
                     )
-                    if reduction and score > alpha:
+                finally:
+                    board.pop()
+                if null_score >= beta:
+                    return beta
+
+            moves = self._order_moves(board, ply, tt_move)
+            if not moves:
+                return self._evaluate_board(board)
+
+            best_value = -float("inf")
+            best_move: Optional[chess.Move] = None
+            alpha_original = alpha
+
+            for move_index, move in enumerate(moves):
+                if self._time_exceeded():
+                    raise _SearchTimeout()
+
+                is_capture = board.is_capture(move)
+                gives_check = board.gives_check(move)
+                promotion = move.promotion is not None
+                color = board.turn
+
+                reduction = 0
+                child_is_pv = is_pv and move_index == 0
+                search_depth = depth - 1
+                new_allow_null = allow_null and not is_capture
+
+                if (
+                    depth >= self._lmr_min_depth
+                    and move_index >= self._lmr_min_move_index
+                    and not child_is_pv
+                    and not is_capture
+                    and not gives_check
+                    and not promotion
+                ):
+                    reduction = self._late_move_reduction(depth, move_index)
+                    search_depth = max(0, depth - 1 - reduction)
+
+                board.push(move)
+                try:
+                    if child_is_pv:
                         score = -self._alpha_beta(
                             board,
-                            depth - 1,
+                            search_depth,
                             alpha=-beta,
                             beta=-alpha,
                             ply=ply + 1,
                             is_pv=True,
                             allow_null=new_allow_null,
                         )
-                    elif score > alpha:
+                    else:
                         score = -self._alpha_beta(
                             board,
-                            depth - 1,
-                            alpha=-beta,
+                            search_depth,
+                            alpha=-alpha - 1,
                             beta=-alpha,
                             ply=ply + 1,
-                            is_pv=True,
+                            is_pv=False,
                             allow_null=new_allow_null,
                         )
-            except _SearchTimeout:
+                        if reduction and score > alpha:
+                            score = -self._alpha_beta(
+                                board,
+                                depth - 1,
+                                alpha=-beta,
+                                beta=-alpha,
+                                ply=ply + 1,
+                                is_pv=True,
+                                allow_null=new_allow_null,
+                            )
+                        elif score > alpha:
+                            score = -self._alpha_beta(
+                                board,
+                                depth - 1,
+                                alpha=-beta,
+                                beta=-alpha,
+                                ply=ply + 1,
+                                is_pv=True,
+                                allow_null=new_allow_null,
+                            )
+                except _SearchTimeout:
+                    board.pop()
+                    raise
                 board.pop()
-                raise
-            board.pop()
 
-            if score > best_value:
-                best_value = score
-                best_move = move
+                if score > best_value:
+                    best_value = score
+                    best_move = move
 
-            if score > alpha:
-                alpha = score
+                if score > alpha:
+                    alpha = score
 
-            if alpha >= beta:
-                if not is_capture:
-                    self._record_killer(ply, move)
-                    self._record_history(color, move, depth)
-                self._store_transposition_entry(
-                    key,
-                    depth,
-                    best_value,
-                    TranspositionFlag.LOWERBOUND,
-                    best_move,
-                    static_eval,
-                )
-                return best_value
+                if alpha >= beta:
+                    if not is_capture:
+                        self._record_killer(ply, move)
+                        self._record_history(color, move, depth)
+                    self._store_transposition_entry(
+                        key,
+                        depth,
+                        best_value,
+                        TranspositionFlag.LOWERBOUND,
+                        best_move,
+                        static_eval,
+                    )
+                    return best_value
 
-        flag = TranspositionFlag.EXACT
-        if best_value <= alpha_original:
-            flag = TranspositionFlag.UPPERBOUND
+            flag = TranspositionFlag.EXACT
+            if best_value <= alpha_original:
+                flag = TranspositionFlag.UPPERBOUND
 
-        if static_eval is None and not in_check:
-            static_eval = self._evaluate_board(board)
+            if static_eval is None and not in_check:
+                static_eval = self._evaluate_board(board)
 
-        self._store_transposition_entry(
-            key,
-            depth,
-            best_value,
-            flag,
-            best_move,
-            static_eval,
-        )
-        return best_value
+            self._store_transposition_entry(
+                key,
+                depth,
+                best_value,
+                flag,
+                best_move,
+                static_eval,
+            )
+            return best_value
+        finally:
+            if timing is not None:
+                timing["alpha_beta"] += time.perf_counter_ns() - start_ns
 
     def _quiescence(
         self,
@@ -980,35 +1052,41 @@ class HeuristicSearchStrategy(MoveStrategy):
         depth: int,
         ply: int,
     ) -> float:
-        self._nodes_visited += 1
-        if self._time_exceeded():
-            raise _SearchTimeout()
+        timing = self._timing_totals
+        start_ns = time.perf_counter_ns() if timing is not None else 0
+        try:
+            self._nodes_visited += 1
+            if self._time_exceeded():
+                raise _SearchTimeout()
 
-        stand_pat = self._evaluate_board(board)
-        if stand_pat >= beta:
-            return beta
-        if alpha < stand_pat:
-            alpha = stand_pat
-
-        if depth <= 0:
-            return stand_pat
-
-        moves = self._generate_quiescence_moves(board)
-        for move in moves:
-            board.push(move)
-            try:
-                score = -self._quiescence(board, -beta, -alpha, depth - 1, ply + 1)
-            except _SearchTimeout:
-                board.pop()
-                raise
-            board.pop()
-
-            if score >= beta:
+            stand_pat = self._evaluate_board(board)
+            if stand_pat >= beta:
                 return beta
-            if score > alpha:
-                alpha = score
+            if alpha < stand_pat:
+                alpha = stand_pat
 
-        return alpha
+            if depth <= 0:
+                return stand_pat
+
+            moves = self._generate_quiescence_moves(board)
+            for move in moves:
+                board.push(move)
+                try:
+                    score = -self._quiescence(board, -beta, -alpha, depth - 1, ply + 1)
+                except _SearchTimeout:
+                    board.pop()
+                    raise
+                board.pop()
+
+                if score >= beta:
+                    return beta
+                if score > alpha:
+                    alpha = score
+
+            return alpha
+        finally:
+            if timing is not None:
+                timing["quiescence"] += time.perf_counter_ns() - start_ns
 
     def _generate_quiescence_moves(self, board: chess.Board) -> List[chess.Move]:
         moves: List[chess.Move] = []
@@ -1065,36 +1143,44 @@ class HeuristicSearchStrategy(MoveStrategy):
         tt_move: Optional[chess.Move] = None,
         principal_move: Optional[chess.Move] = None,
     ) -> List[chess.Move]:
-        moves = list(board.legal_moves)
-        if not moves:
+        timing = self._timing_totals
+        start_ns = time.perf_counter_ns() if timing is not None else 0
+        try:
+            moves = list(board.legal_moves)
+            if not moves:
+                return moves
+
+            killer_moves = (
+                self._killer_moves[ply] if ply < len(self._killer_moves) else []
+            )
+            is_capture = board.is_capture
+            gives_check = board.gives_check
+            history_scores = self._history_scores
+
+            def score_move(move: chess.Move) -> float:
+                if tt_move and move == tt_move:
+                    return 1_000_000
+                if principal_move and move == principal_move:
+                    return 900_000
+
+                score = 0.0
+                if is_capture(move):
+                    score += 500_000 + self._static_exchange_score(board, move)
+                if move in killer_moves:
+                    score += 80_000
+                history_key = (board.turn, move.from_square, move.to_square)
+                score += history_scores.get(history_key, 0.0)
+                if move.promotion:
+                    score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
+                if not is_capture(move) and gives_check(move):
+                    score += 40_000
+                return score
+
+            moves.sort(key=score_move, reverse=True)
             return moves
-
-        killer_moves = self._killer_moves[ply] if ply < len(self._killer_moves) else []
-        is_capture = board.is_capture
-        gives_check = board.gives_check
-        history_scores = self._history_scores
-
-        def score_move(move: chess.Move) -> float:
-            if tt_move and move == tt_move:
-                return 1_000_000
-            if principal_move and move == principal_move:
-                return 900_000
-
-            score = 0.0
-            if is_capture(move):
-                score += 500_000 + self._static_exchange_score(board, move)
-            if move in killer_moves:
-                score += 80_000
-            history_key = (board.turn, move.from_square, move.to_square)
-            score += history_scores.get(history_key, 0.0)
-            if move.promotion:
-                score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
-            if not is_capture(move) and gives_check(move):
-                score += 40_000
-            return score
-
-        moves.sort(key=score_move, reverse=True)
-        return moves
+        finally:
+            if timing is not None:
+                timing["order_moves"] += time.perf_counter_ns() - start_ns
 
     def _record_killer(self, ply: int, move: chess.Move) -> None:
         if ply >= len(self._killer_moves):
@@ -1235,107 +1321,113 @@ class HeuristicSearchStrategy(MoveStrategy):
         return penalty
 
     def _evaluate_board(self, board: chess.Board) -> float:
-        key = self._position_key(board)
-        cached = self._eval_cache.get(key)
-        if cached is not None:
-            return cached
-
-        material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        bishops = {chess.WHITE: 0, chess.BLACK: 0}
-
-        for square, piece in board.piece_map().items():
-            value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-            table = PIECE_SQUARE_TABLES.get(piece.piece_type)
-            color = piece.color
-            material[color] += value
-            if table:
-                index = square if color == chess.WHITE else chess.square_mirror(square)
-                pst[color] += table[index]
-            if piece.piece_type == chess.BISHOP:
-                bishops[color] += 1
-
-        score = (material[chess.WHITE] - material[chess.BLACK]) + (
-            pst[chess.WHITE] - pst[chess.BLACK]
-        )
-
-        if bishops[chess.WHITE] >= 2:
-            score += self.bishop_pair_bonus
-        if bishops[chess.BLACK] >= 2:
-            score -= self.bishop_pair_bonus
-
-        # Passed pawns
-        for color in (chess.WHITE, chess.BLACK):
-            sign = 1 if color == chess.WHITE else -1
-            enemy_pawns = set(board.pieces(chess.PAWN, not color))
-            for pawn_square in board.pieces(chess.PAWN, color):
-                file_index = chess.square_file(pawn_square)
-                rank = chess.square_rank(pawn_square)
-                direction = 1 if color == chess.WHITE else -1
-                passed = True
-                for file_delta in (-1, 0, 1):
-                    nf = file_index + file_delta
-                    if not 0 <= nf < 8:
-                        continue
-                    r = rank + direction
-                    while 0 <= r < 8:
-                        sq = chess.square(nf, r)
-                        if sq in enemy_pawns:
-                            passed = False
-                            break
-                        r += direction
-                    if not passed:
-                        break
-                if passed:
-                    advancement = rank - 1 if color == chess.WHITE else 6 - rank
-                    bonus = self._passed_pawn_base_bonus + self._passed_pawn_rank_bonus * max(0, advancement)
-                    score += sign * bonus
-
-        # Mobility
-        current_mobility = board.legal_moves.count()
+        timing = self._timing_totals
+        start_ns = time.perf_counter_ns() if timing is not None else 0
         try:
-            board.push(chess.Move.null())
-            opponent_mobility = board.legal_moves.count()
-            board.pop()
-        except ValueError:
-            opponent_mobility = current_mobility
-        score += (current_mobility - opponent_mobility) * self._mobility_unit
+            key = self._position_key(board)
+            cached = self._eval_cache.get(key)
+            if cached is not None:
+                return cached
 
-        # King safety
-        phase = self._game_phase(board)
-        opening_weight = phase
-        endgame_weight = 1.0 - phase
-        for color in (chess.WHITE, chess.BLACK):
-            sign = 1 if color == chess.WHITE else -1
-            king_square = board.king(color)
-            if king_square is None:
-                continue
-            attackers = len(board.attackers(not color, king_square))
-            ring = 0
-            king_file = chess.square_file(king_square)
-            king_rank = chess.square_rank(king_square)
-            for file_delta in (-1, 0, 1):
-                for rank_delta in (-1, 0, 1):
-                    if file_delta == 0 and rank_delta == 0:
-                        continue
-                    nf = king_file + file_delta
-                    nr = king_rank + rank_delta
-                    if 0 <= nf < 8 and 0 <= nr < 8:
-                        neighbour = chess.square(nf, nr)
-                        piece = board.piece_at(neighbour)
-                        if piece and piece.color == color:
-                            ring += 1
-            opening_term = opening_weight * (
-                -self._king_safety_opening_penalty * attackers + 2.0 * ring
+            material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
+            pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
+            bishops = {chess.WHITE: 0, chess.BLACK: 0}
+
+            for square, piece in board.piece_map().items():
+                value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
+                table = PIECE_SQUARE_TABLES.get(piece.piece_type)
+                color = piece.color
+                material[color] += value
+                if table:
+                    index = square if color == chess.WHITE else chess.square_mirror(square)
+                    pst[color] += table[index]
+                if piece.piece_type == chess.BISHOP:
+                    bishops[color] += 1
+
+            score = (material[chess.WHITE] - material[chess.BLACK]) + (
+                pst[chess.WHITE] - pst[chess.BLACK]
             )
-            central_distance = abs(king_file - 3.5) + abs(king_rank - 3.5)
-            activity = self._king_safety_endgame_bonus * (3.5 - central_distance)
-            endgame_term = endgame_weight * activity
-            score += sign * (opening_term + endgame_term)
 
-        result = score if board.turn == chess.WHITE else -score
-        self._eval_cache[key] = result
-        return result
+            if bishops[chess.WHITE] >= 2:
+                score += self.bishop_pair_bonus
+            if bishops[chess.BLACK] >= 2:
+                score -= self.bishop_pair_bonus
+
+            # Passed pawns
+            for color in (chess.WHITE, chess.BLACK):
+                sign = 1 if color == chess.WHITE else -1
+                enemy_pawns = set(board.pieces(chess.PAWN, not color))
+                for pawn_square in board.pieces(chess.PAWN, color):
+                    file_index = chess.square_file(pawn_square)
+                    rank = chess.square_rank(pawn_square)
+                    direction = 1 if color == chess.WHITE else -1
+                    passed = True
+                    for file_delta in (-1, 0, 1):
+                        nf = file_index + file_delta
+                        if not 0 <= nf < 8:
+                            continue
+                        r = rank + direction
+                        while 0 <= r < 8:
+                            sq = chess.square(nf, r)
+                            if sq in enemy_pawns:
+                                passed = False
+                                break
+                            r += direction
+                        if not passed:
+                            break
+                    if passed:
+                        advancement = rank - 1 if color == chess.WHITE else 6 - rank
+                        bonus = self._passed_pawn_base_bonus + self._passed_pawn_rank_bonus * max(0, advancement)
+                        score += sign * bonus
+
+            # Mobility
+            current_mobility = board.legal_moves.count()
+            try:
+                board.push(chess.Move.null())
+                opponent_mobility = board.legal_moves.count()
+                board.pop()
+            except ValueError:
+                opponent_mobility = current_mobility
+            score += (current_mobility - opponent_mobility) * self._mobility_unit
+
+            # King safety
+            phase = self._game_phase(board)
+            opening_weight = phase
+            endgame_weight = 1.0 - phase
+            for color in (chess.WHITE, chess.BLACK):
+                sign = 1 if color == chess.WHITE else -1
+                king_square = board.king(color)
+                if king_square is None:
+                    continue
+                attackers = len(board.attackers(not color, king_square))
+                ring = 0
+                king_file = chess.square_file(king_square)
+                king_rank = chess.square_rank(king_square)
+                for file_delta in (-1, 0, 1):
+                    for rank_delta in (-1, 0, 1):
+                        if file_delta == 0 and rank_delta == 0:
+                            continue
+                        nf = king_file + file_delta
+                        nr = king_rank + rank_delta
+                        if 0 <= nf < 8 and 0 <= nr < 8:
+                            neighbour = chess.square(nf, nr)
+                            piece = board.piece_at(neighbour)
+                            if piece and piece.color == color:
+                                ring += 1
+                opening_term = opening_weight * (
+                    -self._king_safety_opening_penalty * attackers + 2.0 * ring
+                )
+                central_distance = abs(king_file - 3.5) + abs(king_rank - 3.5)
+                activity = self._king_safety_endgame_bonus * (3.5 - central_distance)
+                endgame_term = endgame_weight * activity
+                score += sign * (opening_term + endgame_term)
+
+            result = score if board.turn == chess.WHITE else -score
+            self._eval_cache[key] = result
+            return result
+        finally:
+            if timing is not None:
+                timing["evaluate"] += time.perf_counter_ns() - start_ns
 
     def _game_phase(self, board: chess.Board) -> float:
         phase_values = {
@@ -1432,8 +1524,10 @@ class ChessEngine:
         }
 
     def _log_debug(self, message: str) -> None:
-        if self.debug:
-            print(f"info string {message}")
+        if not self.debug:
+            return
+        for line in message.splitlines():
+            print(f"info string {line}")
 
     def _register_default_strategies(self) -> None:
         strategies_to_register: List[MoveStrategy] = []
@@ -1701,21 +1795,62 @@ class ChessEngine:
                     f"material={context.material_imbalance}"
                 )
 
+            selection_elapsed = 0.0
+            selection_start = time.perf_counter()
             result = (
                 self.strategy_selector.select_move(board_snapshot, context)
                 if self.strategy_selector
                 else None
             )
+            selection_elapsed = time.perf_counter() - selection_start
+
+            metadata: Dict[str, Any] = {}
+            if result and result.metadata:
+                metadata = result.metadata
 
             move = None
             if result and result.move:
                 move = result.move
+                display_name = metadata.get("label") or result.strategy_name
                 print(
-                    f"info string strategy {result.strategy_name} selected move {result.move}"
+                    f"info string strategy {display_name} selected move {result.move}"
                 )
             else:
                 if self.debug:
                     self._log_debug("no strategy produced a move")
+
+            nodes = metadata.get("nodes") if metadata else None
+            search_time = metadata.get("time") if metadata else None
+            depth = metadata.get("depth") if metadata else None
+            timing_breakdown = metadata.get("timing") if metadata else None
+
+            if search_time is not None and nodes is not None:
+                nps_total = int(nodes / search_time) if search_time else 0
+                depth_display = depth if depth is not None else "-"
+                perf_segments = [
+                    f"info string perf move depth={depth_display}",
+                    f"nodes={nodes}",
+                    f"time={search_time:.3f}s",
+                    f"nps={nps_total}",
+                    f"select={selection_elapsed:.3f}s",
+                ]
+                if isinstance(timing_breakdown, dict):
+                    ordered_keys = [
+                        "alpha_beta",
+                        "order_moves",
+                        "evaluate",
+                        "quiescence",
+                    ]
+                    timer_parts = [
+                        f"{key.split('_')[0]}={timing_breakdown[key]:.3f}s"
+                        for key in ordered_keys
+                        if key in timing_breakdown
+                    ]
+                    if timer_parts:
+                        perf_segments.append("timers=" + ",".join(timer_parts))
+                print(" ".join(perf_segments))
+            else:
+                print(f"info string perf select={selection_elapsed:.3f}s")
 
             with self.state_lock:
                 if move:
