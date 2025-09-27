@@ -341,10 +341,10 @@ class MateInOneStrategy(MoveStrategy):
 class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
-        search_depth: int = 5,
+        search_depth: int = 6,
         quiescence_depth: int = 6,
-        base_time_limit: float = 5.0,
-        max_time_limit: float = 24.0,
+        base_time_limit: float = 6.0,
+        max_time_limit: float = 30.0,
         min_time_limit: float = 0.25,
         time_allocation_factor: float = 0.10,
         transposition_table_size: int = 2000000,
@@ -380,7 +380,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._futility_base_margin = 120.0
         self._razoring_depth_limit = 2
         self._razoring_margin = 325.0
-        self._depth_iteration_stop_ratio = 0.8
+        self._depth_iteration_stop_ratio = 0.7
         self._avoid_repetition = avoid_repetition
         self._repetition_penalty = repetition_penalty
         self._repetition_strong_penalty = repetition_strong_penalty
