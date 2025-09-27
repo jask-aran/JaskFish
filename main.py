@@ -9,6 +9,7 @@ from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication
 
 from gui import ChessGUI
+from utils import ReportingLevel
 from self_play import SelfPlayManager
 from utils import cleanup, debug_text, info_text, recieved_text, sending_text
 
@@ -22,7 +23,7 @@ ENGINE_SPECS = {
     "engine2": {
         "number": 2,
         "default_script": "simple_engine.py",
-        "default_name": "SimpleEngine",
+        "default_name": "Simple",
         "preferred_color": chess.BLACK,
     },
 }
@@ -128,6 +129,7 @@ def main():
     args = parse_args()
     board = chess.Board() if not args.fen else chess.Board(args.fen)
     dev = not args.dev
+    reporting_level = ReportingLevel.BASIC if dev else ReportingLevel.QUIET
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -318,8 +320,6 @@ def main():
         slot["active"] = process.state() == QProcess.Running
         process_slot_lookup[id(process)] = engine_id
         attach_engine_output(engine_id, process)
-        if process.state() == QProcess.Running and dev:
-            send_command_with_lookup(process, "debug on")
         print(info_text(f"{engine_log_label(engine_id)} -> {slot['path']}"))
         return process
 
@@ -374,6 +374,7 @@ def main():
     gui = ChessGUI(
         board,
         dev=dev,
+        reporting_level=reporting_level,
         go_callback=manual_go_callback,
         ready_callback=manual_ready_callback,
         restart_engine_callback=None,

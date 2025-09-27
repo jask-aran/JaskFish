@@ -1,5 +1,18 @@
+from enum import Enum
+
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication
+
+
+class ReportingLevel(Enum):
+    """Controls how much diagnostic information the UI prints."""
+
+    QUIET = 0
+    BASIC = 1
+    VERBOSE = 2
+
+    def label(self) -> str:
+        return self.name.title()
 
 def color_text(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"

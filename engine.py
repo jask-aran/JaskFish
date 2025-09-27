@@ -1405,7 +1405,7 @@ class ChessEngine:
 
         # Engine state
         self.board = chess.Board()
-        self.debug = False
+        self.debug = True
         self.move_calculating = False
         self.running = True
 

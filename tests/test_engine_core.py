@@ -45,7 +45,7 @@ def test_handle_uci_reports_identity(capsys):
     engine = engine_module.ChessEngine()
     engine.handle_uci()
     output_lines = capsys.readouterr().out.strip().splitlines()
-    assert output_lines == [
+    assert output_lines[-3:] == [
         "id name JaskFish",
         "id author Jaskaran Singh",
         "uciok",
@@ -54,7 +54,8 @@ def test_handle_uci_reports_identity(capsys):
 
 def test_handle_isready_reflects_engine_state(capsys, deterministic_engine):
     deterministic_engine.handle_isready("")
-    assert capsys.readouterr().out.strip() == "readyok"
+    ready_output = capsys.readouterr().out.strip().splitlines()
+    assert ready_output[-1] == "readyok"
 
     deterministic_engine.move_calculating = True
     deterministic_engine.handle_isready("")

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 import chess_logic
 import utils
+from utils import ReportingLevel
 
 
 class PromotionDialog(QDialog):
@@ -87,6 +88,7 @@ class ChessGUI(QMainWindow):
         toggle_engine_callback: Optional[Callable[[str, bool], None]] = None,
         start_self_play_callback: Optional[Callable[[], bool]] = None,
         stop_self_play_callback: Optional[Callable[[], bool]] = None,
+        reporting_level: Optional[ReportingLevel] = None,
     ):
         super().__init__()
         self.board = board
@@ -114,23 +116,33 @@ class ChessGUI(QMainWindow):
         self.manual_engine_provider: Optional[Callable[[], Tuple[str, str]]] = None
         self._swap_allowed = True
         self.engine_labels: Dict[str, str] = {}
+        if reporting_level is None:
+            reporting_level = ReportingLevel.BASIC if self.dev else ReportingLevel.QUIET
+        if not isinstance(reporting_level, ReportingLevel):
+            raise ValueError("reporting level must be a ReportingLevel instance")
+        self.reporting_level = reporting_level
         print(utils.info_text("Starting Game..."))
 
-        # Reporting Options
-        self.full_reporting = True
         if self.dev:
             print(utils.debug_text("Debug Mode ENABLED"))
-            print(
-                utils.debug_text(
-                    f"Full Reporting {'ENABLED' if self.full_reporting else 'DISABLED'}"
-                )
-            )
+            print(utils.debug_text(f"Reporting Level {self.reporting_level.label()}"))
             print(
                 utils.debug_text(
                     f"User Color {'WHITE' if self.player_is_white else 'BLACK'}"
                 )
             )
         self.init_ui()
+
+    def set_reporting_level(self, level: ReportingLevel) -> None:
+        if not isinstance(level, ReportingLevel):
+            raise ValueError("reporting level must be a ReportingLevel instance")
+        self.reporting_level = level
+        if self.dev:
+            print(utils.debug_text(f"Reporting Level {self.reporting_level.label()}"))
+
+    def _trace_verbose(self, message: str) -> None:
+        if self.reporting_level is ReportingLevel.VERBOSE:
+            print(utils.debug_text(message))
 
     def apply_theme(self):
         app = QApplication.instance()
@@ -479,43 +491,23 @@ class ChessGUI(QMainWindow):
 
         if self.selected_square == clicked_square:  # Handle unselecting
             self.selected_square = None
-            (
-                print(
-                    utils.debug_text(f"{chess.square_name(clicked_square)} Unselected")
-                )
-                if self.dev and self.full_reporting
-                else None
-            )
+            self._trace_verbose(f"{chess.square_name(clicked_square)} Unselected")
         elif is_own_color(clicked_square):  # Handle selecting/ reselecting own piece
             self.selected_square = clicked_square
-            (
-                print(utils.debug_text(f"{chess.square_name(clicked_square)} Selected"))
-                if self.dev and self.full_reporting
-                else None
-            )
+            self._trace_verbose(f"{chess.square_name(clicked_square)} Selected")
         elif self.selected_square is not None:  # Handle move attempt
             move = chess.Move(self.selected_square, clicked_square)
             self.attempt_move(move)
             self.selected_square = None
         else:
-            (
-                print(utils.debug_text("No Piece on Square/ Wrong color"))
-                if self.dev and self.full_reporting
-                else None
-            )
+            self._trace_verbose("No Piece on Square/ Wrong color")
 
         self.update_board()
 
     def attempt_move(self, move):
         # Move in form e1e2
-        (
-            print(
-                utils.debug_text(
-                    f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}"
-                )
-            )
-            if self.dev and self.full_reporting
-            else None
+        self._trace_verbose(
+            f"Move attempted: {chess.square_name(move.from_square)} -> {chess.square_name(move.to_square)}"
         )
 
         if chess_logic.is_pawn_promotion_attempt(self.board, move):
