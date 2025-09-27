@@ -12,6 +12,7 @@ from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import chess
+from chess import polyglot
 
 NSEC_PER_SEC = 1_000_000_000
 
@@ -296,7 +297,7 @@ class StrategySelector:
             confidence = (
                 float(result.confidence) if result.confidence is not None else 0.0
             )
-            key = (score, confidence, float(strategy.priority))
+            key = (float(strategy.priority), score, confidence)
             if best_key is None or key > best_key:
                 best_key = key
                 best_result = result
@@ -407,13 +408,15 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._mobility_unit = 2.0
         self._king_safety_opening_penalty = 12.0
         self._king_safety_endgame_bonus = 6.0
+        # Time checking configuration
+        self._time_check_interval = 512
+        self._time_check_counter = 0
+        self._deadline_reached = False
 
-    def _position_key(self, board: chess.Board) -> str:
-        castling = board.castling_xfen()
-        ep_square = board.ep_square
-        ep_target = "-" if ep_square is None else chess.square_name(ep_square)
-        turn = "w" if board.turn else "b"
-        return f"{board.board_fen()} {turn} {castling} {ep_target}"
+    def _position_key(self, board: chess.Board) -> int:
+        """Return a Zobrist hash for the given board state."""
+
+        return polyglot.zobrist_hash(board)
 
     def _initialise_decision_stats(self) -> Dict[str, Any]:
         stats: Dict[str, Any] = {
@@ -625,13 +628,30 @@ class HeuristicSearchStrategy(MoveStrategy):
         prune = summary.get("prune", {})
         cut = summary.get("cutoffs", {})
 
+        tt_hits = tt.get("hits", 0)
+        tt_probes = tt.get("probes", 0)
+        null_tried_raw = null.get("tried", 0)
+        null_success = null.get("success", 0)
+        null_pct = (
+            null_success / null_tried_raw * 100.0 if null_tried_raw else 0.0
+        )
+        prune_rate = prune.get("rate", 0.0)
+
+        cut_summary_items = sorted(
+            ((label, value) for label, value in cut.items() if value),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        cut_summary_text = ",".join(f"{label}:{value}" for label, value in cut_summary_items[:4])
+        if not cut_summary_text:
+            cut_summary_text = "-"
+
         line_heur = (
-            f"info string analysis heur tt={tt.get('hit_pct', 0.0):.0f}%({tt.get('hits', 0)}/{tt.get('probes', 0)}) "
-            f"null={null.get('success', 0)}/{null.get('tried', 0)} "
+            f"info string analysis heur tt={tt.get('hit_pct', 0.0):.0f}%({tt_hits}/{tt_probes}) "
+            f"null={null_success}/{null_tried_raw}({null_pct:.0f}%) "
             f"lmr={lmr.get('applied', 0)}/{lmr.get('research', 0)} "
             f"asp=FL{asp.get('fail_low', 0)} FH{asp.get('fail_high', 0)} R{asp.get('resets', 0)} "
-            f"prune%={prune.get('rate', 0.0):.1f} cut[tt={cut.get('tt', 0)} cap={cut.get('capture', 0)} "
-            f"kil={cut.get('killer', 0)} hist={cut.get('history', 0)} chk={cut.get('check', 0)} pro={cut.get('promo', 0)} oth={cut.get('other', 0)}]"
+            f"prune={prune_rate:.1f}% cut={cut_summary_text}"
         )
         print(line_heur)
 
@@ -643,13 +663,17 @@ class HeuristicSearchStrategy(MoveStrategy):
         def _fmt(value: Optional[int]) -> str:
             return str(value) if value is not None else "-"
 
+        cache_hits = cache.get("hits", 0)
+        cache_total = cache_hits + cache.get("misses", 0)
+        cache_rate = (cache_hits / cache_total * 100.0) if cache_total else 0.0
+        q_ratio_pct = qsearch.get("ratio", 0.0) * 100.0
+
         line_quality = (
             f"info string analysis quality order_p50={_fmt(order.get('p50'))} "
             f"p90={_fmt(order.get('p90'))} last={_fmt(order.get('last'))} "
-            f"cache={cache.get('hits', 0)}/{cache.get('misses', 0)}+{cache.get('stored', 0)} "
+            f"cache={cache_hits}/{cache_total}({cache_rate:.0f}%) add={cache.get('stored', 0)} "
             f"updates=K{updates.get('killer', 0)} H{updates.get('history', 0)} "
-            f"qnodes={qsearch.get('nodes', 0)} qratio={qsearch.get('ratio', 0.0):.2f} "
-            f"qcut={qsearch.get('cutoffs', 0)}"
+            f"q={qsearch.get('nodes', 0)}({q_ratio_pct:.0f}%) cut={qsearch.get('cutoffs', 0)}"
         )
         print(line_quality)
 
@@ -692,6 +716,8 @@ class HeuristicSearchStrategy(MoveStrategy):
             else self._search_start_time + max(time_budget, self.min_time_limit)
         )
         self._nodes_visited = 0
+        self._time_check_counter = 0
+        self._deadline_reached = False
         self._killer_moves = [
             list() for _ in range(depth_limit + self.quiescence_depth + 4)
         ]
@@ -1029,7 +1055,9 @@ class HeuristicSearchStrategy(MoveStrategy):
         if timing_totals_sec is not None:
             metadata["timing"] = timing_totals_sec
         if analysis_summary is not None:
-            metadata["analysis"] = analysis_summary
+            metadata_analysis = dict(analysis_summary)
+            metadata_analysis.pop("root_scores", None)
+            metadata["analysis"] = metadata_analysis
         metadata["label"] = self._log_tag
         self._timing_totals = None
         self._decision_stats = None
@@ -1485,27 +1513,41 @@ class HeuristicSearchStrategy(MoveStrategy):
             killer_moves = (
                 self._killer_moves[ply] if ply < len(self._killer_moves) else []
             )
+            killer_ranks = {
+                km: idx for idx, km in enumerate(killer_moves) if km is not None
+            }
+            history_scores = self._history_scores
             is_capture = board.is_capture
             gives_check = board.gives_check
-            history_scores = self._history_scores
 
-            def score_move(move: chess.Move) -> float:
+            def score_move(move: chess.Move) -> int:
+                # Highest priority: exact TT move.
                 if tt_move and move == tt_move:
-                    return 1_000_000
-                if principal_move and move == principal_move:
-                    return 900_000
+                    return 12_000_000
 
-                score = 0.0
+                score = 0
+                if principal_move and move == principal_move:
+                    score += 11_000_000
+
+                killer_idx = killer_ranks.get(move)
+                if killer_idx is not None:
+                    score += 9_500_000 - killer_idx * 1_000
+
                 if is_capture(move):
-                    score += 500_000 + self._static_exchange_score(board, move)
-                if move in killer_moves:
-                    score += 80_000
-                history_key = (board.turn, move.from_square, move.to_square)
-                score += history_scores.get(history_key, 0.0)
+                    score += 8_000_000
+                    score += int(self._capture_score(board, move))
+
                 if move.promotion:
-                    score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
+                    score += 6_000_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
+
                 if not is_capture(move) and gives_check(move):
-                    score += 40_000
+                    score += 500_000
+
+                history_key = (board.turn, move.from_square, move.to_square)
+                history_value = history_scores.get(history_key, 0.0)
+                if history_value:
+                    score += int(history_value)
+
                 return score
 
             moves.sort(key=score_move, reverse=True)
@@ -1628,7 +1670,16 @@ class HeuristicSearchStrategy(MoveStrategy):
     def _time_exceeded(self) -> bool:
         if self._search_deadline is None:
             return False
-        return time.perf_counter() >= self._search_deadline
+        if self._deadline_reached:
+            return True
+        self._time_check_counter += 1
+        if self._time_check_counter < self._time_check_interval:
+            return False
+        self._time_check_counter = 0
+        if time.perf_counter() >= self._search_deadline:
+            self._deadline_reached = True
+            return True
+        return False
 
     def _repetition_penalty_value(self, board: chess.Board) -> float:
         if not self._avoid_repetition:
