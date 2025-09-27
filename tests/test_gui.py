@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import time
 from unittest.mock import mock_open, patch
@@ -14,6 +15,12 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from gui import ChessGUI, PromotionDialog
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text)
 
 
 @pytest.fixture(scope="session")
@@ -239,8 +246,8 @@ def test_dev_mode_debug_information(chess_gui, capfd):
     QTest.mouseClick(e4_button, Qt.LeftButton)
     QTest.qWait(20)
 
-    output = capfd.readouterr().out
-    assert "Move attempted: e2 -> e4" in output
+    output = _strip_ansi(capfd.readouterr().out)
+    assert "INFO  e2e4 Valid Move by White" in output
 
 
 def test_developer_mode_player_color(chess_gui):

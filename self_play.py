@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
@@ -106,7 +106,7 @@ class SelfPlayManager:
         self._waiting_for_move = False
         self._session_traces = {chess.WHITE: [], chess.BLACK: []}
         self._session_start_fen = self._gui.board.fen()
-        self._session_started_at = datetime.utcnow()
+        self._session_started_at = datetime.now(timezone.utc)
         self._last_trace_path = None
 
         self._gui.set_self_play_active(True)
@@ -212,11 +212,14 @@ class SelfPlayManager:
         except Exception:
             return
 
-        timestamp = self._session_started_at or datetime.utcnow()
+        timestamp = self._session_started_at or datetime.now(timezone.utc)
+        iso_stamp = (
+            timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
         filename = timestamp.strftime("self_play_%Y%m%dT%H%M%S.log")
         path = self._trace_directory / filename
         header_lines = [
-            f"Self-play trace recorded at {timestamp.isoformat()}Z",
+            f"Self-play trace recorded at {iso_stamp}",
             f"Initial FEN: {self._session_start_fen or 'unknown'}",
             f"Final FEN: {self._gui.board.fen()}",
         ]
