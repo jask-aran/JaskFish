@@ -397,6 +397,8 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._logger = logger or (lambda *_: None)
         # Lazily populated timing buckets for telemetry (ns units)
         self._timing_totals: Optional[Dict[str, int]] = None
+        # Per-search heuristic instrumentation
+        self._decision_stats: Optional[Dict[str, Any]] = None
 
         # Evaluation constants (centipawns)
         self.bishop_pair_bonus = 40.0
@@ -412,6 +414,244 @@ class HeuristicSearchStrategy(MoveStrategy):
         ep_target = "-" if ep_square is None else chess.square_name(ep_square)
         turn = "w" if board.turn else "b"
         return f"{board.board_fen()} {turn} {castling} {ep_target}"
+
+    def _initialise_decision_stats(self) -> Dict[str, Any]:
+        stats: Dict[str, Any] = {
+            "tt_probes": 0,
+            "tt_exact": 0,
+            "tt_lower": 0,
+            "tt_upper": 0,
+            "tt_miss": 0,
+            "null_tried": 0,
+            "null_success": 0,
+            "futility_prunes": 0,
+            "razor_attempts": 0,
+            "razor_prunes": 0,
+            "lmr_applied": 0,
+            "lmr_research": 0,
+            "beta_cutoffs": {
+                "tt": 0,
+                "capture": 0,
+                "killer": 0,
+                "history": 0,
+                "check": 0,
+                "promo": 0,
+                "other": 0,
+            },
+            "asp_fail_low": 0,
+            "asp_fail_high": 0,
+            "asp_resets": 0,
+            "root_scores": [],
+            "root_moves": [],
+            "root_best_indices": [],
+            "pv_swaps": 0,
+            "eval_cache_hits": 0,
+            "eval_cache_misses": 0,
+            "eval_cache_store": 0,
+            "q_nodes": 0,
+            "q_cutoffs": 0,
+            "q_moves_considered": 0,
+            "history_updates": 0,
+            "killer_updates": 0,
+        }
+        self._decision_stats = stats
+        return stats
+
+    @staticmethod
+    def _percentile(values: Sequence[int], percentile: float) -> Optional[int]:
+        if not values:
+            return None
+        percentile = min(max(percentile, 0.0), 1.0)
+        if len(values) == 1:
+            return values[0]
+        sorted_vals = sorted(values)
+        index = int(round(percentile * (len(sorted_vals) - 1)))
+        index = min(max(index, 0), len(sorted_vals) - 1)
+        return sorted_vals[index]
+
+    def _build_analysis_summary(
+        self,
+        stats: Optional[Dict[str, Any]],
+        completed_depth: int,
+        best_score: float,
+        search_time: float,
+        search_interrupted: bool,
+        capped_by_budget: bool,
+        timing_totals_sec: Optional[Dict[str, float]],
+    ) -> Optional[Dict[str, Any]]:
+        if stats is None:
+            return None
+
+        total_nodes = self._nodes_visited
+        nps = int(total_nodes / search_time) if search_time > 0 else 0
+
+        root_scores: List[float] = stats["root_scores"]
+        score_delta = 0.0
+        score_jitter = 0.0
+        last_delta = 0.0
+        if len(root_scores) >= 2:
+            diffs = [root_scores[i] - root_scores[i - 1] for i in range(1, len(root_scores))]
+            score_delta = root_scores[-1] - root_scores[0]
+            score_jitter = max(abs(diff) for diff in diffs)
+            last_delta = diffs[-1]
+
+        order_indices: List[int] = stats["root_best_indices"]
+        order_p25 = self._percentile(order_indices, 0.25)
+        order_p50 = self._percentile(order_indices, 0.50)
+        order_p90 = self._percentile(order_indices, 0.90)
+        best_index_last = order_indices[-1] if order_indices else None
+
+        tt_probes = stats["tt_probes"]
+        tt_hits = stats["tt_exact"] + stats["tt_lower"] + stats["tt_upper"]
+        tt_hit_pct = (tt_hits / tt_probes * 100.0) if tt_probes else 0.0
+
+        null_tried = stats["null_tried"]
+        null_success = stats["null_success"]
+
+        prune_futility = stats["futility_prunes"]
+        prune_razor = stats["razor_prunes"]
+        prune_total = prune_futility + prune_razor + null_success
+        prune_rate = (prune_total / total_nodes * 100.0) if total_nodes else 0.0
+
+        q_nodes = stats["q_nodes"]
+        q_cutoffs = stats["q_cutoffs"]
+        q_ratio = (q_nodes / total_nodes) if total_nodes else 0.0
+
+        cache_hits = stats["eval_cache_hits"]
+        cache_misses = stats["eval_cache_misses"]
+        cache_store = stats["eval_cache_store"]
+
+        summary = {
+            "label": self._log_tag,
+            "depth": completed_depth,
+            "score": best_score,
+            "nodes": total_nodes,
+            "nps": nps,
+            "search_time": search_time,
+            "score_delta": score_delta,
+            "score_jitter": score_jitter,
+            "last_delta": last_delta,
+            "pv_swaps": stats["pv_swaps"],
+            "pv_head": [move.uci() for move in self._principal_variation[:6]],
+            "tt": {
+                "probes": tt_probes,
+                "hits": tt_hits,
+                "hit_pct": tt_hit_pct,
+                "exact": stats["tt_exact"],
+                "lower": stats["tt_lower"],
+                "upper": stats["tt_upper"],
+                "miss": stats["tt_miss"],
+            },
+            "null": {
+                "tried": null_tried,
+                "success": null_success,
+            },
+            "lmr": {
+                "applied": stats["lmr_applied"],
+                "research": stats["lmr_research"],
+            },
+            "asp": {
+                "fail_low": stats["asp_fail_low"],
+                "fail_high": stats["asp_fail_high"],
+                "resets": stats["asp_resets"],
+            },
+            "prune": {
+                "futility": prune_futility,
+                "razor": prune_razor,
+                "null": null_success,
+                "total": prune_total,
+                "rate": prune_rate,
+            },
+            "cutoffs": stats["beta_cutoffs"].copy(),
+            "qsearch": {
+                "nodes": q_nodes,
+                "ratio": q_ratio,
+                "cutoffs": q_cutoffs,
+                "moves": stats["q_moves_considered"],
+            },
+            "cache": {
+                "hits": cache_hits,
+                "misses": cache_misses,
+                "stored": cache_store,
+            },
+            "updates": {
+                "killer": stats["killer_updates"],
+                "history": stats["history_updates"],
+            },
+            "order": {
+                "p25": order_p25,
+                "p50": order_p50,
+                "p90": order_p90,
+                "last": best_index_last,
+                "count": len(order_indices),
+            },
+            "status": {
+                "timeout": search_interrupted,
+                "capped": capped_by_budget,
+            },
+            "timers": timing_totals_sec or {},
+            "root_scores": root_scores,
+        }
+        return summary
+
+    def _emit_analysis_summary(self, summary: Dict[str, Any]) -> None:
+        pv_text = " ".join(summary.get("pv_head", []))
+        if len(pv_text) > 60:
+            pv_text = pv_text[:57] + "..."
+
+        status = summary.get("status", {})
+        status_bits: List[str] = []
+        if status.get("timeout"):
+            status_bits.append("timeout")
+        if status.get("capped"):
+            status_bits.append("capped")
+        status_text = ",".join(status_bits) if status_bits else "ok"
+
+        line_root = (
+            f"info string analysis root depth={summary.get('depth', '-')} "
+            f"score={summary.get('score', 0.0):.1f} nodes={summary.get('nodes', 0)} "
+            f"nps={summary.get('nps', 0)} time={summary.get('search_time', 0.0):.2f}s "
+            f"delta={summary.get('score_delta', 0.0):+.1f} jitter={summary.get('score_jitter', 0.0):.1f} "
+            f"pv_swaps={summary.get('pv_swaps', 0)} status={status_text}"
+        )
+        if pv_text:
+            line_root += f" pv={pv_text}"
+        print(line_root)
+
+        tt = summary.get("tt", {})
+        null = summary.get("null", {})
+        lmr = summary.get("lmr", {})
+        asp = summary.get("asp", {})
+        prune = summary.get("prune", {})
+        cut = summary.get("cutoffs", {})
+
+        line_heur = (
+            f"info string analysis heur tt={tt.get('hit_pct', 0.0):.0f}%({tt.get('hits', 0)}/{tt.get('probes', 0)}) "
+            f"null={null.get('success', 0)}/{null.get('tried', 0)} "
+            f"lmr={lmr.get('applied', 0)}/{lmr.get('research', 0)} "
+            f"asp=FL{asp.get('fail_low', 0)} FH{asp.get('fail_high', 0)} R{asp.get('resets', 0)} "
+            f"prune%={prune.get('rate', 0.0):.1f} cut[tt={cut.get('tt', 0)} cap={cut.get('capture', 0)} "
+            f"kil={cut.get('killer', 0)} hist={cut.get('history', 0)} chk={cut.get('check', 0)} pro={cut.get('promo', 0)} oth={cut.get('other', 0)}]"
+        )
+        print(line_heur)
+
+        order = summary.get("order", {})
+        cache = summary.get("cache", {})
+        updates = summary.get("updates", {})
+        qsearch = summary.get("qsearch", {})
+
+        def _fmt(value: Optional[int]) -> str:
+            return str(value) if value is not None else "-"
+
+        line_quality = (
+            f"info string analysis quality order_p50={_fmt(order.get('p50'))} "
+            f"p90={_fmt(order.get('p90'))} last={_fmt(order.get('last'))} "
+            f"cache={cache.get('hits', 0)}/{cache.get('misses', 0)}+{cache.get('stored', 0)} "
+            f"updates=K{updates.get('killer', 0)} H{updates.get('history', 0)} "
+            f"qnodes={qsearch.get('nodes', 0)} qratio={qsearch.get('ratio', 0.0):.2f} "
+            f"qcut={qsearch.get('cutoffs', 0)}"
+        )
+        print(line_quality)
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -463,12 +703,15 @@ class HeuristicSearchStrategy(MoveStrategy):
             "evaluate": 0,
         }
         self._timing_totals = timing_totals
+        decision_stats = self._initialise_decision_stats()
 
         best_move: Optional[chess.Move] = None
         best_score = -float("inf")
         completed_depth = 0
         last_score: Optional[float] = None
         self._principal_variation = []
+
+        stats = decision_stats
 
         search_interrupted = False
         capped_by_budget = False
@@ -599,6 +842,10 @@ class HeuristicSearchStrategy(MoveStrategy):
                         fail_high = True
 
                     if fail_low or fail_high:
+                        if fail_low:
+                            stats["asp_fail_low"] += 1
+                        if fail_high:
+                            stats["asp_fail_high"] += 1
                         failure_count += 1
                         cause = "fail-high" if fail_high else "fail-low"
                         aspiration *= self._aspiration_growth
@@ -621,6 +868,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                             beta_window = float(self._mate_score)
                             aspiration = float(self._mate_score)
                             failure_count = 0
+                            stats["asp_resets"] += 1
                             self._logger(
                                 f"{self._log_tag}: depth={current_depth} switching to full-window search"
                             )
@@ -639,6 +887,16 @@ class HeuristicSearchStrategy(MoveStrategy):
                     self._principal_variation = self._extract_principal_variation(
                         board, current_depth
                     )
+
+                    if iteration_best_move is not None:
+                        move_uci = iteration_best_move.uci()
+                        previous_moves = stats["root_moves"]
+                        if previous_moves and move_uci != previous_moves[-1]:
+                            stats["pv_swaps"] += 1
+                        previous_moves.append(move_uci)
+                        stats["root_scores"].append(iteration_best_score)
+                        if iteration_best_index >= 0:
+                            stats["root_best_indices"].append(iteration_best_index)
 
                     depth_time = time.perf_counter() - depth_start_time
                     depth_nodes = self._nodes_visited - depth_start_nodes
@@ -702,6 +960,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                 f"{self._log_tag}: no move found (interrupted={search_interrupted or capped_by_budget})"
             )
             self._timing_totals = None
+            self._decision_stats = None
             return None
 
         self._logger(
@@ -711,6 +970,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         )
 
         timing_totals_sec: Optional[Dict[str, float]] = None
+        analysis_summary: Optional[Dict[str, Any]] = None
         if self._timing_totals:
             timing_totals_sec = {
                 key: value / NSEC_PER_SEC for key, value in self._timing_totals.items()
@@ -730,6 +990,17 @@ class HeuristicSearchStrategy(MoveStrategy):
             if timer_parts:
                 summary_segments.append("timers=" + ",".join(timer_parts))
             print(" ".join(summary_segments))
+            analysis_summary = self._build_analysis_summary(
+                stats,
+                completed_depth,
+                best_score,
+                search_time,
+                search_interrupted,
+                capped_by_budget,
+                timing_totals_sec,
+            )
+            if analysis_summary is not None:
+                self._emit_analysis_summary(analysis_summary)
 
         repetition_penalty = 0.0
         if self._avoid_repetition and best_move is not None:
@@ -757,8 +1028,11 @@ class HeuristicSearchStrategy(MoveStrategy):
                 metadata["repetition_penalty"] = repetition_penalty
         if timing_totals_sec is not None:
             metadata["timing"] = timing_totals_sec
+        if analysis_summary is not None:
+            metadata["analysis"] = analysis_summary
         metadata["label"] = self._log_tag
         self._timing_totals = None
+        self._decision_stats = None
         return StrategyResult(
             move=best_move.uci(),
             strategy_name=self.name,
@@ -845,6 +1119,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         start_ns = time.perf_counter_ns() if timing is not None else 0
         try:
             self._nodes_visited += 1
+            stats = self._decision_stats
 
             if self._time_exceeded():
                 raise _SearchTimeout()
@@ -864,6 +1139,19 @@ class HeuristicSearchStrategy(MoveStrategy):
             in_check = board.is_check()
             key = self._position_key(board)
             entry = self._transposition_table.get(key)
+
+            if stats is not None:
+                stats["tt_probes"] += 1
+                if entry is None:
+                    stats["tt_miss"] += 1
+                else:
+                    if entry.flag == TranspositionFlag.EXACT:
+                        stats["tt_exact"] += 1
+                    elif entry.flag == TranspositionFlag.LOWERBOUND:
+                        stats["tt_lower"] += 1
+                    else:
+                        stats["tt_upper"] += 1
+
             if entry and entry.depth >= depth:
                 if entry.flag == TranspositionFlag.EXACT:
                     return entry.value
@@ -879,6 +1167,8 @@ class HeuristicSearchStrategy(MoveStrategy):
 
             if not in_check and not is_pv:
                 if depth <= self._razoring_depth_limit:
+                    if stats is not None:
+                        stats["razor_attempts"] += 1
                     static_eval = static_eval or self._evaluate_board(board)
                     if static_eval + self._razoring_margin <= alpha:
                         reduced = self._alpha_beta(
@@ -891,12 +1181,16 @@ class HeuristicSearchStrategy(MoveStrategy):
                             allow_null,
                         )
                         if reduced <= alpha:
+                            if stats is not None:
+                                stats["razor_prunes"] += 1
                             return reduced
 
                 if depth <= self._futility_depth_limit:
                     static_eval = static_eval or self._evaluate_board(board)
                     margin = self._futility_margin(depth)
                     if static_eval + margin <= alpha:
+                        if stats is not None:
+                            stats["futility_prunes"] += 1
                         return static_eval + margin
 
             if (
@@ -909,6 +1203,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                 reduction = self._null_move_reduction(depth)
                 board.push(chess.Move.null())
                 try:
+                    if stats is not None:
+                        stats["null_tried"] += 1
                     null_score = -self._alpha_beta(
                         board,
                         depth=depth - 1 - reduction,
@@ -921,6 +1217,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                 finally:
                     board.pop()
                 if null_score >= beta:
+                    if stats is not None:
+                        stats["null_success"] += 1
                     return beta
 
             moves = self._order_moves(board, ply, tt_move)
@@ -930,6 +1228,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             best_value = -float("inf")
             best_move: Optional[chess.Move] = None
             alpha_original = alpha
+            killer_moves = self._killer_moves[ply] if ply < len(self._killer_moves) else []
 
             for move_index, move in enumerate(moves):
                 if self._time_exceeded():
@@ -939,6 +1238,10 @@ class HeuristicSearchStrategy(MoveStrategy):
                 gives_check = board.gives_check(move)
                 promotion = move.promotion is not None
                 color = board.turn
+                history_key = (color, move.from_square, move.to_square)
+                history_score = self._history_scores.get(history_key, 0.0)
+                was_killer = move in killer_moves
+                was_tt_move = tt_move is not None and move == tt_move
 
                 reduction = 0
                 child_is_pv = is_pv and move_index == 0
@@ -955,6 +1258,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                 ):
                     reduction = self._late_move_reduction(depth, move_index)
                     search_depth = max(0, depth - 1 - reduction)
+                    if stats is not None:
+                        stats["lmr_applied"] += 1
 
                 board.push(move)
                 try:
@@ -979,6 +1284,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                             allow_null=new_allow_null,
                         )
                         if reduction and score > alpha:
+                            if stats is not None:
+                                stats["lmr_research"] += 1
                             score = -self._alpha_beta(
                                 board,
                                 depth - 1,
@@ -1014,6 +1321,22 @@ class HeuristicSearchStrategy(MoveStrategy):
                     if not is_capture:
                         self._record_killer(ply, move)
                         self._record_history(color, move, depth)
+                    if stats is not None:
+                        if was_tt_move:
+                            category = "tt"
+                        elif is_capture:
+                            category = "capture"
+                        elif was_killer:
+                            category = "killer"
+                        elif history_score > 0:
+                            category = "history"
+                        elif gives_check:
+                            category = "check"
+                        elif promotion:
+                            category = "promo"
+                        else:
+                            category = "other"
+                        stats["beta_cutoffs"][category] += 1
                     self._store_transposition_entry(
                         key,
                         depth,
@@ -1056,11 +1379,16 @@ class HeuristicSearchStrategy(MoveStrategy):
         start_ns = time.perf_counter_ns() if timing is not None else 0
         try:
             self._nodes_visited += 1
+            stats = self._decision_stats
+            if stats is not None:
+                stats["q_nodes"] += 1
             if self._time_exceeded():
                 raise _SearchTimeout()
 
             stand_pat = self._evaluate_board(board)
             if stand_pat >= beta:
+                if stats is not None:
+                    stats["q_cutoffs"] += 1
                 return beta
             if alpha < stand_pat:
                 alpha = stand_pat
@@ -1069,6 +1397,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                 return stand_pat
 
             moves = self._generate_quiescence_moves(board)
+            if stats is not None:
+                stats["q_moves_considered"] += len(moves)
             for move in moves:
                 board.push(move)
                 try:
@@ -1079,6 +1409,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                 board.pop()
 
                 if score >= beta:
+                    if stats is not None:
+                        stats["q_cutoffs"] += 1
                     return beta
                 if score > alpha:
                     alpha = score
@@ -1191,12 +1523,18 @@ class HeuristicSearchStrategy(MoveStrategy):
         killers.insert(0, move)
         while len(killers) > self._killer_slots:
             killers.pop()
+        stats = self._decision_stats
+        if stats is not None:
+            stats["killer_updates"] += 1
 
     def _record_history(self, color: bool, move: chess.Move, depth: int) -> None:
         key = (color, move.from_square, move.to_square)
         self._history_scores[key] += depth * depth
         if self._history_scores[key] > 500000:
             self._history_scores[key] *= 0.5
+        stats = self._decision_stats
+        if stats is not None:
+            stats["history_updates"] += 1
 
     def _decay_history_scores(self, factor: float = 0.9) -> None:
         if not self._history_scores:
@@ -1327,7 +1665,13 @@ class HeuristicSearchStrategy(MoveStrategy):
             key = self._position_key(board)
             cached = self._eval_cache.get(key)
             if cached is not None:
+                stats = self._decision_stats
+                if stats is not None:
+                    stats["eval_cache_hits"] += 1
                 return cached
+            stats = self._decision_stats
+            if stats is not None:
+                stats["eval_cache_misses"] += 1
 
             material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
             pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
@@ -1424,6 +1768,8 @@ class HeuristicSearchStrategy(MoveStrategy):
 
             result = score if board.turn == chess.WHITE else -score
             self._eval_cache[key] = result
+            if stats is not None:
+                stats["eval_cache_store"] += 1
             return result
         finally:
             if timing is not None:
