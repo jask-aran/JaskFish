@@ -1,17 +1,26 @@
 import sys
 import io
+import json
 import random
 import time
 import threading
 import math
 import os
+import itertools
+import tempfile
 from abc import ABC, abstractmethod
 from collections import defaultdict, OrderedDict
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import chess
+
+try:
+    import psutil  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
 
 
 class _SearchTimeout(Exception):
@@ -94,6 +103,138 @@ PIECE_SQUARE_TABLES = {
     ]
 }
 
+
+_LOG_LEVELS = {"summary", "iter", "detail"}
+
+
+def _normalise_log_level(value: Optional[str]) -> str:
+    level = (value or "summary").strip().lower()
+    return level if level in _LOG_LEVELS else "summary"
+
+
+def _normalise_profile_mode(value: Optional[str]) -> str:
+    mode = (value or "off").strip().lower()
+    return mode if mode in {"off", "cprofile", "sample"} else "off"
+
+
+GLOBAL_LOG_LEVEL = _normalise_log_level(os.getenv("LOG_LEVEL"))
+GLOBAL_LOG_JSON = os.getenv("LOG_JSON", "off").strip().lower() == "on"
+GLOBAL_PROFILE_MODE = _normalise_profile_mode(os.getenv("PROFILE_MODE"))
+
+
+def _emit_info(payload: Dict[str, Any], *, as_json: bool = True) -> None:
+    if as_json:
+        message = json.dumps(payload, separators=(",", ":"))
+    else:
+        tag = payload.get("tag", "info")
+        rest = {k: v for k, v in payload.items() if k != "tag"}
+        kv_pairs = " ".join(f"{key}={value}" for key, value in rest.items())
+        message = f"{tag} {kv_pairs}".strip()
+    print(f"info string {message}")
+
+
+class _StatsTimer:
+    def __init__(self, owner: "SearchStats", bucket: str):
+        self._owner = owner
+        self._bucket = bucket
+        self._start = 0.0
+
+    def __enter__(self):
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = time.perf_counter() - self._start
+        self._owner.add_time(self._bucket, elapsed)
+
+
+@dataclass
+class SearchStats:
+    search_id: int
+    side: str
+    fen: str
+    depth_limit: int
+    qdepth: int
+    budget_s: Optional[float]
+    legal_moves: int
+    log_level: str
+    log_json: bool
+    config: Dict[str, Any]
+    profile_mode: str = "off"
+
+    start_ts: float = field(default_factory=time.perf_counter)
+    timers: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    counts: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    iterations: List[Dict[str, Any]] = field(default_factory=list)
+    _log_buffer: List[Dict[str, Any]] = field(default_factory=list)
+    sampler: Optional["_StackSampler"] = None
+
+    def timer(self, bucket: str):
+        return _StatsTimer(self, bucket)
+
+    def add_time(self, bucket: str, value: float) -> None:
+        self.timers[bucket] += value
+
+    def count(self, key: str, delta: int = 1) -> None:
+        self.counts[key] += delta
+
+    def emit(self, tag: str, payload: Dict[str, Any]) -> None:
+        if not self.log_json:
+            return
+        entry = {"tag": tag, "id": self.search_id}
+        entry.update(payload)
+        self._log_buffer.append(entry)
+
+    def flush(self) -> None:
+        if not self.log_json or not self._log_buffer:
+            self._log_buffer.clear()
+            return
+        with self.timer("logging"):
+            for entry in self._log_buffer:
+                _emit_info(entry, as_json=True)
+        self._log_buffer.clear()
+
+
+class _StackSampler(threading.Thread):
+    def __init__(self, target_ident: int, interval: float = 0.01):
+        super().__init__(daemon=True)
+        self._target_ident = target_ident
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self.samples: Dict[Tuple[str, ...], int] = defaultdict(int)
+
+    def run(self) -> None:  # pragma: no cover - instrumentation thread
+        while not self._stop_event.is_set():
+            frames = sys._current_frames()
+            frame = frames.get(self._target_ident)
+            if frame is not None:
+                stack: List[str] = []
+                while frame:
+                    code = frame.f_code
+                    stack.append(f"{code.co_name}:{code.co_filename}:{code.co_firstlineno}")
+                    frame = frame.f_back
+                self.samples[tuple(reversed(stack))] += 1
+            self._stop_event.wait(self._interval)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def top_samples(self, limit: int = 10) -> List[Dict[str, Any]]:
+        if not self.samples:
+            return []
+        sorted_samples = sorted(
+            self.samples.items(), key=lambda item: item[1], reverse=True
+        )
+        result = []
+        for stack, count in sorted_samples[:limit]:
+            result.append({"stack": list(stack), "hits": count})
+        if len(sorted_samples) > limit:
+            omitted = sum(count for _, count in sorted_samples[limit:])
+            result.append({"omitted_hits": omitted})
+        return result
+
+
+_SEARCH_COUNTER = itertools.count(1)
 
 def _ensure_line_buffered_stdout() -> None:
     """Wrap ``sys.stdout`` with line buffering if possible."""
@@ -357,7 +498,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self.max_time_limit = max(max_time_limit, self.min_time_limit)
         self.time_allocation_factor = time_allocation_factor
         self._mate_score = 100000
-        self._transposition_table: "OrderedDict[str, TranspositionEntry]" = OrderedDict()
+        self._transposition_table: "OrderedDict[int, TranspositionEntry]" = OrderedDict()
         self._transposition_table_limit = max(1000, transposition_table_size)
         self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
         self._killer_slots = 2
@@ -378,6 +519,13 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._repetition_penalty = repetition_penalty
         self._repetition_strong_penalty = repetition_strong_penalty
 
+        log_level_kw = kwargs.pop("log_level", None)
+        log_json_kw = kwargs.pop("log_json", None)
+        profile_mode_kw = kwargs.pop("profile_mode", None)
+        self._log_level = _normalise_log_level(log_level_kw or GLOBAL_LOG_LEVEL)
+        self._log_json = GLOBAL_LOG_JSON if log_json_kw is None else bool(log_json_kw)
+        self._profile_mode = _normalise_profile_mode(profile_mode_kw or GLOBAL_PROFILE_MODE)
+
         # Search state (initialised per search invocation)
         self._search_deadline: Optional[float] = None
         self._search_start_time: float = 0.0
@@ -385,10 +533,12 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._killer_moves: List[List[Optional[chess.Move]]] = []
         self._principal_variation: List[chess.Move] = []
         # Lightweight per-search cache for expensive static evaluations
-        self._eval_cache: Dict[str, float] = {}
+        self._eval_cache: Dict[int, float] = {}
         # Quiescence pruning: drop clearly losing captures unless they check or promote
         self._qsearch_see_prune_threshold: float = -0.5
         self._logger = logger or (lambda *_: None)
+        self._active_stats: Optional[SearchStats] = None
+        self._tt_key_label: Optional[str] = None
 
         # Evaluation constants (centipawns)
         self.bishop_pair_bonus = 40.0
@@ -398,12 +548,261 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._king_safety_opening_penalty = 12.0
         self._king_safety_endgame_bonus = 6.0
 
-    def _position_key(self, board: chess.Board) -> str:
-        castling = board.castling_xfen()
-        ep_square = board.ep_square
-        ep_target = "-" if ep_square is None else chess.square_name(ep_square)
-        turn = "w" if board.turn else "b"
-        return f"{board.board_fen()} {turn} {castling} {ep_target}"
+    def _position_key(self, board: chess.Board) -> int:
+        key: Optional[int] = None
+        label = "zobrist"
+        if hasattr(board, "transposition_key"):
+            key = int(board.transposition_key())
+        elif hasattr(board, "zobrist_hash"):
+            key = int(board.zobrist_hash())
+        else:  # pragma: no cover - fallback for very old python-chess versions
+            label = "fen"
+            key = hash(board.board_fen())
+
+        if self._tt_key_label is None:
+            self._tt_key_label = label
+        return key
+
+    def _stats_enabled(self) -> bool:
+        return self._active_stats is not None
+
+    def _stats_timer(self, bucket: str):
+        if self._active_stats:
+            return self._active_stats.timer(bucket)
+        return nullcontext()
+
+    def _stats_count(self, key: str, delta: int = 1) -> None:
+        if self._active_stats:
+            self._active_stats.count(key, delta)
+
+    def _stats_add_time(self, bucket: str, value: float) -> None:
+        if self._active_stats:
+            self._active_stats.add_time(bucket, value)
+
+    def _log_text(self, message: str) -> None:
+        if not (self._active_stats and self._active_stats.log_json):
+            self._logger(message)
+
+    @contextmanager
+    def _push_move(self, board: chess.Board, move: chess.Move):
+        if self._active_stats:
+            start = time.perf_counter()
+            board.push(move)
+            self._stats_add_time("pushpop", time.perf_counter() - start)
+            try:
+                yield
+            finally:
+                start = time.perf_counter()
+                board.pop()
+                self._stats_add_time("pushpop", time.perf_counter() - start)
+        else:
+            board.push(move)
+            try:
+                yield
+            finally:
+                board.pop()
+
+    def _emit_iteration(
+        self,
+        payload: Dict[str, Any],
+        root_moves: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self._active_stats:
+            return
+        self._active_stats.iterations.append(payload)
+        if self._log_level in {"iter", "detail"}:
+            self._active_stats.emit("iter_end", payload)
+        if self._log_level == "detail" and root_moves:
+            moves_payload = {
+                "depth": payload.get("depth"),
+                **root_moves,
+            }
+            self._active_stats.emit("root_moves", moves_payload)
+        self._active_stats.flush()
+
+    def _start_search_stats(
+        self,
+        board: chess.Board,
+        context: StrategyContext,
+        depth_limit: int,
+        time_budget: Optional[float],
+    ) -> Optional[SearchStats]:
+        if not (self._log_json or self._profile_mode == "sample"):
+            self._active_stats = None
+            return None
+
+        search_id = next(_SEARCH_COUNTER)
+        config = {
+            "search_depth": self.search_depth,
+            "quiescence_depth": self.quiescence_depth,
+            "base_time_limit": self.base_time_limit,
+            "max_time_limit": self.max_time_limit,
+            "min_time_limit": self.min_time_limit,
+            "time_allocation_factor": self.time_allocation_factor,
+            "tt_size": self._transposition_table_limit,
+            "lmr_min_depth": self._lmr_min_depth,
+            "lmr_min_move_index": self._lmr_min_move_index,
+            "null_move_min_depth": self._null_move_min_depth,
+            "null_move_depth_scale": self._null_move_depth_scale,
+            "null_move_reduction_base": self._null_move_reduction_base,
+            "futility_depth_limit": self._futility_depth_limit,
+            "futility_base_margin": self._futility_base_margin,
+            "razoring_depth_limit": self._razoring_depth_limit,
+            "razoring_margin": self._razoring_margin,
+            "aspiration_window": self._aspiration_window,
+            "aspiration_growth": self._aspiration_growth,
+            "aspiration_fail_reset": self._aspiration_fail_reset,
+            "qsearch_see_prune_threshold": self._qsearch_see_prune_threshold,
+            "avoid_repetition": self._avoid_repetition,
+        }
+
+        stats = SearchStats(
+            search_id=search_id,
+            side="w" if board.turn else "b",
+            fen=context.fen,
+            depth_limit=depth_limit,
+            qdepth=self.quiescence_depth,
+            budget_s=time_budget,
+            legal_moves=context.legal_moves_count,
+            log_level=self._log_level,
+            log_json=self._log_json,
+            config=config,
+            profile_mode=self._profile_mode,
+        )
+        self._active_stats = stats
+        self._position_key(board)
+
+        if self._log_json:
+            load_factor = 0.0
+            if self._transposition_table_limit:
+                load_factor = len(self._transposition_table) / float(
+                    self._transposition_table_limit
+                )
+            start_payload = {
+                "side": stats.side,
+                "fen": stats.fen,
+                "depth_limit": depth_limit,
+                "qdepth": self.quiescence_depth,
+                "budget_s": time_budget,
+                "legal_moves": context.legal_moves_count,
+                "config": {**config, "tt_load_factor": load_factor},
+            }
+            stats.emit("search_start", start_payload)
+            stats.emit("tt_key", {"type": self._tt_key_label or "unknown"})
+            stats.flush()
+        return stats
+
+    def _lookup_transposition_entry(
+        self, key: int
+    ) -> Optional[TranspositionEntry]:
+        if self._active_stats:
+            self._stats_count("tt_probes", 1)
+            with self._stats_timer("tt_ops"):
+                entry = self._transposition_table.get(key)
+        else:
+            entry = self._transposition_table.get(key)
+        if entry and self._active_stats:
+            self._stats_count("tt_hits_total", 1)
+        return entry
+
+    def _finalize_search_stats(
+        self,
+        best_move: Optional[chess.Move],
+        best_score: Optional[float],
+        search_time: float,
+        search_interrupted: bool,
+        capped_by_budget: bool,
+    ) -> None:
+        stats = self._active_stats
+        if not stats:
+            return
+
+        if stats.sampler:
+            stats.sampler.stop()
+            stats.sampler.join(timeout=0.1)
+
+        nodes = self._nodes_visited
+        qnodes = stats.counts.get("qnodes", 0)
+        overall_nps = nodes / search_time if search_time > 0 else 0.0
+        timer_keys = [
+            "alpha_beta",
+            "qsearch",
+            "eval",
+            "move_order",
+            "tt_ops",
+            "pushpop",
+            "null_move_try",
+            "aspiration",
+            "logging",
+        ]
+        time_breakdown = {k: stats.timers.get(k, 0.0) for k in timer_keys}
+        tracked_time = sum(time_breakdown.values())
+        overhead = max(0.0, search_time - tracked_time)
+        time_breakdown["overhead"] = overhead
+
+        counts_payload = {
+            "eval_calls": stats.counts.get("eval_calls", 0),
+            "eval_cache_hits": stats.counts.get("eval_cache_hits", 0),
+            "tt_hits_ex": stats.counts.get("tt_hits_ex", 0),
+            "tt_hits_lo": stats.counts.get("tt_hits_lo", 0),
+            "tt_hits_up": stats.counts.get("tt_hits_up", 0),
+            "tt_stores": stats.counts.get("tt_stores", 0),
+            "tt_probes": stats.counts.get("tt_probes", 0),
+            "tt_hits_total": stats.counts.get("tt_hits_total", 0),
+            "beta_cuts": stats.counts.get("beta_cutoffs", 0),
+            "lmr": stats.counts.get("lmr_reductions", 0),
+            "futility": stats.counts.get("futility_skips", 0),
+            "razor": stats.counts.get("razor_skips", 0),
+            "null_prunes": stats.counts.get("null_prunes", 0),
+            "qsee_pruned": stats.counts.get("qsee_pruned", 0),
+            "in_check_qnodes": stats.counts.get("in_check_qnodes", 0),
+            "tt_move_first": stats.counts.get("tt_move_first", 0),
+            "killer_hit": stats.counts.get("killer_hit", 0),
+            "history_win": stats.counts.get("history_win", 0),
+        }
+
+        sampler_payload = None
+        if stats.sampler:
+            sampler_payload = stats.sampler.top_samples()
+
+        memory_snapshot = {
+            "tt_len": len(self._transposition_table),
+            "tt_cap": self._transposition_table_limit,
+            "tt_load_factor": (
+                len(self._transposition_table) / float(self._transposition_table_limit)
+                if self._transposition_table_limit
+                else 0.0
+            ),
+            "eval_cache_len": len(self._eval_cache),
+        }
+        if psutil is not None:  # pragma: no cover - optional dependency
+            process = psutil.Process(os.getpid())
+            memory_snapshot["rss_mb"] = process.memory_info().rss / (1024 * 1024)
+
+        payload = {
+            "best": best_move.uci() if best_move else None,
+            "score_cp": best_score,
+            "elapsed_s": search_time,
+            "nodes": nodes,
+            "qnodes": qnodes,
+            "nps": overall_nps,
+            "time_s": time_breakdown,
+            "counts": counts_payload,
+            "interrupted": search_interrupted,
+            "capped": capped_by_budget,
+            "memory": memory_snapshot,
+        }
+        if sampler_payload:
+            payload["profile"] = {"mode": "sample", "stacks": sampler_payload}
+
+        if self._log_json:
+            stats.emit("search_end", payload)
+            stats.flush()
+
+        self._active_stats = None
+
+
+
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -431,11 +830,17 @@ class HeuristicSearchStrategy(MoveStrategy):
         depth_limit = self._resolve_depth_limit(context)
         time_budget = self._determine_time_budget(context)
 
-        self._logger(
+        self._log_text(
             f"{self.name}: start search depth_limit={depth_limit} "
             f"time_budget={'infinite' if time_budget is None else f'{time_budget:.2f}s'} "
             f"legal_moves={context.legal_moves_count}"
         )
+
+        stats = self._start_search_stats(board, context, depth_limit, time_budget)
+        if stats and self._profile_mode == "sample":
+            sampler = _StackSampler(threading.get_ident())
+            stats.sampler = sampler
+            sampler.start()
 
         self._search_start_time = time.perf_counter()
         self._search_deadline = (
@@ -477,8 +882,28 @@ class HeuristicSearchStrategy(MoveStrategy):
                 depth_start_time = time.perf_counter()
 
                 failure_count = 0
+                aspiration_attempts = 0
+                fail_high_total = 0
+                fail_low_total = 0
+                last_root_moves_payload: Optional[Dict[str, Any]] = None
+                last_search_alpha = alpha_window
+                last_search_beta = beta_window
+                last_successful_tt_move_uci: Optional[str] = None
+                pv_line = ""
+                iteration_tt_entry: Optional[TranspositionEntry] = None
+                tt_probes_before = (
+                    self._active_stats.counts.get("tt_probes", 0)
+                    if self._active_stats
+                    else 0
+                )
+                tt_hits_before = (
+                    self._active_stats.counts.get("tt_hits_total", 0)
+                    if self._active_stats
+                    else 0
+                )
 
                 while True:
+                    aspiration_attempts += 1
                     search_alpha = alpha_window
                     search_beta = beta_window
                     alpha = search_alpha
@@ -487,44 +912,43 @@ class HeuristicSearchStrategy(MoveStrategy):
                     iteration_best_score = -float("inf")
                     fail_low = False
                     fail_high = False
+                    collect_root_details = self._active_stats is not None
+                    attempt_root_moves: List[Dict[str, Any]] = [] if collect_root_details else []
 
-                    root_key = self._position_key(board)
-                    tt_entry = self._transposition_table.get(root_key)
-                    tt_move = tt_entry.move if tt_entry else None
-                    principal_move = (
-                        self._principal_variation[0]
-                        if self._principal_variation
-                        else best_move
-                    )
-                    moves = self._order_moves(board, 0, tt_move, principal_move)
+                    with self._stats_timer("aspiration"):
+                        root_key = self._position_key(board)
+                        tt_entry = self._lookup_transposition_entry(root_key)
+                        tt_move = tt_entry.move if tt_entry else None
+                        principal_move = (
+                            self._principal_variation[0]
+                            if self._principal_variation
+                            else best_move
+                        )
+                        moves = self._order_moves(board, 0, tt_move, principal_move)
 
-                    for move_index, move in enumerate(moves):
-                        if self._time_exceeded():
-                            raise _SearchTimeout()
+                        for move_index, move in enumerate(moves):
+                            if self._time_exceeded():
+                                raise _SearchTimeout()
 
-                        color = board.turn
-                        penalty = 0.0
-                        board.push(move)
-                        try:
-                            if move_index == 0:
-                                score = -self._alpha_beta(
-                                    board,
-                                    depth=current_depth - 1,
-                                    alpha=-beta,
-                                    beta=-alpha,
-                                    ply=1,
-                                    is_pv=True,
+                            color = board.turn
+                            penalty = 0.0
+                            if collect_root_details:
+                                move_nodes_before = self._nodes_visited
+                                move_start_time = time.perf_counter()
+                                used_tt = bool(tt_move and move == tt_move)
+                                killer_moves = (
+                                    self._killer_moves[0]
+                                    if self._killer_moves
+                                    else []
                                 )
-                            else:
-                                score = -self._alpha_beta(
-                                    board,
-                                    depth=current_depth - 1,
-                                    alpha=-alpha - 1,
-                                    beta=-alpha,
-                                    ply=1,
-                                    is_pv=False,
+                                used_killer = move in killer_moves
+                                history_key = (color, move.from_square, move.to_square)
+                                used_history = (
+                                    self._history_scores.get(history_key, 0.0) > 0.0
                                 )
-                                if score > alpha:
+
+                            with self._push_move(board, move):
+                                if move_index == 0:
                                     score = -self._alpha_beta(
                                         board,
                                         depth=current_depth - 1,
@@ -533,36 +957,70 @@ class HeuristicSearchStrategy(MoveStrategy):
                                         ply=1,
                                         is_pv=True,
                                     )
-
-                            if self._avoid_repetition:
-                                try:
-                                    penalty = self._repetition_penalty_value(board)
-                                except Exception as exc:  # pragma: no cover - defensive
-                                    self._logger(
-                                        f"{self.name}: repetition penalty evaluation failed: {exc}"
+                                else:
+                                    score = -self._alpha_beta(
+                                        board,
+                                        depth=current_depth - 1,
+                                        alpha=-alpha - 1,
+                                        beta=-alpha,
+                                        ply=1,
+                                        is_pv=False,
                                     )
-                                    penalty = 0.0
-                        finally:
-                            board.pop()
+                                    if score > alpha:
+                                        score = -self._alpha_beta(
+                                            board,
+                                            depth=current_depth - 1,
+                                            alpha=-beta,
+                                            beta=-alpha,
+                                            ply=1,
+                                            is_pv=True,
+                                        )
 
-                        if penalty:
-                            score -= penalty
+                                if self._avoid_repetition:
+                                    try:
+                                        penalty = self._repetition_penalty_value(board)
+                                    except Exception as exc:  # pragma: no cover - defensive
+                                        self._log_text(
+                                            f"{self.name}: repetition penalty evaluation failed: {exc}"
+                                        )
+                                        penalty = 0.0
 
-                        if score > iteration_best_score:
-                            iteration_best_score = score
-                            iteration_best_move = move
+                            if penalty:
+                                score -= penalty
 
-                        if score > alpha:
-                            alpha = score
+                            if score > iteration_best_score:
+                                iteration_best_score = score
+                                iteration_best_move = move
 
-                        if alpha >= beta:
-                            fail_high = True
-                            if not board.is_capture(move):
-                                self._record_history(color, move, current_depth)
-                            break
+                            if score > alpha:
+                                alpha = score
 
-                    if self._time_exceeded():
-                        raise _SearchTimeout()
+                            if collect_root_details:
+                                move_elapsed = time.perf_counter() - move_start_time
+                                move_nodes = self._nodes_visited - move_nodes_before
+                                attempt_root_moves.append(
+                                    {
+                                        "uci": move.uci(),
+                                        "ord": move_index,
+                                        "nodes": move_nodes,
+                                        "t_s": move_elapsed,
+                                        "score_cp": score,
+                                        "is_capture": board.is_capture(move),
+                                        "gave_check": board.gives_check(move),
+                                        "used_tt": used_tt,
+                                        "used_killer": used_killer,
+                                        "used_history": used_history,
+                                    }
+                                )
+
+                            if alpha >= beta:
+                                fail_high = True
+                                if not board.is_capture(move):
+                                    self._record_history(color, move, current_depth)
+                                break
+
+                        if self._time_exceeded():
+                            raise _SearchTimeout()
 
                     if iteration_best_move is None:
                         break
@@ -579,6 +1037,10 @@ class HeuristicSearchStrategy(MoveStrategy):
 
                     if fail_low or fail_high:
                         failure_count += 1
+                        if fail_high:
+                            fail_high_total += 1
+                        if fail_low:
+                            fail_low_total += 1
                         cause = "fail-high" if fail_high else "fail-low"
                         aspiration *= self._aspiration_growth
                         alpha_window = max(
@@ -590,7 +1052,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                             iteration_best_score + aspiration,
                         )
 
-                        self._logger(
+                        self._log_text(
                             f"{self.name}: depth={current_depth} {cause} "
                             f"aspiration -> [{alpha_window:.1f}, {beta_window:.1f}]"
                         )
@@ -600,7 +1062,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                             beta_window = float(self._mate_score)
                             aspiration = float(self._mate_score)
                             failure_count = 0
-                            self._logger(
+                            self._log_text(
                                 f"{self.name}: depth={current_depth} switching to full-window search"
                             )
 
@@ -618,13 +1080,24 @@ class HeuristicSearchStrategy(MoveStrategy):
                     self._principal_variation = self._extract_principal_variation(
                         board, current_depth
                     )
+                    if collect_root_details:
+                        last_root_moves_payload = {
+                            "moves": attempt_root_moves[:12],
+                            "omitted_n": max(0, len(attempt_root_moves) - 12),
+                        }
+                    last_search_alpha = search_alpha
+                    last_search_beta = search_beta
+                    iteration_tt_entry = tt_entry
+                    last_successful_tt_move_uci = (
+                        tt_entry.move.uci() if tt_entry and tt_entry.move else None
+                    )
 
                     depth_time = time.perf_counter() - depth_start_time
                     depth_nodes = self._nodes_visited - depth_start_nodes
                     pv_line = " ".join(
                         move.uci() for move in self._principal_variation
                     )
-                    self._logger(
+                    self._log_text(
                         f"{self.name}: depth={current_depth} score={iteration_best_score:.1f} "
                         f"nodes={self._nodes_visited} (+{depth_nodes}) time={depth_time:.2f}s "
                         f"pv={pv_line or iteration_best_move.uci()}"
@@ -635,7 +1108,7 @@ class HeuristicSearchStrategy(MoveStrategy):
                         if total_budget > 0 and depth_time >= total_budget * self._depth_iteration_stop_ratio:
                             usage = depth_time / total_budget
                             capped_by_budget = True
-                            self._logger(
+                            self._log_text(
                                 f"{self.name}: depth={current_depth} consumed {usage:.0%} of budget; halting deeper search"
                             )
                             break
@@ -647,10 +1120,56 @@ class HeuristicSearchStrategy(MoveStrategy):
                 if capped_by_budget:
                     break
 
+                depth_time = time.perf_counter() - depth_start_time
+                depth_nodes = self._nodes_visited - depth_start_nodes
+                if self._active_stats:
+                    iteration_payload = {
+                        "depth": current_depth,
+                        "elapsed_s": depth_time,
+                        "nodes_total": self._nodes_visited,
+                        "nodes_delta": depth_nodes,
+                        "nps": depth_nodes / depth_time if depth_time > 0 else 0.0,
+                        "pv": pv_line if self._principal_variation else (best_move.uci() if best_move else ""),
+                        "best_move": best_move.uci() if best_move else None,
+                        "score_cp": best_score,
+                        "alpha_beta_window": [last_search_alpha, last_search_beta],
+                        "aspiration_attempts": aspiration_attempts,
+                        "fail_high_cnt": fail_high_total,
+                        "fail_low_cnt": fail_low_total,
+                        "capped_by_budget": capped_by_budget,
+                    }
+                    tt_probes_after = self._active_stats.counts.get("tt_probes", 0)
+                    tt_hits_after = self._active_stats.counts.get("tt_hits_total", 0)
+                    probes_delta = tt_probes_after - tt_probes_before
+                    hits_delta = tt_hits_after - tt_hits_before
+                    hit_rate = hits_delta / probes_delta if probes_delta > 0 else 0.0
+                    iteration_payload["tt"] = {
+                        "hit_rate": hit_rate,
+                        "root_hit": bool(iteration_tt_entry),
+                        "root_move": last_successful_tt_move_uci,
+                        "root_tt_used": bool(
+                            best_move and iteration_tt_entry and iteration_tt_entry.move == best_move
+                        ),
+                    }
+
+                    root_moves_payload = None
+                    if last_root_moves_payload:
+                        root_moves_payload = last_root_moves_payload
+                        considered = root_moves_payload.get("omitted_n", 0) + len(
+                            root_moves_payload.get("moves", [])
+                        )
+                        iteration_payload["branching_factor_est"] = considered
+                        if best_move:
+                            root_moves_payload["best"] = best_move.uci()
+                    else:
+                        iteration_payload["branching_factor_est"] = None
+
+                    self._emit_iteration(iteration_payload, root_moves_payload)
+
         except _SearchTimeout:
             search_interrupted = True
             elapsed = time.perf_counter() - self._search_start_time
-            self._logger(
+            self._log_text(
                 f"{self.name}: search timeout at depth={current_depth} "
                 f"nodes={self._nodes_visited} time={elapsed:.2f}s"
             )
@@ -658,15 +1177,30 @@ class HeuristicSearchStrategy(MoveStrategy):
         search_time = time.perf_counter() - self._search_start_time
 
         if best_move is None:
-            self._logger(
+            self._log_text(
                 f"{self.name}: no move found (interrupted={search_interrupted or capped_by_budget})"
+            )
+            self._finalize_search_stats(
+                best_move,
+                best_score,
+                search_time,
+                search_interrupted,
+                capped_by_budget,
             )
             return None
 
-        self._logger(
+        self._log_text(
             f"{self.name}: completed depth={completed_depth} score={best_score:.1f} "
             f"best={best_move.uci()} nodes={self._nodes_visited} time={search_time:.2f}s "
             f"interrupted={search_interrupted} capped={capped_by_budget}"
+        )
+
+        self._finalize_search_stats(
+            best_move,
+            best_score,
+            search_time,
+            search_interrupted,
+            capped_by_budget,
         )
 
         repetition_penalty = 0.0
@@ -776,201 +1310,209 @@ class HeuristicSearchStrategy(MoveStrategy):
         allow_null: bool = True,
     ) -> float:
         self._nodes_visited += 1
+        self._stats_count("nodes", 1)
 
-        if self._time_exceeded():
-            raise _SearchTimeout()
-
-        if board.is_checkmate():
-            return -float(self._mate_score) + ply
-        if (
-            board.is_stalemate()
-            or board.is_insufficient_material()
-            or board.can_claim_draw()
-        ):
-            return 0.0
-
-        if depth <= 0:
-            return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
-
-        in_check = board.is_check()
-        key = self._position_key(board)
-        entry = self._transposition_table.get(key)
-        if entry and entry.depth >= depth:
-            if entry.flag == TranspositionFlag.EXACT:
-                return entry.value
-            if entry.flag == TranspositionFlag.LOWERBOUND:
-                alpha = max(alpha, entry.value)
-            else:
-                beta = min(beta, entry.value)
-            if alpha >= beta:
-                return entry.value
-
-        tt_move = entry.move if entry else None
-        static_eval: Optional[float] = entry.static_eval if entry else None
-
-        if not in_check and not is_pv:
-            if depth <= self._razoring_depth_limit:
-                static_eval = static_eval or self._evaluate_board(board)
-                if static_eval + self._razoring_margin <= alpha:
-                    reduced = self._alpha_beta(
-                        board,
-                        depth - 1,
-                        alpha,
-                        beta,
-                        ply,
-                        is_pv,
-                        allow_null,
-                    )
-                    if reduced <= alpha:
-                        return reduced
-
-            if depth <= self._futility_depth_limit:
-                static_eval = static_eval or self._evaluate_board(board)
-                margin = self._futility_margin(depth)
-                if static_eval + margin <= alpha:
-                    return static_eval + margin
-
-        if (
-            allow_null
-            and not is_pv
-            and depth >= self._null_move_min_depth
-            and not in_check
-            and self._has_sufficient_material(board)
-        ):
-            reduction = self._null_move_reduction(depth)
-            board.push(chess.Move.null())
-            try:
-                null_score = -self._alpha_beta(
-                    board,
-                    depth=depth - 1 - reduction,
-                    alpha=-beta,
-                    beta=-beta + 1,
-                    ply=ply + 1,
-                    is_pv=False,
-                    allow_null=False,
-                )
-            finally:
-                board.pop()
-            if null_score >= beta:
-                return beta
-
-        moves = self._order_moves(board, ply, tt_move)
-        if not moves:
-            return self._evaluate_board(board)
-
-        best_value = -float("inf")
-        best_move: Optional[chess.Move] = None
-        alpha_original = alpha
-
-        for move_index, move in enumerate(moves):
+        with self._stats_timer("alpha_beta"):
             if self._time_exceeded():
                 raise _SearchTimeout()
 
-            is_capture = board.is_capture(move)
-            gives_check = board.gives_check(move)
-            promotion = move.promotion is not None
-            color = board.turn
+            if board.is_checkmate():
+                return -float(self._mate_score) + ply
+            if (
+                board.is_stalemate()
+                or board.is_insufficient_material()
+                or board.can_claim_draw()
+            ):
+                return 0.0
 
-            reduction = 0
-            child_is_pv = is_pv and move_index == 0
-            search_depth = depth - 1
-            new_allow_null = allow_null and not is_capture
+            if depth <= 0:
+                return self._quiescence(board, alpha, beta, self.quiescence_depth, ply)
+
+            in_check = board.is_check()
+            key = self._position_key(board)
+            entry = self._lookup_transposition_entry(key)
+            if entry and entry.depth >= depth:
+                if entry.flag == TranspositionFlag.EXACT:
+                    self._stats_count("tt_hits_ex", 1)
+                    return entry.value
+                if entry.flag == TranspositionFlag.LOWERBOUND:
+                    self._stats_count("tt_hits_lo", 1)
+                    alpha = max(alpha, entry.value)
+                else:
+                    self._stats_count("tt_hits_up", 1)
+                    beta = min(beta, entry.value)
+                if alpha >= beta:
+                    self._stats_count("beta_cutoffs", 1)
+                    return entry.value
+
+            tt_move = entry.move if entry else None
+            static_eval: Optional[float] = entry.static_eval if entry else None
+
+            if not in_check and not is_pv:
+                if depth <= self._razoring_depth_limit:
+                    static_eval = static_eval or self._evaluate_board(board)
+                    if static_eval + self._razoring_margin <= alpha:
+                        reduced = self._alpha_beta(
+                            board,
+                            depth - 1,
+                            alpha,
+                            beta,
+                            ply,
+                            is_pv,
+                            allow_null,
+                        )
+                        if reduced <= alpha:
+                            self._stats_count("razor_skips", 1)
+                            return reduced
+
+                if depth <= self._futility_depth_limit:
+                    static_eval = static_eval or self._evaluate_board(board)
+                    margin = self._futility_margin(depth)
+                    if static_eval + margin <= alpha:
+                        self._stats_count("futility_skips", 1)
+                        return static_eval + margin
 
             if (
-                depth >= self._lmr_min_depth
-                and move_index >= self._lmr_min_move_index
-                and not child_is_pv
-                and not is_capture
-                and not gives_check
-                and not promotion
+                allow_null
+                and not is_pv
+                and depth >= self._null_move_min_depth
+                and not in_check
+                and self._has_sufficient_material(board)
             ):
-                reduction = self._late_move_reduction(depth, move_index)
-                search_depth = max(0, depth - 1 - reduction)
-
-            board.push(move)
-            try:
-                if child_is_pv:
-                    score = -self._alpha_beta(
-                        board,
-                        search_depth,
-                        alpha=-beta,
-                        beta=-alpha,
-                        ply=ply + 1,
-                        is_pv=True,
-                        allow_null=new_allow_null,
-                    )
-                else:
-                    score = -self._alpha_beta(
-                        board,
-                        search_depth,
-                        alpha=-alpha - 1,
-                        beta=-alpha,
-                        ply=ply + 1,
-                        is_pv=False,
-                        allow_null=new_allow_null,
-                    )
-                    if reduction and score > alpha:
-                        score = -self._alpha_beta(
+                reduction = self._null_move_reduction(depth)
+                with self._stats_timer("null_move_try"):
+                    with self._push_move(board, chess.Move.null()):
+                        null_score = -self._alpha_beta(
                             board,
-                            depth - 1,
+                            depth=depth - 1 - reduction,
                             alpha=-beta,
-                            beta=-alpha,
+                            beta=-beta + 1,
                             ply=ply + 1,
-                            is_pv=True,
-                            allow_null=new_allow_null,
+                            is_pv=False,
+                            allow_null=False,
                         )
-                    elif score > alpha:
-                        score = -self._alpha_beta(
-                            board,
-                            depth - 1,
-                            alpha=-beta,
-                            beta=-alpha,
-                            ply=ply + 1,
-                            is_pv=True,
-                            allow_null=new_allow_null,
-                        )
-            except _SearchTimeout:
-                board.pop()
-                raise
-            board.pop()
+                if null_score >= beta:
+                    self._stats_count("null_prunes", 1)
+                    return beta
 
-            if score > best_value:
-                best_value = score
-                best_move = move
+            moves = self._order_moves(board, ply, tt_move)
+            if not moves:
+                return self._evaluate_board(board)
 
-            if score > alpha:
-                alpha = score
+            best_value = -float("inf")
+            best_move: Optional[chess.Move] = None
+            alpha_original = alpha
 
-            if alpha >= beta:
-                if not is_capture:
-                    self._record_killer(ply, move)
-                    self._record_history(color, move, depth)
-                self._store_transposition_entry(
-                    key,
-                    depth,
-                    best_value,
-                    TranspositionFlag.LOWERBOUND,
-                    best_move,
-                    static_eval,
-                )
-                return best_value
+            for move_index, move in enumerate(moves):
+                if self._time_exceeded():
+                    raise _SearchTimeout()
 
-        flag = TranspositionFlag.EXACT
-        if best_value <= alpha_original:
-            flag = TranspositionFlag.UPPERBOUND
+                is_capture = board.is_capture(move)
+                gives_check = board.gives_check(move)
+                promotion = move.promotion is not None
+                color = board.turn
 
-        if static_eval is None and not in_check:
-            static_eval = self._evaluate_board(board)
+                reduction = 0
+                child_is_pv = is_pv and move_index == 0
+                search_depth = depth - 1
+                new_allow_null = allow_null and not is_capture
 
-        self._store_transposition_entry(
-            key,
-            depth,
-            best_value,
-            flag,
-            best_move,
-            static_eval,
-        )
-        return best_value
+                if (
+                    depth >= self._lmr_min_depth
+                    and move_index >= self._lmr_min_move_index
+                    and not child_is_pv
+                    and not is_capture
+                    and not gives_check
+                    and not promotion
+                ):
+                    reduction = self._late_move_reduction(depth, move_index)
+                    search_depth = max(0, depth - 1 - reduction)
+                    if reduction:
+                        self._stats_count("lmr_reductions", 1)
+
+                with self._push_move(board, move):
+                    try:
+                        if child_is_pv:
+                            score = -self._alpha_beta(
+                                board,
+                                search_depth,
+                                alpha=-beta,
+                                beta=-alpha,
+                                ply=ply + 1,
+                                is_pv=True,
+                                allow_null=new_allow_null,
+                            )
+                        else:
+                            score = -self._alpha_beta(
+                                board,
+                                search_depth,
+                                alpha=-alpha - 1,
+                                beta=-alpha,
+                                ply=ply + 1,
+                                is_pv=False,
+                                allow_null=new_allow_null,
+                            )
+                            if reduction and score > alpha:
+                                score = -self._alpha_beta(
+                                    board,
+                                    depth - 1,
+                                    alpha=-beta,
+                                    beta=-alpha,
+                                    ply=ply + 1,
+                                    is_pv=True,
+                                    allow_null=new_allow_null,
+                                )
+                            elif score > alpha:
+                                score = -self._alpha_beta(
+                                    board,
+                                    depth - 1,
+                                    alpha=-beta,
+                                    beta=-alpha,
+                                    ply=ply + 1,
+                                    is_pv=True,
+                                    allow_null=new_allow_null,
+                                )
+                    except _SearchTimeout:
+                        raise
+
+                if score > best_value:
+                    best_value = score
+                    best_move = move
+
+                if score > alpha:
+                    alpha = score
+
+                if alpha >= beta:
+                    self._stats_count("beta_cutoffs", 1)
+                    if not is_capture:
+                        self._record_killer(ply, move)
+                        self._record_history(color, move, depth)
+                    self._store_transposition_entry(
+                        key,
+                        depth,
+                        best_value,
+                        TranspositionFlag.LOWERBOUND,
+                        best_move,
+                        static_eval,
+                    )
+                    return best_value
+
+            flag = TranspositionFlag.EXACT
+            if best_value <= alpha_original:
+                flag = TranspositionFlag.UPPERBOUND
+
+            if static_eval is None and not in_check:
+                static_eval = self._evaluate_board(board)
+
+            self._store_transposition_entry(
+                key,
+                depth,
+                best_value,
+                flag,
+                best_move,
+                static_eval,
+            )
+            return best_value
 
     def _quiescence(
         self,
@@ -981,34 +1523,37 @@ class HeuristicSearchStrategy(MoveStrategy):
         ply: int,
     ) -> float:
         self._nodes_visited += 1
-        if self._time_exceeded():
-            raise _SearchTimeout()
+        self._stats_count("nodes", 1)
+        self._stats_count("qnodes", 1)
 
-        stand_pat = self._evaluate_board(board)
-        if stand_pat >= beta:
-            return beta
-        if alpha < stand_pat:
-            alpha = stand_pat
+        with self._stats_timer("qsearch"):
+            if self._time_exceeded():
+                raise _SearchTimeout()
 
-        if depth <= 0:
-            return stand_pat
+            if board.is_check():
+                self._stats_count("in_check_qnodes", 1)
 
-        moves = self._generate_quiescence_moves(board)
-        for move in moves:
-            board.push(move)
-            try:
-                score = -self._quiescence(board, -beta, -alpha, depth - 1, ply + 1)
-            except _SearchTimeout:
-                board.pop()
-                raise
-            board.pop()
-
-            if score >= beta:
+            stand_pat = self._evaluate_board(board)
+            if stand_pat >= beta:
                 return beta
-            if score > alpha:
-                alpha = score
+            if alpha < stand_pat:
+                alpha = stand_pat
 
-        return alpha
+            if depth <= 0:
+                return stand_pat
+
+            moves = self._generate_quiescence_moves(board)
+            for move in moves:
+                with self._push_move(board, move):
+                    score = -self._quiescence(board, -beta, -alpha, depth - 1, ply + 1)
+
+                if score >= beta:
+                    self._stats_count("beta_cutoffs", 1)
+                    return beta
+                if score > alpha:
+                    alpha = score
+
+            return alpha
 
     def _generate_quiescence_moves(self, board: chess.Board) -> List[chess.Move]:
         moves: List[chess.Move] = []
@@ -1018,6 +1563,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         see = self._static_exchange_score
         in_check = board.is_check()
         threshold = self._qsearch_see_prune_threshold
+        pruned_captures = 0
 
         for move in board.legal_moves:
             if in_check:
@@ -1028,6 +1574,8 @@ class HeuristicSearchStrategy(MoveStrategy):
                 # only way to address check (handled above).
                 if see(board, move) >= threshold:
                     append(move)
+                else:
+                    pruned_captures += 1
             elif move.promotion or gives_check(move):
                 append(move)
 
@@ -1035,6 +1583,8 @@ class HeuristicSearchStrategy(MoveStrategy):
             key=lambda mv: see(board, mv) + (500 if gives_check(mv) else 0),
             reverse=True,
         )
+        if pruned_captures and self._active_stats:
+            self._stats_count("qsee_pruned", pruned_captures)
         return moves
 
     def _capture_score(self, board: chess.Board, move: chess.Move) -> float:
@@ -1065,36 +1615,48 @@ class HeuristicSearchStrategy(MoveStrategy):
         tt_move: Optional[chess.Move] = None,
         principal_move: Optional[chess.Move] = None,
     ) -> List[chess.Move]:
-        moves = list(board.legal_moves)
-        if not moves:
+        with self._stats_timer("move_order"):
+            moves = list(board.legal_moves)
+            if not moves:
+                return moves
+
+            killer_moves = (
+                self._killer_moves[ply] if ply < len(self._killer_moves) else []
+            )
+            is_capture = board.is_capture
+            gives_check = board.gives_check
+            history_scores = self._history_scores
+
+            def score_move(move: chess.Move) -> float:
+                if tt_move and move == tt_move:
+                    return 1_000_000
+                if principal_move and move == principal_move:
+                    return 900_000
+
+                score = 0.0
+                if is_capture(move):
+                    score += 500_000 + self._static_exchange_score(board, move)
+                if move in killer_moves:
+                    score += 80_000
+                history_key = (board.turn, move.from_square, move.to_square)
+                score += history_scores.get(history_key, 0.0)
+                if move.promotion:
+                    score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
+                if not is_capture(move) and gives_check(move):
+                    score += 40_000
+                return score
+
+            moves.sort(key=score_move, reverse=True)
+            if self._active_stats and moves:
+                first = moves[0]
+                if tt_move and first == tt_move:
+                    self._stats_count("tt_move_first", 1)
+                if first in killer_moves:
+                    self._stats_count("killer_hit", 1)
+                history_key = (board.turn, first.from_square, first.to_square)
+                if history_scores.get(history_key, 0.0) > 0.0:
+                    self._stats_count("history_win", 1)
             return moves
-
-        killer_moves = self._killer_moves[ply] if ply < len(self._killer_moves) else []
-        is_capture = board.is_capture
-        gives_check = board.gives_check
-        history_scores = self._history_scores
-
-        def score_move(move: chess.Move) -> float:
-            if tt_move and move == tt_move:
-                return 1_000_000
-            if principal_move and move == principal_move:
-                return 900_000
-
-            score = 0.0
-            if is_capture(move):
-                score += 500_000 + self._static_exchange_score(board, move)
-            if move in killer_moves:
-                score += 80_000
-            history_key = (board.turn, move.from_square, move.to_square)
-            score += history_scores.get(history_key, 0.0)
-            if move.promotion:
-                score += 60_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
-            if not is_capture(move) and gives_check(move):
-                score += 40_000
-            return score
-
-        moves.sort(key=score_move, reverse=True)
-        return moves
 
     def _record_killer(self, ply: int, move: chess.Move) -> None:
         if ply >= len(self._killer_moves):
@@ -1125,7 +1687,7 @@ class HeuristicSearchStrategy(MoveStrategy):
 
     def _store_transposition_entry(
         self,
-        key: str,
+        key: int,
         depth: int,
         value: float,
         flag: TranspositionFlag,
@@ -1137,16 +1699,18 @@ class HeuristicSearchStrategy(MoveStrategy):
             return
         if static_eval is None and existing:
             static_eval = existing.static_eval
-        self._transposition_table[key] = TranspositionEntry(
-            depth,
-            value,
-            flag,
-            move,
-            static_eval,
-        )
-        self._transposition_table.move_to_end(key, last=True)
-        while len(self._transposition_table) > self._transposition_table_limit:
-            self._transposition_table.popitem(last=False)
+        with self._stats_timer("tt_ops"):
+            self._transposition_table[key] = TranspositionEntry(
+                depth,
+                value,
+                flag,
+                move,
+                static_eval,
+            )
+            self._transposition_table.move_to_end(key, last=True)
+            while len(self._transposition_table) > self._transposition_table_limit:
+                self._transposition_table.popitem(last=False)
+        self._stats_count("tt_stores", 1)
 
     def _futility_margin(self, depth: int) -> float:
         return self._futility_base_margin * max(1, depth)
@@ -1235,105 +1799,108 @@ class HeuristicSearchStrategy(MoveStrategy):
         return penalty
 
     def _evaluate_board(self, board: chess.Board) -> float:
+        self._stats_count("eval_calls", 1)
         key = self._position_key(board)
         cached = self._eval_cache.get(key)
         if cached is not None:
+            self._stats_count("eval_cache_hits", 1)
             return cached
 
-        material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        bishops = {chess.WHITE: 0, chess.BLACK: 0}
+        with self._stats_timer("eval"):
+            material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
+            pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
+            bishops = {chess.WHITE: 0, chess.BLACK: 0}
 
-        for square, piece in board.piece_map().items():
-            value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-            table = PIECE_SQUARE_TABLES.get(piece.piece_type)
-            color = piece.color
-            material[color] += value
-            if table:
-                index = square if color == chess.WHITE else chess.square_mirror(square)
-                pst[color] += table[index]
-            if piece.piece_type == chess.BISHOP:
-                bishops[color] += 1
+            for square, piece in board.piece_map().items():
+                value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
+                table = PIECE_SQUARE_TABLES.get(piece.piece_type)
+                color = piece.color
+                material[color] += value
+                if table:
+                    index = square if color == chess.WHITE else chess.square_mirror(square)
+                    pst[color] += table[index]
+                if piece.piece_type == chess.BISHOP:
+                    bishops[color] += 1
 
-        score = (material[chess.WHITE] - material[chess.BLACK]) + (
-            pst[chess.WHITE] - pst[chess.BLACK]
-        )
-
-        if bishops[chess.WHITE] >= 2:
-            score += self.bishop_pair_bonus
-        if bishops[chess.BLACK] >= 2:
-            score -= self.bishop_pair_bonus
-
-        # Passed pawns
-        for color in (chess.WHITE, chess.BLACK):
-            sign = 1 if color == chess.WHITE else -1
-            enemy_pawns = set(board.pieces(chess.PAWN, not color))
-            for pawn_square in board.pieces(chess.PAWN, color):
-                file_index = chess.square_file(pawn_square)
-                rank = chess.square_rank(pawn_square)
-                direction = 1 if color == chess.WHITE else -1
-                passed = True
-                for file_delta in (-1, 0, 1):
-                    nf = file_index + file_delta
-                    if not 0 <= nf < 8:
-                        continue
-                    r = rank + direction
-                    while 0 <= r < 8:
-                        sq = chess.square(nf, r)
-                        if sq in enemy_pawns:
-                            passed = False
-                            break
-                        r += direction
-                    if not passed:
-                        break
-                if passed:
-                    advancement = rank - 1 if color == chess.WHITE else 6 - rank
-                    bonus = self._passed_pawn_base_bonus + self._passed_pawn_rank_bonus * max(0, advancement)
-                    score += sign * bonus
-
-        # Mobility
-        current_mobility = board.legal_moves.count()
-        try:
-            board.push(chess.Move.null())
-            opponent_mobility = board.legal_moves.count()
-            board.pop()
-        except ValueError:
-            opponent_mobility = current_mobility
-        score += (current_mobility - opponent_mobility) * self._mobility_unit
-
-        # King safety
-        phase = self._game_phase(board)
-        opening_weight = phase
-        endgame_weight = 1.0 - phase
-        for color in (chess.WHITE, chess.BLACK):
-            sign = 1 if color == chess.WHITE else -1
-            king_square = board.king(color)
-            if king_square is None:
-                continue
-            attackers = len(board.attackers(not color, king_square))
-            ring = 0
-            king_file = chess.square_file(king_square)
-            king_rank = chess.square_rank(king_square)
-            for file_delta in (-1, 0, 1):
-                for rank_delta in (-1, 0, 1):
-                    if file_delta == 0 and rank_delta == 0:
-                        continue
-                    nf = king_file + file_delta
-                    nr = king_rank + rank_delta
-                    if 0 <= nf < 8 and 0 <= nr < 8:
-                        neighbour = chess.square(nf, nr)
-                        piece = board.piece_at(neighbour)
-                        if piece and piece.color == color:
-                            ring += 1
-            opening_term = opening_weight * (
-                -self._king_safety_opening_penalty * attackers + 2.0 * ring
+            score = (material[chess.WHITE] - material[chess.BLACK]) + (
+                pst[chess.WHITE] - pst[chess.BLACK]
             )
-            central_distance = abs(king_file - 3.5) + abs(king_rank - 3.5)
-            activity = self._king_safety_endgame_bonus * (3.5 - central_distance)
-            endgame_term = endgame_weight * activity
-            score += sign * (opening_term + endgame_term)
 
-        result = score if board.turn == chess.WHITE else -score
+            if bishops[chess.WHITE] >= 2:
+                score += self.bishop_pair_bonus
+            if bishops[chess.BLACK] >= 2:
+                score -= self.bishop_pair_bonus
+
+            # Passed pawns
+            for color in (chess.WHITE, chess.BLACK):
+                sign = 1 if color == chess.WHITE else -1
+                enemy_pawns = set(board.pieces(chess.PAWN, not color))
+                for pawn_square in board.pieces(chess.PAWN, color):
+                    file_index = chess.square_file(pawn_square)
+                    rank = chess.square_rank(pawn_square)
+                    direction = 1 if color == chess.WHITE else -1
+                    passed = True
+                    for file_delta in (-1, 0, 1):
+                        nf = file_index + file_delta
+                        if not 0 <= nf < 8:
+                            continue
+                        r = rank + direction
+                        while 0 <= r < 8:
+                            sq = chess.square(nf, r)
+                            if sq in enemy_pawns:
+                                passed = False
+                                break
+                            r += direction
+                        if not passed:
+                            break
+                    if passed:
+                        advancement = rank - 1 if color == chess.WHITE else 6 - rank
+                        bonus = self._passed_pawn_base_bonus + self._passed_pawn_rank_bonus * max(0, advancement)
+                        score += sign * bonus
+
+            # Mobility
+            current_mobility = board.legal_moves.count()
+            try:
+                with self._push_move(board, chess.Move.null()):
+                    opponent_mobility = board.legal_moves.count()
+            except ValueError:
+                opponent_mobility = current_mobility
+            score += (current_mobility - opponent_mobility) * self._mobility_unit
+
+            # King safety
+            phase = self._game_phase(board)
+            opening_weight = phase
+            endgame_weight = 1.0 - phase
+            for color in (chess.WHITE, chess.BLACK):
+                sign = 1 if color == chess.WHITE else -1
+                king_square = board.king(color)
+                if king_square is None:
+                    continue
+                attackers = len(board.attackers(not color, king_square))
+                ring = 0
+                king_file = chess.square_file(king_square)
+                king_rank = chess.square_rank(king_square)
+                for file_delta in (-1, 0, 1):
+                    for rank_delta in (-1, 0, 1):
+                        if file_delta == 0 and rank_delta == 0:
+                            continue
+                        nf = king_file + file_delta
+                        nr = king_rank + rank_delta
+                        if 0 <= nf < 8 and 0 <= nr < 8:
+                            neighbour = chess.square(nf, nr)
+                            piece = board.piece_at(neighbour)
+                            if piece and piece.color == color:
+                                ring += 1
+                opening_term = opening_weight * (
+                    -self._king_safety_opening_penalty * attackers + 2.0 * ring
+                )
+                central_distance = abs(king_file - 3.5) + abs(king_rank - 3.5)
+                activity = self._king_safety_endgame_bonus * (3.5 - central_distance)
+                endgame_term = endgame_weight * activity
+                score += sign * (opening_term + endgame_term)
+
+            result = score if board.turn == chess.WHITE else -score
+
         self._eval_cache[key] = result
         return result
 
@@ -1408,6 +1975,7 @@ class ChessEngine:
         self.debug = False
         self.move_calculating = False
         self.running = True
+        self._profile_mode = GLOBAL_PROFILE_MODE
 
         # Lock to manage concurrent access to engine state
         self.state_lock = threading.Lock()
@@ -1685,6 +2253,26 @@ class ChessEngine:
         return selected_move.uci()
 
     def process_go_command(self, time_controls: Optional[Dict[str, int]] = None):
+        if self._profile_mode == "cprofile":
+            import cProfile
+
+            profiler = cProfile.Profile()
+            profiler.enable()
+            try:
+                profiler.runcall(self._run_search, time_controls)
+            finally:
+                profiler.disable()
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".prof")
+                temp_file.close()
+                profiler.dump_stats(temp_file.name)
+                _emit_info(
+                    {"tag": "profile", "mode": "cprofile", "path": temp_file.name},
+                    as_json=GLOBAL_LOG_JSON,
+                )
+        else:
+            self._run_search(time_controls)
+
+    def _run_search(self, time_controls: Optional[Dict[str, int]] = None) -> None:
         try:
             with self.state_lock:
                 board_snapshot = self.board.copy(stack=True)
