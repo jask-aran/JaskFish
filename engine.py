@@ -18,7 +18,6 @@ NSEC_PER_SEC = 1_000_000_000
 
 class _SearchTimeout(Exception):
     """Internal exception used to abort search when the time budget is exhausted."""
-
     pass
 
 
@@ -107,6 +106,13 @@ def _ensure_line_buffered_stdout() -> None:
     if buffer is None:
         return
     sys.stdout = io.TextIOWrapper(buffer, line_buffering=True)
+
+
+# Toggle individual strategies by flipping these booleans.
+STRATEGY_ENABLE_FLAGS = {
+    "mate_in_one": True,
+    "heuristic": True,
+}
 
 
 @dataclass
@@ -330,11 +336,6 @@ class MoveStrategy(ABC):
         return
 
 
-# Toggle individual strategies by flipping these booleans.
-STRATEGY_ENABLE_FLAGS = {
-    "mate_in_one": True,
-    "heuristic": True,
-}
 
 
 class StrategySelector:
