@@ -36,7 +36,7 @@ class DummyStrategy(engine_module.MoveStrategy):
 
 def create_configured_strategy(**kwargs):
     strategy = engine_module.HeuristicSearchStrategy(**kwargs)
-    strategy.apply_config(engine_module.derive(engine_module.Meta()))
+    strategy.apply_config(engine_module.HeuristicParams())
     return strategy
 
 

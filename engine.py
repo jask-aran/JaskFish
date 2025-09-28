@@ -7,7 +7,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict, OrderedDict
-from dataclasses import dataclass, field, replace, asdict
+from dataclasses import dataclass, field, replace, fields
 from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, Literal
 
@@ -142,8 +142,8 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-@dataclass
-class Meta:
+@dataclass(slots=True, frozen=True)
+class HeuristicParams:
     strength: float = 0.6
     speed_bias: float = 0.4
     risk: float = 0.2
@@ -152,121 +152,117 @@ class Meta:
     style_tactical: float = 0.5
     endgame_focus: float = 0.4
 
+    search_depth: int = field(init=False)
+    quiescence_depth: int = field(init=False)
+    base_time_limit: float = field(init=False)
+    min_time_limit: float = field(init=False)
+    max_time_limit: float = field(init=False)
+    time_allocation_factor: float = field(init=False)
+    _aspiration_window: float = field(init=False)
+    _aspiration_growth: float = field(init=False)
+    _aspiration_fail_reset: int = field(init=False)
+    _depth_iteration_stop_ratio: float = field(init=False)
+    _null_move_min_depth: int = field(init=False)
+    _null_move_depth_scale: int = field(init=False)
+    _null_move_reduction_base: int = field(init=False)
+    _lmr_min_depth: int = field(init=False)
+    _lmr_min_move_index: int = field(init=False)
+    _futility_depth_limit: int = field(init=False)
+    _futility_base_margin: float = field(init=False)
+    _razoring_depth_limit: int = field(init=False)
+    _razoring_margin: float = field(init=False)
+    _qsearch_see_prune_threshold: float = field(init=False)
+    transposition_table_size: int = field(init=False)
+    _killer_slots: int = field(init=False)
+    _history_decay: float = field(init=False)
+    bishop_pair_bonus: float = field(init=False)
+    _mobility_unit: float = field(init=False)
+    _king_safety_opening_penalty: float = field(init=False)
+    _king_safety_endgame_bonus: float = field(init=False)
+    _passed_pawn_base_bonus: float = field(init=False)
+    _passed_pawn_rank_bonus: float = field(init=False)
 
-@dataclass(slots=True)
-class HeuristicConfig:
-    search_depth: int
-    quiescence_depth: int
-    base_time_limit: float
-    min_time_limit: float
-    max_time_limit: float
-    time_allocation_factor: float
-    _aspiration_window: float
-    _aspiration_growth: float
-    _aspiration_fail_reset: int
-    _depth_iteration_stop_ratio: float
-    _null_move_min_depth: int
-    _null_move_depth_scale: int
-    _null_move_reduction_base: int
-    _lmr_min_depth: int
-    _lmr_min_move_index: int
-    _futility_depth_limit: int
-    _futility_base_margin: float
-    _razoring_depth_limit: int
-    _razoring_margin: float
-    _qsearch_see_prune_threshold: float
-    transposition_table_size: int
-    _killer_slots: int
-    _history_decay: float
-    bishop_pair_bonus: float
-    _mobility_unit: float
-    _king_safety_opening_penalty: float
-    _king_safety_endgame_bonus: float
-    _passed_pawn_base_bonus: float
-    _passed_pawn_rank_bonus: float
+    def __post_init__(self) -> None:
+        clamp = _clamp
+        strength = clamp(self.strength, 0.0, 1.0)
+        speed_bias = clamp(self.speed_bias, 0.0, 1.0)
+        risk = clamp(self.risk, 0.0, 1.0)
+        stability = clamp(self.stability, 0.0, 1.0)
+        style_tactical = clamp(self.style_tactical, 0.0, 1.0)
+        endgame_focus = clamp(self.endgame_focus, 0.0, 1.0)
+        tt_budget_mb = max(1, int(self.tt_budget_mb))
 
+        search_depth = 3 + int(6 * strength * (1.0 - 0.5 * speed_bias))
+        quiescence_depth = 3 + int(6 * strength * (0.5 + 0.5 * stability))
 
-def derive(meta: Meta) -> HeuristicConfig:
-    strength = _clamp(meta.strength, 0.0, 1.0)
-    speed_bias = _clamp(meta.speed_bias, 0.0, 1.0)
-    risk = _clamp(meta.risk, 0.0, 1.0)
-    stability = _clamp(meta.stability, 0.0, 1.0)
-    style_tactical = _clamp(meta.style_tactical, 0.0, 1.0)
-    endgame_focus = _clamp(meta.endgame_focus, 0.0, 1.0)
-    tt_budget_mb = max(1, int(meta.tt_budget_mb))
+        base_time = 0.2 + 6.0 * strength * (1.0 - 0.7 * speed_bias)
+        time_alloc = 0.06 + 0.16 * strength * (1.0 - speed_bias)
+        min_time = 0.05 + 0.35 * (1.0 - speed_bias)
+        max_time = 1.0 + 30.0 * strength
 
-    search_depth = 3 + int(6 * strength * (1.0 - 0.5 * speed_bias))
-    q_depth = 3 + int(6 * strength * (0.5 + 0.5 * stability))
+        asp_window = 30 + int(120 * (1.0 - stability))
+        asp_growth = 1.5 + 1.0 * (1.0 - stability)
+        asp_reset = 1 if stability >= 0.7 else 2
 
-    base_time = 0.2 + 6.0 * strength * (1.0 - 0.7 * speed_bias)
-    time_alloc = 0.06 + 0.16 * strength * (1.0 - speed_bias)
-    min_time = 0.05 + 0.35 * (1.0 - speed_bias)
-    max_time = 1.0 + 30.0 * strength
+        null_min_depth = 2 + int(3 * strength)
+        null_scale = 3 + int(3 * speed_bias)
+        lmr_min_depth = 3 + int(3 * strength * speed_bias)
+        lmr_min_idx = 3 + int(6 * speed_bias)
+        fut_depth = 1 + int(2 * speed_bias)
+        fut_margin = 80 + int(140 * (1.0 - risk))
+        razor_depth = 1 + int(2 * speed_bias)
+        razor_margin = 220 + int(240 * (1.0 - risk))
+        iter_stop_ratio = 0.65 + 0.25 * stability
+        q_see_thresh = -1.5 + (1.0 * risk)
 
-    asp_window = 30 + int(120 * (1.0 - stability))
-    asp_growth = 1.5 + 1.0 * (1.0 - stability)
-    asp_reset = 1 if stability >= 0.7 else 2
+        tt_size = max(100_000, int((tt_budget_mb * 1024 * 1024) / 40))
+        killer_slots = 1 if speed_bias > 0.7 else 2
+        hist_decay = 0.85 + 0.1 * stability
 
-    null_min_depth = 2 + int(3 * strength)
-    null_scale = 3 + int(3 * speed_bias)
-    lmr_min_depth = 3 + int(3 * strength * speed_bias)
-    lmr_min_idx = 3 + int(6 * speed_bias)
-    fut_depth = 1 + int(2 * speed_bias)
-    fut_margin = 80 + int(140 * (1.0 - risk))
-    razor_depth = 1 + int(2 * speed_bias)
-    razor_margin = 220 + int(240 * (1.0 - risk))
-    iter_stop_ratio = 0.65 + 0.25 * stability
+        bishop_pair = 20 + 60 * style_tactical
+        mobility_u = 1.0 + 3.0 * style_tactical
+        ks_open_pen = 8 + 16 * (1.0 - risk)
+        ks_end_bonus = 2 + 10 * endgame_focus
+        passed_base = 10 + 30 * style_tactical
+        passed_rank = 4 + 10 * style_tactical
 
-    q_see_thresh = -1.5 + (1.0 * risk)
+        setf = object.__setattr__
+        setf(self, "search_depth", search_depth)
+        setf(self, "quiescence_depth", quiescence_depth)
+        setf(self, "base_time_limit", base_time)
+        setf(self, "min_time_limit", min_time)
+        setf(self, "max_time_limit", max_time)
+        setf(self, "time_allocation_factor", time_alloc)
+        setf(self, "_aspiration_window", float(asp_window))
+        setf(self, "_aspiration_growth", float(asp_growth))
+        setf(self, "_aspiration_fail_reset", int(asp_reset))
+        setf(self, "_depth_iteration_stop_ratio", float(iter_stop_ratio))
+        setf(self, "_null_move_min_depth", int(null_min_depth))
+        setf(self, "_null_move_depth_scale", int(null_scale))
+        setf(self, "_null_move_reduction_base", 1)
+        setf(self, "_lmr_min_depth", int(lmr_min_depth))
+        setf(self, "_lmr_min_move_index", int(lmr_min_idx))
+        setf(self, "_futility_depth_limit", int(fut_depth))
+        setf(self, "_futility_base_margin", float(fut_margin))
+        setf(self, "_razoring_depth_limit", int(razor_depth))
+        setf(self, "_razoring_margin", float(razor_margin))
+        setf(self, "_qsearch_see_prune_threshold", float(q_see_thresh))
+        setf(self, "transposition_table_size", int(tt_size))
+        setf(self, "_killer_slots", int(killer_slots))
+        setf(self, "_history_decay", float(hist_decay))
+        setf(self, "bishop_pair_bonus", float(bishop_pair))
+        setf(self, "_mobility_unit", float(mobility_u))
+        setf(self, "_king_safety_opening_penalty", float(ks_open_pen))
+        setf(self, "_king_safety_endgame_bonus", float(ks_end_bonus))
+        setf(self, "_passed_pawn_base_bonus", float(passed_base))
+        setf(self, "_passed_pawn_rank_bonus", float(passed_rank))
 
-    tt_size = max(100_000, int((tt_budget_mb * 1024 * 1024) / 40))
-    killer_slots = 1 if speed_bias > 0.7 else 2
-    hist_decay = 0.85 + 0.1 * stability
-
-    bishop_pair = 20 + 60 * style_tactical
-    mobility_u = 1.0 + 3.0 * style_tactical
-    ks_open_pen = 8 + 16 * (1.0 - risk)
-    ks_end_bonus = 2 + 10 * endgame_focus
-    passed_base = 10 + 30 * style_tactical
-    passed_rank = 4 + 10 * style_tactical
-
-    return HeuristicConfig(
-        search_depth=search_depth,
-        quiescence_depth=q_depth,
-        base_time_limit=base_time,
-        min_time_limit=min_time,
-        max_time_limit=max_time,
-        time_allocation_factor=time_alloc,
-        _aspiration_window=float(asp_window),
-        _aspiration_growth=float(asp_growth),
-        _aspiration_fail_reset=int(asp_reset),
-        _depth_iteration_stop_ratio=float(iter_stop_ratio),
-        _null_move_min_depth=int(null_min_depth),
-        _null_move_depth_scale=int(null_scale),
-        _null_move_reduction_base=1,
-        _lmr_min_depth=int(lmr_min_depth),
-        _lmr_min_move_index=int(lmr_min_idx),
-        _futility_depth_limit=int(fut_depth),
-        _futility_base_margin=float(fut_margin),
-        _razoring_depth_limit=int(razor_depth),
-        _razoring_margin=float(razor_margin),
-        _qsearch_see_prune_threshold=float(q_see_thresh),
-        transposition_table_size=int(tt_size),
-        _killer_slots=int(killer_slots),
-        _history_decay=float(hist_decay),
-        bishop_pair_bonus=float(bishop_pair),
-        _mobility_unit=float(mobility_u),
-        _king_safety_opening_penalty=float(ks_open_pen),
-        _king_safety_endgame_bonus=float(ks_end_bonus),
-        _passed_pawn_base_bonus=float(passed_base),
-        _passed_pawn_rank_bonus=float(passed_rank),
-    )
 
 # Active preset selector. Edit this string to switch presets without UCI.
 ACTIVE_META_PRESET: Literal["balanced", "fastblitz", "tournament"] = "balanced"
-_META_PRESETS: Dict[str, Meta] = {
-    "balanced": Meta(),
-    "fastblitz": Meta(
+_META_PRESETS: Dict[str, HeuristicParams] = {
+    "balanced": HeuristicParams(),
+    "fastblitz": HeuristicParams(
         strength=0.45,
         speed_bias=0.8,
         risk=0.35,
@@ -275,7 +271,7 @@ _META_PRESETS: Dict[str, Meta] = {
         style_tactical=0.5,
         endgame_focus=0.4,
     ),
-    "tournament": Meta(
+    "tournament": HeuristicParams(
         strength=0.9,
         speed_bias=0.2,
         risk=0.15,
@@ -533,12 +529,12 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._time_check_counter = 0
         self._deadline_reached = False
 
-    def apply_config(self, config: HeuristicConfig) -> None:
-        if not isinstance(config, HeuristicConfig):
-            raise TypeError("HeuristicSearchStrategy.apply_config expects HeuristicConfig")
+    def apply_config(self, config: HeuristicParams) -> None:
+        if not isinstance(config, HeuristicParams):
+            raise TypeError("HeuristicSearchStrategy.apply_config expects HeuristicParams")
 
-        for name, value in asdict(config).items():
-            setattr(self, name, value)
+        for field_def in fields(config):
+            setattr(self, field_def.name, getattr(config, field_def.name))
 
         self._resize_transposition_table(config.transposition_table_size)
         self._resize_killers(config._killer_slots)
@@ -2118,7 +2114,7 @@ class ChessEngine:
             self.strategy_selector.register_strategy(strategy)
 
     def _apply_meta_configuration(self, broadcast: bool = True) -> None:
-        config = derive(self.meta)
+        config = self.meta
         for strategy in self.strategy_selector.get_strategies():
             strategy.apply_config(config)
         if broadcast:
