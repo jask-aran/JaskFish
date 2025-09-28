@@ -1,13 +1,12 @@
 import sys
 import io
-import random
 import time
 import threading
 import math
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict, OrderedDict
-from dataclasses import dataclass, field, replace, fields
+from dataclasses import dataclass, field, replace, field, replace, fields
 from enum import IntEnum
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, Literal
 
@@ -151,6 +150,9 @@ class HeuristicParams:
     tt_budget_mb: int = 64
     style_tactical: float = 0.5
     endgame_focus: float = 0.4
+    avoid_repetition: bool = True
+    repetition_penalty: float = 45.0
+    repetition_strong_penalty: float = 90.0
 
     search_depth: int = field(init=False)
     quiescence_depth: int = field(init=False)
@@ -330,12 +332,10 @@ class MoveStrategy(ABC):
 
 
 # Toggle individual strategies by flipping these booleans. The engine will
-# always fall back to a random legal move if no strategies produce a result.
+# Toggle individual strategies by flipping these booleans.
 STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
-    "repetition_avoidance": True,
     "heuristic": True,
-    "fallback_random": False,
 }
 
 
@@ -491,9 +491,6 @@ class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
         *,
-        avoid_repetition: bool = True,
-        repetition_penalty: float = 45.0,
-        repetition_strong_penalty: float = 90.0,
         logger: Optional[Callable[[str], None]] = None,
         log_tag: str = "HS",
         **kwargs,
@@ -505,9 +502,9 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._configured = False
 
         # Strategy-level switches
-        self._avoid_repetition = avoid_repetition
-        self._repetition_penalty = repetition_penalty
-        self._repetition_strong_penalty = repetition_strong_penalty
+        self.avoid_repetition = True
+        self.repetition_penalty = 45.0
+        self.repetition_strong_penalty = 90.0
 
         # Runtime state containers
         self._mate_score = 100000
@@ -970,9 +967,9 @@ class HeuristicSearchStrategy(MoveStrategy):
                                         is_pv=True,
                                     )
 
-                            if self._avoid_repetition:
+                            if self.avoid_repetition:
                                 try:
-                                    penalty = self._repetition_penalty_value(board)
+                                    penalty = self.repetition_penalty_value(board)
                                 except Exception as exc:  # pragma: no cover - defensive
                                     self._logger(
                                         f"{self._log_tag}: repetition penalty evaluation failed: {exc}"
@@ -1176,10 +1173,10 @@ class HeuristicSearchStrategy(MoveStrategy):
                 self._emit_analysis_summary(analysis_summary)
 
         repetition_penalty = 0.0
-        if self._avoid_repetition and best_move is not None:
+        if self.avoid_repetition and best_move is not None:
             board.push(best_move)
             try:
-                repetition_penalty = self._repetition_penalty_value(board)
+                repetition_penalty = self.repetition_penalty_value(board)
             except Exception as exc:  # pragma: no cover - defensive logging
                 self._logger(
                     f"{self._log_tag}: repetition penalty evaluation failed: {exc}"
@@ -1195,7 +1192,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             "principal_move": best_move.uci(),
             "pv": [move.uci() for move in self._principal_variation],
         }
-        if self._avoid_repetition:
+        if self.avoid_repetition:
             metadata["avoid_repetition"] = True
             if repetition_penalty:
                 metadata["repetition_penalty"] = repetition_penalty
@@ -1829,8 +1826,8 @@ class HeuristicSearchStrategy(MoveStrategy):
             return True
         return False
 
-    def _repetition_penalty_value(self, board: chess.Board) -> float:
-        if not self._avoid_repetition:
+    def repetition_penalty_value(self, board: chess.Board) -> float:
+        if not self.avoid_repetition:
             return 0.0
 
         penalty = 0.0
@@ -1839,21 +1836,21 @@ class HeuristicSearchStrategy(MoveStrategy):
             return float(self._mate_score)
 
         if board.can_claim_fifty_moves():
-            penalty = max(penalty, self._repetition_strong_penalty)
+            penalty = max(penalty, self.repetition_strong_penalty)
 
         try:
             if board.is_repetition():
-                penalty = max(penalty, self._repetition_strong_penalty)
+                penalty = max(penalty, self.repetition_strong_penalty)
             elif board.can_claim_threefold_repetition():
-                penalty = max(penalty, self._repetition_strong_penalty * 0.8)
+                penalty = max(penalty, self.repetition_strong_penalty * 0.8)
         except ValueError:
-            penalty = max(penalty, self._repetition_strong_penalty * 0.8)
+            penalty = max(penalty, self.repetition_strong_penalty * 0.8)
 
         try:
             if board.is_repetition(2):
-                penalty = max(penalty, self._repetition_penalty)
+                penalty = max(penalty, self.repetition_penalty)
         except ValueError:
-            penalty = max(penalty, self._repetition_penalty)
+            penalty = max(penalty, self.repetition_penalty)
 
         return penalty
 
@@ -2004,30 +2001,6 @@ class HeuristicSearchStrategy(MoveStrategy):
         return min(1.0, max(0.0, phase))
 
 
-class FallbackRandomStrategy(MoveStrategy):
-    def __init__(
-        self, random_move_provider: Callable[[chess.Board], Optional[str]], **kwargs
-    ):
-        super().__init__(priority=0, **kwargs)
-        self._random_move_provider = random_move_provider
-
-    def is_applicable(self, context: StrategyContext) -> bool:
-        return context.legal_moves_count > 0
-
-    def generate_move(
-        self, board: chess.Board, context: StrategyContext
-    ) -> Optional[StrategyResult]:
-        move = self._random_move_provider(board)
-        if not move:
-            return None
-        return StrategyResult(
-            move=move,
-            strategy_name=self.name,
-            confidence=self.confidence,
-            metadata={"source": "random_fallback"},
-        )
-
-
 class ChessEngine:
     """
     A simple chess engine that communicates using a custom UCI-like protocol.
@@ -2092,23 +2065,13 @@ class ChessEngine:
                 )
             )
 
-        repetition_enabled = STRATEGY_ENABLE_FLAGS.get("repetition_avoidance", False)
-
         if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
             heuristic_strategy = HeuristicSearchStrategy(
                 name="HeuristicSearchStrategy",
                 logger=self._log_debug,
-                avoid_repetition=repetition_enabled,
             )
             self._heuristic_strategy = heuristic_strategy
             strategies_to_register.append(heuristic_strategy)
-
-        if STRATEGY_ENABLE_FLAGS.get("fallback_random", False):
-            strategies_to_register.append(
-                FallbackRandomStrategy(
-                    self.random_move, name="FallbackRandomStrategy"
-                )
-            )
 
         for strategy in strategies_to_register:
             self.strategy_selector.register_strategy(strategy)
@@ -2341,13 +2304,6 @@ class ChessEngine:
             if self.debug:
                 print("info string New game started, board reset to initial position")
             print("info string New game initialized")
-
-    def random_move(self, board):
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            return None
-        selected_move = random.choice(legal_moves)
-        return selected_move.uci()
 
     def process_go_command(self, time_controls: Optional[Dict[str, int]] = None):
         try:

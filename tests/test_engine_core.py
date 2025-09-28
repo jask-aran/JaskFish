@@ -247,10 +247,6 @@ def test_process_go_command_handles_missing_move(capsys, deterministic_engine, m
         lambda board, context: None,
     )
 
-    def fail_random_move(board):
-        raise AssertionError("random fallback should not be invoked")
-
-    monkeypatch.setattr(deterministic_engine, "random_move", fail_random_move)
     deterministic_engine.move_calculating = True
     deterministic_engine.process_go_command({})
     output_lines = [line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()]
@@ -260,20 +256,14 @@ def test_process_go_command_handles_missing_move(capsys, deterministic_engine, m
     assert deterministic_engine.move_calculating is False
 
 
-def test_random_move_handles_positions_without_legal_moves(deterministic_engine):
-    board = chess.Board("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1")
-    assert deterministic_engine.random_move(board) is None
-
 
 def test_register_default_strategies_respects_feature_flags(monkeypatch):
     for key in engine_module.STRATEGY_ENABLE_FLAGS:
         monkeypatch.setitem(engine_module.STRATEGY_ENABLE_FLAGS, key, False)
     monkeypatch.setitem(engine_module.STRATEGY_ENABLE_FLAGS, "heuristic", True)
-    monkeypatch.setitem(engine_module.STRATEGY_ENABLE_FLAGS, "fallback_random", True)
-
     engine = engine_module.ChessEngine()
     strategy_names = [strategy.name for strategy in engine.strategy_selector.get_strategies()]
-    assert strategy_names == ["HeuristicSearchStrategy", "FallbackRandomStrategy"]
+    assert strategy_names == ["HeuristicSearchStrategy"]
 
 
 def test_strategy_selector_priority_and_short_circuit():
