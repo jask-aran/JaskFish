@@ -53,17 +53,10 @@ def test_handle_uci_reports_identity(capsys):
     engine.handle_uci()
     output_lines = capsys.readouterr().out.strip().splitlines()
     filtered = [line for line in output_lines if not line.startswith("info string")]
-    assert filtered[0] == "id name JaskFish"
-    assert filtered[1] == "id author Jaskaran Singh"
-    assert filtered[-1] == "uciok"
-    assert filtered[2:-1] == [
-        "option name Meta.Strength type spin default 0.6 min 0 max 1",
-        "option name Meta.SpeedBias type spin default 0.4 min 0 max 1",
-        "option name Meta.Risk type spin default 0.2 min 0 max 1",
-        "option name Meta.Stability type spin default 0.5 min 0 max 1",
-        "option name Meta.TTBudgetMB type spin default 64 min 1 max 1024",
-        "option name Meta.StyleTactical type spin default 0.5 min 0 max 1",
-        "option name Meta.EndgameFocus type spin default 0.4 min 0 max 1",
+    assert filtered == [
+        "id name JaskFish",
+        "id author Jaskaran Singh",
+        "uciok",
     ]
 
 

@@ -7,9 +7,9 @@ import math
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict, OrderedDict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace, asdict
 from enum import IntEnum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, Literal
 
 import chess
 from chess import polyglot
@@ -153,7 +153,40 @@ class Meta:
     endgame_focus: float = 0.4
 
 
-def derive(meta: Meta) -> Dict[str, Any]:
+@dataclass(slots=True)
+class HeuristicConfig:
+    search_depth: int
+    quiescence_depth: int
+    base_time_limit: float
+    min_time_limit: float
+    max_time_limit: float
+    time_allocation_factor: float
+    _aspiration_window: float
+    _aspiration_growth: float
+    _aspiration_fail_reset: int
+    _depth_iteration_stop_ratio: float
+    _null_move_min_depth: int
+    _null_move_depth_scale: int
+    _null_move_reduction_base: int
+    _lmr_min_depth: int
+    _lmr_min_move_index: int
+    _futility_depth_limit: int
+    _futility_base_margin: float
+    _razoring_depth_limit: int
+    _razoring_margin: float
+    _qsearch_see_prune_threshold: float
+    transposition_table_size: int
+    _killer_slots: int
+    _history_decay: float
+    bishop_pair_bonus: float
+    _mobility_unit: float
+    _king_safety_opening_penalty: float
+    _king_safety_endgame_bonus: float
+    _passed_pawn_base_bonus: float
+    _passed_pawn_rank_bonus: float
+
+
+def derive(meta: Meta) -> HeuristicConfig:
     strength = _clamp(meta.strength, 0.0, 1.0)
     speed_bias = _clamp(meta.speed_bias, 0.0, 1.0)
     risk = _clamp(meta.risk, 0.0, 1.0)
@@ -197,72 +230,40 @@ def derive(meta: Meta) -> Dict[str, Any]:
     passed_base = 10 + 30 * style_tactical
     passed_rank = 4 + 10 * style_tactical
 
-    return {
-        "search_depth": search_depth,
-        "quiescence_depth": q_depth,
-        "base_time_limit": base_time,
-        "time_allocation_factor": time_alloc,
-        "min_time_limit": min_time,
-        "max_time_limit": max_time,
-        "_aspiration_window": float(asp_window),
-        "_aspiration_growth": float(asp_growth),
-        "_aspiration_fail_reset": int(asp_reset),
-        "_null_move_min_depth": int(null_min_depth),
-        "_null_move_depth_scale": int(null_scale),
-        "_lmr_min_depth": int(lmr_min_depth),
-        "_lmr_min_move_index": int(lmr_min_idx),
-        "_futility_depth_limit": int(fut_depth),
-        "_futility_base_margin": float(fut_margin),
-        "_razoring_depth_limit": int(razor_depth),
-        "_razoring_margin": float(razor_margin),
-        "_depth_iteration_stop_ratio": float(iter_stop_ratio),
-        "_qsearch_see_prune_threshold": float(q_see_thresh),
-        "transposition_table_size": int(tt_size),
-        "_killer_slots": int(killer_slots),
-        "bishop_pair_bonus": float(bishop_pair),
-        "_mobility_unit": float(mobility_u),
-        "_king_safety_opening_penalty": float(ks_open_pen),
-        "_king_safety_endgame_bonus": float(ks_end_bonus),
-        "_passed_pawn_base_bonus": float(passed_base),
-        "_passed_pawn_rank_bonus": float(passed_rank),
-        "_history_decay": float(hist_decay),
-    }
-
-
-_META_FIELD_ALIASES: Dict[str, str] = {
-    "strength": "strength",
-    "speedbias": "speed_bias",
-    "speed_bias": "speed_bias",
-    "risk": "risk",
-    "stability": "stability",
-    "ttbudget": "tt_budget_mb",
-    "ttbudgetmb": "tt_budget_mb",
-    "tt_budget": "tt_budget_mb",
-    "tt_budget_mb": "tt_budget_mb",
-    "styletactical": "style_tactical",
-    "style_tactical": "style_tactical",
-    "endgamefocus": "endgame_focus",
-    "endgame_focus": "endgame_focus",
-    "preset": "preset",
-}
-
-_META_FLOAT_FIELDS = {
-    "strength",
-    "speed_bias",
-    "risk",
-    "stability",
-    "style_tactical",
-    "endgame_focus",
-}
-
-_META_INT_FIELDS = {"tt_budget_mb"}
-
-
-_META_PRESET_DEFAULT = "balanced"
+    return HeuristicConfig(
+        search_depth=search_depth,
+        quiescence_depth=q_depth,
+        base_time_limit=base_time,
+        min_time_limit=min_time,
+        max_time_limit=max_time,
+        time_allocation_factor=time_alloc,
+        _aspiration_window=float(asp_window),
+        _aspiration_growth=float(asp_growth),
+        _aspiration_fail_reset=int(asp_reset),
+        _depth_iteration_stop_ratio=float(iter_stop_ratio),
+        _null_move_min_depth=int(null_min_depth),
+        _null_move_depth_scale=int(null_scale),
+        _null_move_reduction_base=1,
+        _lmr_min_depth=int(lmr_min_depth),
+        _lmr_min_move_index=int(lmr_min_idx),
+        _futility_depth_limit=int(fut_depth),
+        _futility_base_margin=float(fut_margin),
+        _razoring_depth_limit=int(razor_depth),
+        _razoring_margin=float(razor_margin),
+        _qsearch_see_prune_threshold=float(q_see_thresh),
+        transposition_table_size=int(tt_size),
+        _killer_slots=int(killer_slots),
+        _history_decay=float(hist_decay),
+        bishop_pair_bonus=float(bishop_pair),
+        _mobility_unit=float(mobility_u),
+        _king_safety_opening_penalty=float(ks_open_pen),
+        _king_safety_endgame_bonus=float(ks_end_bonus),
+        _passed_pawn_base_bonus=float(passed_base),
+        _passed_pawn_rank_bonus=float(passed_rank),
+    )
 
 # Active preset selector. Edit this string to switch presets without UCI.
-# Allowed keys are those in _META_PRESETS.
-ACTIVE_META_PRESET = "balanced"
+ACTIVE_META_PRESET: Literal["balanced", "fastblitz", "tournament"] = "balanced"
 _META_PRESETS: Dict[str, Meta] = {
     "balanced": Meta(),
     "fastblitz": Meta(
@@ -327,7 +328,7 @@ class MoveStrategy(ABC):
     ) -> Optional[StrategyResult]:
         """Produce a move suggestion when applicable."""
 
-    def apply_config(self, config: Dict[str, Any]) -> None:
+    def apply_config(self, config: Any) -> None:
         """Optional hook for strategies that support meta configuration."""
         return
 
@@ -504,158 +505,61 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._log_tag = kwargs.pop("log_tag", log_tag)
         self.log_tag = self._log_tag
         super().__init__(priority=70, **kwargs)
+        self._logger = logger or (lambda *_: None)
         self._configured = False
-        self.search_depth = 1
-        self.quiescence_depth = 0
-        self.base_time_limit = 0.1
-        self.max_time_limit = 0.1
-        self.min_time_limit = 0.01
-        self.time_allocation_factor = 0.0
-        self._mate_score = 100000
-        self._transposition_table: "OrderedDict[str, TranspositionEntry]" = OrderedDict()
-        self._transposition_table_limit = 1000
-        self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
-        self._killer_slots = 1
-        self._aspiration_window = 50.0
-        self._aspiration_growth = 2.0
-        self._aspiration_fail_reset = 2
-        self._null_move_min_depth = 1
-        self._null_move_reduction_base = 1
-        self._null_move_depth_scale = 2
-        self._lmr_min_depth = 1
-        self._lmr_min_move_index = 1
-        self._futility_depth_limit = 0
-        self._futility_base_margin = 0.0
-        self._razoring_depth_limit = 0
-        self._razoring_margin = 0.0
-        self._depth_iteration_stop_ratio = 1.0
+
+        # Strategy-level switches
         self._avoid_repetition = avoid_repetition
         self._repetition_penalty = repetition_penalty
         self._repetition_strong_penalty = repetition_strong_penalty
+
+        # Runtime state containers
+        self._mate_score = 100000
+        self.transposition_table_size = 1000
+        self._transposition_table: "OrderedDict[str, TranspositionEntry]" = OrderedDict()
+        self._transposition_table_limit = self.transposition_table_size
+        self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
+        self._killer_moves: List[List[Optional[chess.Move]]] = []
+        self._killer_slots = 1
+
         self._search_deadline: Optional[float] = None
         self._search_start_time: float = 0.0
         self._nodes_visited: int = 0
-        self._killer_moves: List[List[Optional[chess.Move]]] = []
         self._principal_variation: List[chess.Move] = []
         self._eval_cache: Dict[str, float] = {}
-        self._qsearch_see_prune_threshold: float = -0.5
-        self._history_decay: float = 0.9
-        self._logger = logger or (lambda *_: None)
         self._timing_totals: Optional[Dict[str, int]] = None
         self._decision_stats: Optional[Dict[str, Any]] = None
-        self.bishop_pair_bonus = 0.0
-        self._passed_pawn_base_bonus = 0.0
-        self._passed_pawn_rank_bonus = 0.0
-        self._mobility_unit = 0.0
-        self._king_safety_opening_penalty = 0.0
-        self._king_safety_endgame_bonus = 0.0
         self._time_check_interval = 512
         self._time_check_counter = 0
         self._deadline_reached = False
-    def apply_config(self, config: Dict[str, Any]) -> None:
-        if not config:
-            return
 
-        if "search_depth" in config:
-            self.search_depth = max(1, int(config["search_depth"]))
+    def apply_config(self, config: HeuristicConfig) -> None:
+        if not isinstance(config, HeuristicConfig):
+            raise TypeError("HeuristicSearchStrategy.apply_config expects HeuristicConfig")
 
-        if "quiescence_depth" in config:
-            self.quiescence_depth = max(0, int(config["quiescence_depth"]))
+        for name, value in asdict(config).items():
+            setattr(self, name, value)
 
-        if "base_time_limit" in config:
-            self.base_time_limit = max(0.01, float(config["base_time_limit"]))
-
-        min_time_value = config.get("min_time_limit")
-        max_time_value = config.get("max_time_limit")
-        if min_time_value is not None:
-            self.min_time_limit = max(0.0, float(min_time_value))
-        if max_time_value is not None:
-            self.max_time_limit = max(float(max_time_value), self.min_time_limit)
-        elif min_time_value is not None and self.max_time_limit < self.min_time_limit:
-            self.max_time_limit = self.min_time_limit
-
-        if "time_allocation_factor" in config:
-            self.time_allocation_factor = max(0.0, float(config["time_allocation_factor"]))
-
-        if "_aspiration_window" in config:
-            self._aspiration_window = max(1.0, float(config["_aspiration_window"]))
-
-        if "_aspiration_growth" in config:
-            self._aspiration_growth = max(1.0, float(config["_aspiration_growth"]))
-
-        if "_aspiration_fail_reset" in config:
-            self._aspiration_fail_reset = max(1, int(config["_aspiration_fail_reset"]))
-
-        if "_null_move_min_depth" in config:
-            self._null_move_min_depth = max(0, int(config["_null_move_min_depth"]))
-
-        if "_null_move_depth_scale" in config:
-            self._null_move_depth_scale = max(1, int(config["_null_move_depth_scale"]))
-
-        if "_null_move_reduction_base" in config:
-            self._null_move_reduction_base = max(1, int(config["_null_move_reduction_base"]))
-
-        if "_lmr_min_depth" in config:
-            self._lmr_min_depth = max(1, int(config["_lmr_min_depth"]))
-
-        if "_lmr_min_move_index" in config:
-            self._lmr_min_move_index = max(0, int(config["_lmr_min_move_index"]))
-
-        if "_futility_depth_limit" in config:
-            self._futility_depth_limit = max(0, int(config["_futility_depth_limit"]))
-
-        if "_futility_base_margin" in config:
-            self._futility_base_margin = float(config["_futility_base_margin"])
-
-        if "_razoring_depth_limit" in config:
-            self._razoring_depth_limit = max(0, int(config["_razoring_depth_limit"]))
-
-        if "_razoring_margin" in config:
-            self._razoring_margin = float(config["_razoring_margin"])
-
-        if "_depth_iteration_stop_ratio" in config:
-            ratio = float(config["_depth_iteration_stop_ratio"])
-            self._depth_iteration_stop_ratio = _clamp(ratio, 0.0, 1.0)
-
-        if "_qsearch_see_prune_threshold" in config:
-            self._qsearch_see_prune_threshold = float(config["_qsearch_see_prune_threshold"])
-
-        if "transposition_table_size" in config:
-            limit = max(1000, int(config["transposition_table_size"]))
-            if limit != self._transposition_table_limit:
-                self._transposition_table_limit = limit
-                while len(self._transposition_table) > self._transposition_table_limit:
-                    self._transposition_table.popitem(last=False)
-
-        if "_killer_slots" in config:
-            slots = max(1, int(config["_killer_slots"]))
-            if slots != self._killer_slots:
-                self._killer_slots = slots
-                for killers in self._killer_moves:
-                    del killers[slots:]
-
-        if "bishop_pair_bonus" in config:
-            self.bishop_pair_bonus = float(config["bishop_pair_bonus"])
-
-        if "_mobility_unit" in config:
-            self._mobility_unit = float(config["_mobility_unit"])
-
-        if "_king_safety_opening_penalty" in config:
-            self._king_safety_opening_penalty = float(config["_king_safety_opening_penalty"])
-
-        if "_king_safety_endgame_bonus" in config:
-            self._king_safety_endgame_bonus = float(config["_king_safety_endgame_bonus"])
-
-        if "_passed_pawn_base_bonus" in config:
-            self._passed_pawn_base_bonus = float(config["_passed_pawn_base_bonus"])
-
-        if "_passed_pawn_rank_bonus" in config:
-            self._passed_pawn_rank_bonus = float(config["_passed_pawn_rank_bonus"])
-
-        if "_history_decay" in config:
-            self._history_decay = _clamp(float(config["_history_decay"]), 0.0, 1.0)
-
+        self._resize_transposition_table(config.transposition_table_size)
+        self._resize_killers(config._killer_slots)
         self._configured = True
+
+    def _resize_transposition_table(self, new_limit: int) -> None:
+        new_limit = max(1000, int(new_limit))
+        if new_limit != self._transposition_table_limit:
+            self._transposition_table_limit = new_limit
+            while len(self._transposition_table) > self._transposition_table_limit:
+                self._transposition_table.popitem(last=False)
+
+    def _resize_killers(self, slots: int) -> None:
+        slots = max(1, int(slots))
+        self._killer_slots = slots
+        for killers in self._killer_moves:
+            if len(killers) > slots:
+                del killers[slots:]
+            elif len(killers) < slots:
+                killers.extend([None] * (slots - len(killers)))
+
 
     def _position_key(self, board: chess.Board) -> int:
         """Return a Zobrist hash for the given board state."""
@@ -965,7 +869,8 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._time_check_counter = 0
         self._deadline_reached = False
         self._killer_moves = [
-            list() for _ in range(depth_limit + self.quiescence_depth + 4)
+            [None] * getattr(self, '_killer_slots', 1)
+            for _ in range(depth_limit + self.quiescence_depth + 4)
         ]
         self._eval_cache.clear()
         timing_totals = {
@@ -2229,100 +2134,9 @@ class ChessEngine:
             f"endgame={self.meta.endgame_focus:.2f}"
         )
 
-    def _normalise_meta_field(self, raw_parts: Sequence[str]) -> Optional[str]:
-        if not raw_parts:
-            return None
-        compact = "".join(part.lower() for part in raw_parts)
-        snake = "_".join(part.lower() for part in raw_parts)
-        for key in (compact, snake):
-            mapped = _META_FIELD_ALIASES.get(key)
-            if mapped:
-                return mapped
-        return None
-
-    def _apply_meta_preset(self, preset_name: Optional[str]) -> None:
-        print(
-            "info string Meta preset selection is controlled by ACTIVE_META_PRESET; "
-            "UCI overrides are ignored."
-        )
-        return
-
-    def _set_meta_field(self, field_name: str, value: Optional[str]) -> None:
-        if value is None:
-            print(f"info string Meta.{field_name} requires a value")
-            return
-        field_def = Meta.__dataclass_fields__[field_name]
-        try:
-            if field_name in _META_INT_FIELDS or field_def.type is int:
-                parsed: Union[int, float] = int(float(value))
-            else:
-                parsed = float(value)
-        except ValueError:
-            print(f"info string Invalid value '{value}' for Meta.{field_name}")
-            return
-
-        if field_name in _META_FLOAT_FIELDS:
-            parsed = _clamp(float(parsed), 0.0, 1.0)
-        elif field_name in _META_INT_FIELDS:
-            parsed = max(1, int(parsed))
-
-        setattr(self.meta, field_name, parsed)  # type: ignore[arg-type]
-        self._apply_meta_configuration()
-
     def handle_setoption(self, args):
-        tokens = args.strip().split()
-        if not tokens or tokens[0].lower() != "name":
-            print("info string Usage: setoption name <Name> [value <Value>]")
-            return
+        print("info string Meta configuration is code-selected; setoption has no effect")
 
-        idx = 1
-        name_tokens: List[str] = []
-        while idx < len(tokens) and tokens[idx].lower() != "value":
-            name_tokens.append(tokens[idx])
-            idx += 1
-
-        option_name = " ".join(name_tokens)
-        value: Optional[str] = None
-        if idx < len(tokens) and tokens[idx].lower() == "value":
-            value = " ".join(tokens[idx + 1 :]) or None
-
-        if not option_name:
-            print("info string setoption missing option name")
-            return
-
-        parts = [part for part in option_name.split(".") if part]
-        if not parts:
-            print("info string Invalid option name")
-            return
-
-        if parts[0].lower() != "meta":
-            print(f"info string Unknown option '{option_name}'")
-            return
-
-        meta_field = self._normalise_meta_field(parts[1:])
-        if not meta_field:
-            available = ", ".join(
-                [
-                    "Strength",
-                    "SpeedBias",
-                    "Risk",
-                    "Stability",
-                    "TTBudgetMB",
-                    "StyleTactical",
-                    "EndgameFocus",
-                    "Preset",
-                ]
-            )
-            print(
-                f"info string Unknown meta field '{'.'.join(parts[1:])}'. "
-                f"Available: {available}"
-            )
-            return
-
-        if meta_field == "preset":
-            self._apply_meta_preset(value)
-        else:
-            self._set_meta_field(meta_field, value)
     def create_strategy_context(
         self, board: chess.Board, time_controls: Optional[Dict[str, int]] = None
     ) -> StrategyContext:
@@ -2403,13 +2217,6 @@ class ChessEngine:
     def handle_uci(self, args=None):
         print(f"id name {self.engine_name}")
         print(f"id author {self.engine_author}")
-        print("option name Meta.Strength type spin default 0.6 min 0 max 1")
-        print("option name Meta.SpeedBias type spin default 0.4 min 0 max 1")
-        print("option name Meta.Risk type spin default 0.2 min 0 max 1")
-        print("option name Meta.Stability type spin default 0.5 min 0 max 1")
-        print("option name Meta.TTBudgetMB type spin default 64 min 1 max 1024")
-        print("option name Meta.StyleTactical type spin default 0.5 min 0 max 1")
-        print("option name Meta.EndgameFocus type spin default 0.4 min 0 max 1")
         print("uciok")
 
     def command_processor(self):
