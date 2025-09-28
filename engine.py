@@ -258,7 +258,11 @@ _META_FLOAT_FIELDS = {
 _META_INT_FIELDS = {"tt_budget_mb"}
 
 
-_META_PRESET_DEFAULT = "tournament"
+_META_PRESET_DEFAULT = "balanced"
+
+# Active preset selector. Edit this string to switch presets without UCI.
+# Allowed keys are those in _META_PRESETS.
+ACTIVE_META_PRESET = "balanced"
 _META_PRESETS: Dict[str, Meta] = {
     "balanced": Meta(),
     "fastblitz": Meta(
@@ -279,12 +283,6 @@ _META_PRESETS: Dict[str, Meta] = {
         style_tactical=0.55,
         endgame_focus=0.6,
     ),
-}
-
-_META_PRESET_DISPLAY = {
-    "balanced": "Balanced",
-    "fastblitz": "FastBlitz",
-    "tournament": "Tournament",
 }
 
 
@@ -328,6 +326,10 @@ class MoveStrategy(ABC):
         self, board: chess.Board, context: StrategyContext
     ) -> Optional[StrategyResult]:
         """Produce a move suggestion when applicable."""
+
+    def apply_config(self, config: Dict[str, Any]) -> None:
+        """Optional hook for strategies that support meta configuration."""
+        return
 
 
 # Toggle individual strategies by flipping these booleans. The engine will
@@ -491,79 +493,65 @@ class MateInOneStrategy(MoveStrategy):
 class HeuristicSearchStrategy(MoveStrategy):
     def __init__(
         self,
-        search_depth: int = 6,
-        quiescence_depth: int = 6,
-        base_time_limit: float = 6.0,
-        max_time_limit: float = 30.0,
-        min_time_limit: float = 0.25,
-        time_allocation_factor: float = 0.10,
-        transposition_table_size: int = 2000000,
+        *,
         avoid_repetition: bool = True,
         repetition_penalty: float = 45.0,
         repetition_strong_penalty: float = 90.0,
         logger: Optional[Callable[[str], None]] = None,
+        log_tag: str = "HS",
         **kwargs,
     ):
-        self._log_tag = kwargs.pop("log_tag", "HS")
+        self._log_tag = kwargs.pop("log_tag", log_tag)
         self.log_tag = self._log_tag
         super().__init__(priority=70, **kwargs)
-        self.search_depth = max(1, search_depth)
-        self.quiescence_depth = max(0, quiescence_depth)
-        self.base_time_limit = base_time_limit
-        self.min_time_limit = min_time_limit
-        self.max_time_limit = max(max_time_limit, self.min_time_limit)
-        self.time_allocation_factor = time_allocation_factor
+        self._configured = False
+        self.search_depth = 1
+        self.quiescence_depth = 0
+        self.base_time_limit = 0.1
+        self.max_time_limit = 0.1
+        self.min_time_limit = 0.01
+        self.time_allocation_factor = 0.0
         self._mate_score = 100000
         self._transposition_table: "OrderedDict[str, TranspositionEntry]" = OrderedDict()
-        self._transposition_table_limit = max(1000, transposition_table_size)
+        self._transposition_table_limit = 1000
         self._history_scores: Dict[Tuple[bool, int, int], float] = defaultdict(float)
-        self._killer_slots = 2
+        self._killer_slots = 1
         self._aspiration_window = 50.0
         self._aspiration_growth = 2.0
         self._aspiration_fail_reset = 2
-        self._null_move_min_depth = 3
+        self._null_move_min_depth = 1
         self._null_move_reduction_base = 1
-        self._null_move_depth_scale = 4
-        self._lmr_min_depth = 4
-        self._lmr_min_move_index = 4
-        self._futility_depth_limit = 2
-        self._futility_base_margin = 120.0
-        self._razoring_depth_limit = 2
-        self._razoring_margin = 325.0
-        self._depth_iteration_stop_ratio = 0.7
+        self._null_move_depth_scale = 2
+        self._lmr_min_depth = 1
+        self._lmr_min_move_index = 1
+        self._futility_depth_limit = 0
+        self._futility_base_margin = 0.0
+        self._razoring_depth_limit = 0
+        self._razoring_margin = 0.0
+        self._depth_iteration_stop_ratio = 1.0
         self._avoid_repetition = avoid_repetition
         self._repetition_penalty = repetition_penalty
         self._repetition_strong_penalty = repetition_strong_penalty
-
-        # Search state (initialised per search invocation)
         self._search_deadline: Optional[float] = None
         self._search_start_time: float = 0.0
         self._nodes_visited: int = 0
         self._killer_moves: List[List[Optional[chess.Move]]] = []
         self._principal_variation: List[chess.Move] = []
-        # Lightweight per-search cache for expensive static evaluations
         self._eval_cache: Dict[str, float] = {}
-        # Quiescence pruning: drop clearly losing captures unless they check or promote
         self._qsearch_see_prune_threshold: float = -0.5
         self._history_decay: float = 0.9
         self._logger = logger or (lambda *_: None)
-        # Lazily populated timing buckets for telemetry (ns units)
         self._timing_totals: Optional[Dict[str, int]] = None
-        # Per-search heuristic instrumentation
         self._decision_stats: Optional[Dict[str, Any]] = None
-
-        # Evaluation constants (centipawns)
-        self.bishop_pair_bonus = 40.0
-        self._passed_pawn_base_bonus = 20.0
-        self._passed_pawn_rank_bonus = 8.0
-        self._mobility_unit = 2.0
-        self._king_safety_opening_penalty = 12.0
-        self._king_safety_endgame_bonus = 6.0
-        # Time checking configuration
+        self.bishop_pair_bonus = 0.0
+        self._passed_pawn_base_bonus = 0.0
+        self._passed_pawn_rank_bonus = 0.0
+        self._mobility_unit = 0.0
+        self._king_safety_opening_penalty = 0.0
+        self._king_safety_endgame_bonus = 0.0
         self._time_check_interval = 512
         self._time_check_counter = 0
         self._deadline_reached = False
-
     def apply_config(self, config: Dict[str, Any]) -> None:
         if not config:
             return
@@ -603,6 +591,9 @@ class HeuristicSearchStrategy(MoveStrategy):
 
         if "_null_move_depth_scale" in config:
             self._null_move_depth_scale = max(1, int(config["_null_move_depth_scale"]))
+
+        if "_null_move_reduction_base" in config:
+            self._null_move_reduction_base = max(1, int(config["_null_move_reduction_base"]))
 
         if "_lmr_min_depth" in config:
             self._lmr_min_depth = max(1, int(config["_lmr_min_depth"]))
@@ -663,6 +654,8 @@ class HeuristicSearchStrategy(MoveStrategy):
 
         if "_history_decay" in config:
             self._history_decay = _clamp(float(config["_history_decay"]), 0.0, 1.0)
+
+        self._configured = True
 
     def _position_key(self, board: chess.Board) -> int:
         """Return a Zobrist hash for the given board state."""
@@ -934,6 +927,8 @@ class HeuristicSearchStrategy(MoveStrategy):
     def generate_move(
         self, board: chess.Board, context: StrategyContext
     ) -> Optional[StrategyResult]:
+        if not self._configured:
+            raise RuntimeError("HeuristicSearchStrategy not configured. Call apply_config() first.")
         if context.legal_moves_count == 0:
             if board.is_checkmate():
                 return StrategyResult(
@@ -2149,7 +2144,10 @@ class ChessEngine:
         self.debug = True
         self.move_calculating = False
         self.running = True
-        self.meta = Meta()
+        if ACTIVE_META_PRESET not in _META_PRESETS:
+            raise ValueError(f"Unknown ACTIVE_META_PRESET '{ACTIVE_META_PRESET}'")
+        self._active_meta_preset = ACTIVE_META_PRESET
+        self.meta = replace(_META_PRESETS[ACTIVE_META_PRESET])
         self._heuristic_strategy: Optional[HeuristicSearchStrategy] = None
 
         # Lock to manage concurrent access to engine state
@@ -2198,7 +2196,6 @@ class ChessEngine:
         if STRATEGY_ENABLE_FLAGS.get("heuristic", True):
             heuristic_strategy = HeuristicSearchStrategy(
                 name="HeuristicSearchStrategy",
-                search_depth=5,
                 logger=self._log_debug,
                 avoid_repetition=repetition_enabled,
             )
@@ -2216,10 +2213,9 @@ class ChessEngine:
             self.strategy_selector.register_strategy(strategy)
 
     def _apply_meta_configuration(self, broadcast: bool = True) -> None:
-        if not self._heuristic_strategy:
-            return
         config = derive(self.meta)
-        self._heuristic_strategy.apply_config(config)
+        for strategy in self.strategy_selector.get_strategies():
+            strategy.apply_config(config)
         if broadcast:
             summary = self._meta_summary()
             self._log_debug(f"Meta applied: {summary}")
@@ -2245,22 +2241,11 @@ class ChessEngine:
         return None
 
     def _apply_meta_preset(self, preset_name: Optional[str]) -> None:
-        if not preset_name:
-            print("info string Meta preset requires a value")
-            return
-        key = preset_name.strip().lower()
-        preset = _META_PRESETS.get(key)
-        if not preset:
-            available = ", ".join(
-                _META_PRESET_DISPLAY[name] for name in sorted(_META_PRESETS)
-            )
-            print(
-                f"info string Unknown meta preset '{preset_name}'. "
-                f"Available: {available}"
-            )
-            return
-        self.meta = replace(preset)
-        self._apply_meta_configuration()
+        print(
+            "info string Meta preset selection is controlled by ACTIVE_META_PRESET; "
+            "UCI overrides are ignored."
+        )
+        return
 
     def _set_meta_field(self, field_name: str, value: Optional[str]) -> None:
         if value is None:
@@ -2425,13 +2410,6 @@ class ChessEngine:
         print("option name Meta.TTBudgetMB type spin default 64 min 1 max 1024")
         print("option name Meta.StyleTactical type spin default 0.5 min 0 max 1")
         print("option name Meta.EndgameFocus type spin default 0.4 min 0 max 1")
-        preset_parts = " ".join(
-            f"var {_META_PRESET_DISPLAY[name]}" for name in sorted(_META_PRESETS.keys())
-        )
-        print(
-            "option name Meta.Preset type combo default "
-            f"{_META_PRESET_DISPLAY[_META_PRESET_DEFAULT]} {preset_parts}"
-        )
         print("uciok")
 
     def command_processor(self):

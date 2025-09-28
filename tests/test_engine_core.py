@@ -33,6 +33,13 @@ class DummyStrategy(engine_module.MoveStrategy):
         )
 
 
+
+def create_configured_strategy(**kwargs):
+    strategy = engine_module.HeuristicSearchStrategy(**kwargs)
+    strategy.apply_config(engine_module.derive(engine_module.Meta()))
+    return strategy
+
+
 @pytest.fixture()
 def deterministic_engine():
     engine = engine_module.ChessEngine()
@@ -57,7 +64,6 @@ def test_handle_uci_reports_identity(capsys):
         "option name Meta.TTBudgetMB type spin default 64 min 1 max 1024",
         "option name Meta.StyleTactical type spin default 0.5 min 0 max 1",
         "option name Meta.EndgameFocus type spin default 0.4 min 0 max 1",
-        "option name Meta.Preset type combo default Balanced var Balanced var FastBlitz var Tournament",
     ]
 
 
@@ -486,12 +492,11 @@ def test_process_go_command_logs_when_strategies_fail(monkeypatch, deterministic
 
 
 def test_heuristic_time_budget_derivation():
-    strategy = engine_module.HeuristicSearchStrategy(
-        base_time_limit=0.5,
-        max_time_limit=5.0,
-        min_time_limit=0.1,
-        time_allocation_factor=0.05,
-    )
+    strategy = create_configured_strategy()
+    strategy.base_time_limit = 0.5
+    strategy.max_time_limit = 5.0
+    strategy.min_time_limit = 0.1
+    strategy.time_allocation_factor = 0.05
     context = engine_module.StrategyContext(
         fullmove_number=1,
         halfmove_clock=0,
@@ -527,9 +532,9 @@ def test_heuristic_time_budget_derivation():
 
 
 def test_heuristic_timeout_returns_none_when_time_exceeded():
-    strategy = engine_module.HeuristicSearchStrategy(
-        search_depth=2, quiescence_depth=0
-    )
+    strategy = create_configured_strategy()
+    strategy.search_depth = 2
+    strategy.quiescence_depth = 0
     board = chess.Board()
     context = engine_module.StrategyContext(
         fullmove_number=1,
@@ -547,14 +552,17 @@ def test_heuristic_timeout_returns_none_when_time_exceeded():
 
 
 def test_quiescence_move_order_prioritizes_captures_and_checks():
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=1, quiescence_depth=2)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 1
+    strategy.quiescence_depth = 2
     board = chess.Board("4k3/4q3/2r5/8/3N4/4Q3/8/4K3 w - - 0 1")
     moves = [move.uci() for move in strategy._generate_quiescence_moves(board)]
     assert moves[:2] == ["e3e7", "d4c6"]
 
 
 def test_transposition_and_killer_tables_are_bounded():
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=1)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 1
     strategy._transposition_table_limit = 5
     for idx in range(10):
         strategy._store_transposition_entry(idx, 1, float(idx), engine_module.TranspositionFlag.EXACT, None)
@@ -571,7 +579,8 @@ def test_transposition_and_killer_tables_are_bounded():
 
 
 def test_history_scores_decay_when_exceeding_threshold():
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=1)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 1
     move = chess.Move.from_uci("e2e4")
     key = (True, move.from_square, move.to_square)
     for _ in range(1000):
@@ -580,7 +589,8 @@ def test_history_scores_decay_when_exceeding_threshold():
 
 
 def test_history_scores_decay_and_prune_entries():
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=1)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 1
     keep_key = (True, chess.E2, chess.E4)
     prune_key = (True, chess.A2, chess.A3)
     strategy._history_scores[keep_key] = 100.0
@@ -594,7 +604,9 @@ def test_history_scores_decay_and_prune_entries():
 
 def test_heuristic_generate_move_populates_principal_variation():
     board = chess.Board("8/8/8/3k4/8/8/8/3K4 w - - 0 1")
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=2, quiescence_depth=0)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 2
+    strategy.quiescence_depth = 0
     context = engine_module.StrategyContext(
         fullmove_number=board.fullmove_number,
         halfmove_clock=board.halfmove_clock,
@@ -616,7 +628,8 @@ def test_heuristic_generate_move_populates_principal_variation():
 
 
 def test_static_exchange_score_falls_back_when_missing_see():
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=1)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 1
     board = chess.Board()
     move = chess.Move.from_uci("g1f3")
     board.see = lambda _move: (_ for _ in ()).throw(ValueError("missing"))
@@ -627,7 +640,9 @@ def test_static_exchange_score_falls_back_when_missing_see():
 
 def test_alpha_beta_triggers_null_move_pruning():
     board = chess.Board("4k3/8/8/8/8/8/4PPP1/3K4 w - - 0 1")
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=3, quiescence_depth=0)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 3
+    strategy.quiescence_depth = 0
     strategy._futility_depth_limit = 0
     strategy._razoring_depth_limit = 0
     strategy._null_move_min_depth = 2
@@ -642,7 +657,9 @@ def test_alpha_beta_triggers_null_move_pruning():
 
 def test_alpha_beta_applies_late_move_reductions():
     board = chess.Board("4k3/8/8/8/8/8/4PPP1/3K4 w - - 0 1")
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=3, quiescence_depth=0)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 3
+    strategy.quiescence_depth = 0
     strategy._null_move_min_depth = 99  # disable null-move pruning to focus on LMR
     strategy._lmr_min_depth = 2
     strategy._lmr_min_move_index = 1
@@ -661,7 +678,9 @@ def test_alpha_beta_applies_late_move_reductions():
 
 def test_generate_move_expands_aspiration_window_on_failures():
     board = chess.Board()
-    strategy = engine_module.HeuristicSearchStrategy(search_depth=3, quiescence_depth=0)
+    strategy = create_configured_strategy()
+    strategy.search_depth = 3
+    strategy.quiescence_depth = 0
     strategy._resolve_depth_limit = lambda _context: 2
     root_move = chess.Move.from_uci("h2h3")
     strategy._order_moves = (
@@ -703,14 +722,12 @@ def test_generate_move_expands_aspiration_window_on_failures():
 
 def test_heuristic_trace_logging_across_positions():
     messages: list[str] = []
-    strategy = engine_module.HeuristicSearchStrategy(
-        search_depth=2,
-        quiescence_depth=0,
-        base_time_limit=0.4,
-        max_time_limit=0.6,
-        min_time_limit=0.05,
-        logger=messages.append,
-    )
+    strategy = create_configured_strategy(logger=messages.append)
+    strategy.search_depth = 2
+    strategy.quiescence_depth = 0
+    strategy.base_time_limit = 0.4
+    strategy.max_time_limit = 0.6
+    strategy.min_time_limit = 0.05
 
     fens = [
         chess.STARTING_FEN,
@@ -738,14 +755,12 @@ def test_heuristic_trace_logging_across_positions():
 
 def test_heuristic_stops_when_depth_consumes_budget(monkeypatch):
     messages: list[str] = []
-    strategy = engine_module.HeuristicSearchStrategy(
-        search_depth=3,
-        quiescence_depth=0,
-        base_time_limit=1.0,
-        max_time_limit=1.0,
-        min_time_limit=0.1,
-        logger=messages.append,
-    )
+    strategy = create_configured_strategy(logger=messages.append)
+    strategy.search_depth = 3
+    strategy.quiescence_depth = 0
+    strategy.base_time_limit = 1.0
+    strategy.max_time_limit = 1.0
+    strategy.min_time_limit = 0.1
     strategy._depth_iteration_stop_ratio = 0.2
 
     class FakeTimer:
