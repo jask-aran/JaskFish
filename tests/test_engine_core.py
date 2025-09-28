@@ -17,7 +17,7 @@ class DummyStrategy(engine_module.MoveStrategy):
     """Deterministic strategy used to make engine responses predictable in tests."""
 
     def __init__(self, move: str):
-        super().__init__(name="DummyStrategy", priority=100, short_circuit=True)
+        super().__init__(name="DummyStrategy", priority=100)
         self._move = move
 
     def is_applicable(self, context: engine_module.StrategyContext) -> bool:  # type: ignore[name-defined]
@@ -266,7 +266,7 @@ def test_register_default_strategies_respects_feature_flags(monkeypatch):
     assert strategy_names == ["HeuristicSearchStrategy"]
 
 
-def test_strategy_selector_priority_and_short_circuit():
+def test_strategy_selector_returns_definitive_results_immediately():
     selector = engine_module.StrategySelector()
     board = chess.Board()
     context = engine_module.StrategyContext(
@@ -280,19 +280,21 @@ def test_strategy_selector_priority_and_short_circuit():
 
     triggered = {"second_called": False}
 
-    class First(engine_module.MoveStrategy):
+    class Certain(engine_module.MoveStrategy):
         def __init__(self):
-            super().__init__(name="First", priority=10, short_circuit=True)
+            super().__init__(name="Certain", priority=10)
 
         def is_applicable(self, context):  # type: ignore[override]
             return True
 
         def generate_move(self, board, context):  # type: ignore[override]
-            return engine_module.StrategyResult("e2e4", strategy_name=self.name)
+            return engine_module.StrategyResult(
+                "e2e4", strategy_name=self.name, definitive=True
+            )
 
-    class Second(engine_module.MoveStrategy):
+    class Secondary(engine_module.MoveStrategy):
         def __init__(self):
-            super().__init__(name="Second", priority=1)
+            super().__init__(name="Secondary", priority=1)
 
         def is_applicable(self, context):  # type: ignore[override]
             triggered["second_called"] = True
@@ -302,17 +304,17 @@ def test_strategy_selector_priority_and_short_circuit():
             triggered["second_called"] = True
             return engine_module.StrategyResult("d2d4", strategy_name=self.name)
 
-    selector.register_strategy(Second())
-    selector.register_strategy(First())
+    selector.register_strategy(Secondary())
+    selector.register_strategy(Certain())
     strategies = selector.get_strategies()
-    assert strategies[0].name == "First"
+    assert strategies[0].name == "Certain"
 
     result = selector.select_move(board, context)
     assert result is not None and result.move == "e2e4"
     assert triggered["second_called"] is False
 
 
-def test_strategy_selector_custom_policy():
+def test_strategy_selector_ranks_by_priority_score_and_confidence():
     captured_logs = []
 
     def logger(message: str) -> None:
@@ -331,37 +333,46 @@ def test_strategy_selector_custom_policy():
 
     class Low(engine_module.MoveStrategy):
         def __init__(self):
-            super().__init__(name="Low", priority=1, short_circuit=False)
+            super().__init__(name="Low", priority=1)
 
         def is_applicable(self, context):  # type: ignore[override]
             return True
 
         def generate_move(self, board, context):  # type: ignore[override]
             return engine_module.StrategyResult(
-                "a2a4", strategy_name=self.name, score=1.0, confidence=0.2
+                "a2a4", strategy_name=self.name, score=1.5, confidence=0.4
             )
 
-    class High(engine_module.MoveStrategy):
+    class HighScore(engine_module.MoveStrategy):
         def __init__(self):
-            super().__init__(name="High", priority=2, short_circuit=False)
+            super().__init__(name="HighScore", priority=2)
 
         def is_applicable(self, context):  # type: ignore[override]
             return True
 
         def generate_move(self, board, context):  # type: ignore[override]
             return engine_module.StrategyResult(
-                "b2b4", strategy_name=self.name, score=0.5, confidence=0.9
+                "b2b4", strategy_name=self.name, score=0.7, confidence=0.3
+            )
+
+    class HighConfidence(engine_module.MoveStrategy):
+        def __init__(self):
+            super().__init__(name="HighConfidence", priority=2)
+
+        def is_applicable(self, context):  # type: ignore[override]
+            return True
+
+        def generate_move(self, board, context):  # type: ignore[override]
+            return engine_module.StrategyResult(
+                "c2c4", strategy_name=self.name, score=0.7, confidence=0.8
             )
 
     selector.register_strategy(Low())
-    selector.register_strategy(High())
+    selector.register_strategy(HighScore())
+    selector.register_strategy(HighConfidence())
 
-    def custom_policy(results, **_):
-        return max(results, key=lambda item: item[1].confidence)[1]
-
-    selector.set_selection_policy(custom_policy)
     result = selector.select_move(board, context)
-    assert result is not None and result.move == "b2b4"
+    assert result is not None and result.move == "c2c4"
     assert any("strategy evaluating" in entry for entry in captured_logs)
 
 

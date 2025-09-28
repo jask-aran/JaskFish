@@ -13,14 +13,14 @@ This document captures how the engine, GUI, and tooling in JaskFish fit together
   - Reproducible positions sit in `gamestates/`. The `legacy/` tree is reference-only.
 
 ## 2. Engine Internals
-- **Strategy orchestration** – `MoveStrategy` defines the interface; `StrategySelector` maintains a priority-ordered list and chooses the first strategy that returns a `StrategyResult`. If all strategies decline, the engine falls back to `random_move` to keep the protocol legal.
+- **Strategy orchestration** – `MoveStrategy` defines the interface; `StrategySelector` evaluates strategies in priority order, tracks the best `(priority, score, confidence)` tuple, and short-circuits only when a strategy reports a `definitive` result (mate/book). If all strategies decline, the engine falls back to `random_move` to keep the protocol legal.
 - **Default toggle flags (`STRATEGY_ENABLE_FLAGS`)**
   - `mate_in_one` → `True`
   - `repetition_avoidance` → `True` (adds repetition penalties into the heuristic search)
   - `heuristic` → `True`
   - `fallback_random` → `False`
 - **Built-in strategies**
-  1. `MateInOneStrategy` (priority 100, short-circuits) – brute-forces legal replies from the opponent’s perspective to find immediate mates.
+ 1. `MateInOneStrategy` (priority 100, returns a `definitive` result) – brute-forces legal replies from the opponent’s perspective to find immediate mates.
   2. `HeuristicSearchStrategy` (priority 70) – iterative deepening alpha-beta with quiescence, killer/history heuristics, null-move pruning, LMR, aspiration windows, and a transposition table capped by `transposition_table_size`. When repetition avoidance is enabled it penalises root moves that repeat positions to keep analysis moving forward.
   3. `FallbackRandomStrategy` (priority 0) – injected only when the `fallback_random` flag is enabled; ensures a legal move is always produced.
 - **Search budgeting** – `HeuristicSearchStrategy` resolves a time budget each `go` based on explicit time controls or a dynamic heuristic that considers the move count, material, and branching factor. Budgets are clamped between `min_time_limit` (0.25 s) and `max_time_limit` (12 s) with a default `base_time_limit` of 4 s. When `debug on` is active the engine prints per-depth summaries (`depth=`, `nodes`, `time`, principal variation) and reports when a depth is cut short due to time.

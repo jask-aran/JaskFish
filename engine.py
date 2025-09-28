@@ -135,6 +135,7 @@ class StrategyResult:
     score: Optional[float] = None
     confidence: Optional[float] = None
     metadata: Dict[str, object] = field(default_factory=dict)
+    definitive: bool = False
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -309,12 +310,10 @@ class MoveStrategy(ABC):
         name: Optional[str] = None,
         priority: int = 0,
         confidence: Optional[float] = None,
-        short_circuit: bool = True,
     ):
         self.name = name or self.__class__.__name__
         self.priority = priority
         self.confidence = confidence
-        self.short_circuit = short_circuit
 
     @abstractmethod
     def is_applicable(self, context: StrategyContext) -> bool:
@@ -331,7 +330,6 @@ class MoveStrategy(ABC):
         return
 
 
-# Toggle individual strategies by flipping these booleans. The engine will
 # Toggle individual strategies by flipping these booleans.
 STRATEGY_ENABLE_FLAGS = {
     "mate_in_one": True,
@@ -345,13 +343,10 @@ class StrategySelector:
     def __init__(
         self,
         strategies: Optional[Iterable[MoveStrategy]] = None,
-        selection_policy: Optional[Callable[..., Optional[StrategyResult]]] = None,
         logger: Optional[Callable[[str], None]] = None,
     ):
         self._strategies: List[MoveStrategy] = []
         self._logger = logger or (lambda message: None)
-        self._selection_policy = selection_policy or self._default_selection_policy
-        self._uses_default_policy = selection_policy is None
         if strategies:
             for strategy in strategies:
                 self.register_strategy(strategy)
@@ -372,24 +367,18 @@ class StrategySelector:
     def get_strategies(self) -> Tuple[MoveStrategy, ...]:
         return tuple(self._strategies)
 
-    def set_selection_policy(
-        self,
-        policy: Optional[Callable[..., Optional[StrategyResult]]],
-    ) -> None:
-        if policy is None:
-            self._selection_policy = self._default_selection_policy
-            self._uses_default_policy = True
-        else:
-            self._selection_policy = policy
-            self._uses_default_policy = False
-        self._logger("strategy selection policy updated")
-
     def select_move(
         self, board: chess.Board, context: StrategyContext
     ) -> Optional[StrategyResult]:
-        """Evaluate registered strategies and choose a result using the selection policy."""
+        """Evaluate registered strategies and choose the best viable result."""
 
-        strategy_results: List[Tuple[MoveStrategy, StrategyResult]] = []
+        best_result: Optional[StrategyResult] = None
+        best_key: Tuple[float, float, float] = (
+            -float("inf"),
+            -float("inf"),
+            -float("inf"),
+        )
+
         for strategy in self._strategies:
             display_name = getattr(strategy, "log_tag", strategy.name)
             if not strategy.is_applicable(context):
@@ -403,53 +392,26 @@ class StrategySelector:
                 self._logger(f"strategy error in {display_name}: {exc}")
                 continue
 
-            if result is None:
+            if not result or not result.move:
                 self._logger(f"strategy produced no result: {display_name}")
                 continue
 
-            strategy_results.append((strategy, result))
-            if result.move:
-                if strategy.short_circuit:
-                    if self._uses_default_policy:
-                        return result
-                elif self._uses_default_policy:
-                    return result
-
-        if not strategy_results:
-            self._logger("no strategies produced a move suggestion")
-
-        return self._selection_policy(strategy_results, board=board, context=context)
-
-    @staticmethod
-    def _default_selection_policy(
-        strategy_results: List[Tuple[MoveStrategy, StrategyResult]],
-        **_: Any,
-    ) -> Optional[StrategyResult]:
-        for _, result in strategy_results:
-            if result.move:
+            if result.definitive:
+                self._logger(f"strategy produced definitive result: {display_name}")
                 return result
-        return None
 
-    @staticmethod
-    def priority_score_selection_policy(
-        strategy_results: List[Tuple[MoveStrategy, StrategyResult]],
-        **_: Any,
-    ) -> Optional[StrategyResult]:
-        """Pick the result with the highest (priority, score, confidence) tuple."""
-
-        best_result: Optional[StrategyResult] = None
-        best_key: Optional[Tuple[float, float, float]] = None
-        for strategy, result in strategy_results:
-            if not result.move:
-                continue
             score = float(result.score) if result.score is not None else 0.0
             confidence = (
                 float(result.confidence) if result.confidence is not None else 0.0
             )
             key = (float(strategy.priority), score, confidence)
-            if best_key is None or key > best_key:
+            if key > best_key:
                 best_key = key
                 best_result = result
+
+        if not best_result:
+            self._logger("no strategies produced a move suggestion")
+
         return best_result
 
 
@@ -460,7 +422,7 @@ class MateInOneStrategy(MoveStrategy):
         logger: Optional[Callable[[str], None]] = None,
         **kwargs,
     ):
-        super().__init__(priority=100, short_circuit=True, **kwargs)
+        super().__init__(priority=100, **kwargs)
         self.mate_score = mate_score
         self._logger = logger or (lambda *_: None)
 
@@ -483,6 +445,7 @@ class MateInOneStrategy(MoveStrategy):
                     score=self.mate_score,
                     confidence=self.confidence or 1.0,
                     metadata={"pattern": "mate_in_one"},
+                    definitive=True,
                 )
         return None
 
@@ -2030,7 +1993,6 @@ class ChessEngine:
         # Strategy management
         self.strategy_selector = StrategySelector(
             logger=self._log_debug,
-            selection_policy=StrategySelector.priority_score_selection_policy,
         )
         self._register_default_strategies()
         self._apply_meta_configuration(broadcast=False)
@@ -2153,12 +2115,6 @@ class ChessEngine:
 
     def register_strategy(self, strategy: MoveStrategy) -> None:
         self.strategy_selector.register_strategy(strategy)
-
-    def set_selection_policy(
-        self,
-        policy: Optional[Callable[..., Optional[StrategyResult]]],
-    ) -> None:
-        self.strategy_selector.set_selection_policy(policy)
 
     def get_strategy_selector(self) -> StrategySelector:
         return self.strategy_selector
