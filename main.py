@@ -22,8 +22,8 @@ ENGINE_SPECS = {
     },
     "engine2": {
         "number": 2,
-        "default_script": "simple_engine.py",
-        "default_name": "Simple",
+        "default_script": "pvsengine.py",
+        "default_name": "PVS",
         "preferred_color": chess.BLACK,
     },
 }
