@@ -711,7 +711,13 @@ class SearchStats:
         if len(pv) > 5:
             pv_str += "..."
         
-        cuts_str = f"tt:{self.cuts_tt},k:{self.cuts_killer},h:{self.cuts_history},c:{self.cuts_capture}"
+        cuts_str = f"tt:{self.cuts_tt},k:{self.cuts_killer},h:{self.cuts_history},c:{self.cuts_capture},n:{self.cuts_null}"
+        first_cut_pct = int(self.first_move_cut_rate() * 100)
+        
+        # LMR and null stats
+        lmr_str = f"lmr:{self.lmr_applied}/{self.lmr_researched}" if self.lmr_applied > 0 else ""
+        null_str = f"null:{self.null_success}/{self.null_tried}" if self.null_tried > 0 else ""
+        extra_str = " " + " ".join(filter(None, [lmr_str, null_str]))
         
         line = (
             f"perf depth={depth} sel={self.sel_depth} nodes={self.nodes+self.qnodes} "
@@ -719,8 +725,8 @@ class SearchStats:
             f"pv={pv_str} swaps={self.pv_changes} "
             f"fail[L/H]={self.asp_fail_low}/{self.asp_fail_high} "
             f"tt={self.tt_hit_rate()*100:.0f}% cuts({cuts_str}) "
-            f"order[50/90]={self.cutoff_p50()}/{self.cutoff_p90()} "
-            f"q={self.q_ratio()*100:.0f}%"
+            f"order[1st:{first_cut_pct}%,50/90:{self.cutoff_p50()}/{self.cutoff_p90()}] "
+            f"q={self.q_ratio()*100:.0f}%{extra_str}"
         )
         return line
 
@@ -950,8 +956,10 @@ class PVSearchBackend(SearchBackend):
                         alpha_window = iteration_score
                     if iteration_score <= alpha and alpha > -float(_MATE_SCORE):
                         fail_low = True
+                        state.stats.asp_fail_low += 1
                     if any(score >= beta_window for _, score in results) and beta < float(_MATE_SCORE):
                         fail_high = True
+                        state.stats.asp_fail_high += 1
                         for move, score in results:
                             if score >= beta_window and not board.is_capture(move):
                                 state.history.record(move, board.turn, depth)
@@ -978,11 +986,14 @@ class PVSearchBackend(SearchBackend):
                         break
                     if iteration_score <= alpha and alpha > -float(_MATE_SCORE):
                         fail_low = True
+                        state.stats.asp_fail_low += 1
                     if iteration_score >= beta and beta < float(_MATE_SCORE):
                         fail_high = True
+                        state.stats.asp_fail_high += 1
                     
                     # Only continue if there was an aspiration failure that requires re-search
                     if fail_low or fail_high:
+                        state.stats.asp_researches += 1
                         alpha = max(-float(_MATE_SCORE), iteration_score - aspiration)
                         beta = min(float(_MATE_SCORE), iteration_score + aspiration)
                         continue
@@ -992,6 +1003,10 @@ class PVSearchBackend(SearchBackend):
                     beta = min(float(_MATE_SCORE), iteration_score + aspiration)
                     continue
 
+                # Track PV changes
+                if best_move is not None and iteration_best != best_move:
+                    state.stats.pv_changes += 1
+                
                 best_move = iteration_best
                 best_score = iteration_score
                 completed_depth = depth
@@ -1204,21 +1219,27 @@ class PVSearchBackend(SearchBackend):
             return self._quiescence(state, board, alpha, beta, state.tuning.quiescence_depth, ply)
 
         key = polyglot.zobrist_hash(board)
+        state.stats.tt_probes += 1
         tt_entry = state.tt.probe(key)
+        if tt_entry:
+            state.stats.tt_hits += 1
         if tt_entry and tt_entry.depth >= depth:
             if tt_entry.flag == 0:
+                state.stats.tt_exact_hits += 1
                 return tt_entry.value
             if tt_entry.flag == 1:
                 alpha = max(alpha, tt_entry.value)
             else:
                 beta = min(beta, tt_entry.value)
             if alpha >= beta:
+                state.stats.tt_cuts += 1
                 return tt_entry.value
 
         in_check = board.is_check()
         static_eval = tt_entry.static_eval if tt_entry else None
 
         if not in_check and not is_pv and allow_null and depth >= state.tuning.null_min_depth and self._has_material(board):
+            state.stats.null_tried += 1
             board.push(chess.Move.null())
             try:
                 reduction = state.tuning.null_base_reduction + max(0, depth // max(1, state.tuning.null_depth_scale))
@@ -1235,6 +1256,8 @@ class PVSearchBackend(SearchBackend):
             finally:
                 board.pop()
             if score >= beta:
+                state.stats.null_success += 1
+                state.stats.cuts_null += 1
                 state.tt.store(key, depth, score, 1, None, static_eval)
                 return score
 
@@ -1260,9 +1283,12 @@ class PVSearchBackend(SearchBackend):
                 child_is_pv = is_pv and index == 0
                 new_allow_null = allow_null and not is_capture
                 next_depth = depth - 1
+                lmr_applied = False
                 if depth >= state.tuning.lmr_min_depth and index >= state.tuning.lmr_min_index and not child_is_pv and not is_capture and not gives_check and not promotion:
                     reduction = max(1, int((math.log(depth + 1, 2) * math.log(index + 1, 2)) / 1.5))
                     next_depth = max(0, depth - 1 - reduction)
+                    lmr_applied = True
+                    state.stats.lmr_applied += 1
                 if child_is_pv:
                     score = -self._alpha_beta(
                         state,
@@ -1286,6 +1312,8 @@ class PVSearchBackend(SearchBackend):
                         allow_null=new_allow_null,
                     )
                     if score > alpha:
+                        if lmr_applied:
+                            state.stats.lmr_researched += 1
                         score = -self._alpha_beta(
                             state,
                             board,
@@ -1305,6 +1333,27 @@ class PVSearchBackend(SearchBackend):
             if score > alpha:
                 alpha = score
             if alpha >= beta:
+                # Track beta cutoff by type
+                state.stats.total_beta_cuts += 1
+                state.stats.cutoff_indices.append(index)
+                if index == 0:
+                    state.stats.first_move_cuts += 1
+                
+                # Classify cut type
+                if tt_move and move == tt_move:
+                    state.stats.cuts_tt += 1
+                elif state.killers.is_killer(ply, move):
+                    state.stats.cuts_killer += 1
+                elif is_capture:
+                    state.stats.cuts_capture += 1
+                else:
+                    # Check if history heuristic guided this
+                    hist_score = state.history.score(move, color)
+                    if hist_score > 1000:  # Significant history score
+                        state.stats.cuts_history += 1
+                    else:
+                        state.stats.cuts_other += 1
+                
                 if not is_capture:
                     state.record_killer(ply, move)
                     state.history.record(move, color, depth)
@@ -1341,9 +1390,11 @@ class PVSearchBackend(SearchBackend):
     def _quiescence(self, state: _SearchState, board: chess.Board, alpha: float, beta: float, depth: int, ply: int) -> float:
         if state.time_exceeded():
             return alpha
-        state.nodes += 1
+        state.stats.qnodes += 1
+        state.stats.sel_depth = max(state.stats.sel_depth, ply)
         stand_pat = self._evaluate(state, board)
         if stand_pat >= beta:
+            state.stats.q_stand_pat_cuts += 1
             return beta
         if alpha < stand_pat:
             alpha = stand_pat
@@ -1359,6 +1410,7 @@ class PVSearchBackend(SearchBackend):
             finally:
                 board.pop()
             if score >= beta:
+                state.stats.q_cutoffs += 1
                 return beta
             if score > alpha:
                 alpha = score
