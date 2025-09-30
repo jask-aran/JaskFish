@@ -408,12 +408,12 @@ def build_search_tuning(meta: MetaParams) -> Tuple[SearchTuning, SearchLimits]:
     style_tactical = meta.style_tactical
     endgame_focus = meta.endgame_focus
 
-    search_depth = 3 + int(6 * strength * (1.0 - 0.5 * speed_bias))
+    search_depth = 4 + int(8 * strength * (1.0 - 0.5 * speed_bias))  # Increased from 3+6x to 4+8x
     quiescence_depth = 3 + int(6 * strength * (0.5 + 0.5 * stability))
-    base_time = 0.2 + 6.0 * strength * (1.0 - 0.7 * speed_bias)
-    time_alloc = 0.06 + 0.16 * strength * (1.0 - speed_bias)
+    base_time = 0.3 + 8.0 * strength * (1.0 - 0.7 * speed_bias)  # Increased from 0.2+6.0x to 0.3+8.0x
+    time_alloc = 0.08 + 0.20 * strength * (1.0 - speed_bias)  # Increased from 0.06+0.16x to 0.08+0.20x
     min_time = 0.05 + 0.35 * (1.0 - speed_bias)
-    max_time = 1.0 + 30.0 * strength
+    max_time = 2.0 + 40.0 * strength  # Increased from 1.0+30.0x to 2.0+40.0x
     asp_window = 30 + int(120 * (1.0 - stability))
     asp_growth = 1.5 + 1.0 * (1.0 - stability)
     asp_reset = 1 if stability >= 0.7 else 2
@@ -615,6 +615,116 @@ class KillerTable:
 _MATE_SCORE = 100000
 
 
+@dataclass
+class SearchStats:
+    """Comprehensive search statistics for performance monitoring."""
+    # Core counters
+    nodes: int = 0
+    qnodes: int = 0
+    sel_depth: int = 0  # Maximum quiescence depth reached
+    
+    # Transposition table
+    tt_probes: int = 0
+    tt_hits: int = 0
+    tt_exact_hits: int = 0
+    tt_cuts: int = 0
+    
+    # Beta cutoffs by type
+    cuts_tt: int = 0
+    cuts_killer: int = 0
+    cuts_history: int = 0
+    cuts_capture: int = 0
+    cuts_null: int = 0
+    cuts_futility: int = 0
+    cuts_other: int = 0
+    
+    # Aspiration window
+    asp_fail_low: int = 0
+    asp_fail_high: int = 0
+    asp_researches: int = 0
+    
+    # Late move reduction
+    lmr_applied: int = 0
+    lmr_researched: int = 0
+    
+    # Null move
+    null_tried: int = 0
+    null_success: int = 0
+    
+    # Move ordering effectiveness
+    cutoff_indices: List[int] = field(default_factory=list)
+    first_move_cuts: int = 0
+    total_beta_cuts: int = 0
+    root_best_index: int = 0
+    
+    # Per-depth tracking
+    depth_scores: List[float] = field(default_factory=list)
+    depth_nodes: List[int] = field(default_factory=list)
+    depth_times: List[float] = field(default_factory=list)
+    pv_changes: int = 0
+    
+    # Quiescence
+    q_cutoffs: int = 0
+    q_stand_pat_cuts: int = 0
+    
+    # Timing (in seconds)
+    time_order: float = 0.0
+    time_eval: float = 0.0
+    time_qsearch: float = 0.0
+    time_alpha_beta: float = 0.0
+    time_tt_probe: float = 0.0
+    
+    def beta_cut_total(self) -> int:
+        return (self.cuts_tt + self.cuts_killer + self.cuts_history + 
+                self.cuts_capture + self.cuts_null + self.cuts_futility + self.cuts_other)
+    
+    def tt_hit_rate(self) -> float:
+        return self.tt_hits / max(1, self.tt_probes)
+    
+    def q_ratio(self) -> float:
+        total = self.nodes + self.qnodes
+        return self.qnodes / max(1, total)
+    
+    def cutoff_p50(self) -> int:
+        if not self.cutoff_indices:
+            return 0
+        sorted_indices = sorted(self.cutoff_indices)
+        return sorted_indices[len(sorted_indices) // 2]
+    
+    def cutoff_p90(self) -> int:
+        if not self.cutoff_indices:
+            return 0
+        sorted_indices = sorted(self.cutoff_indices)
+        idx = int(len(sorted_indices) * 0.9)
+        return sorted_indices[min(idx, len(sorted_indices) - 1)]
+    
+    def first_move_cut_rate(self) -> float:
+        return self.first_move_cuts / max(1, self.total_beta_cuts)
+    
+    def print_compact_summary(self, depth: int, score: float, pv: List[chess.Move], 
+                             time_used: float, budget: Optional[float]) -> str:
+        """Generate compact one-line performance summary."""
+        nps = int((self.nodes + self.qnodes) / max(0.001, time_used))
+        budget_str = f"{time_used:.2f}/{budget:.2f}s" if budget else f"{time_used:.2f}s"
+        
+        pv_str = " ".join(m.uci() for m in pv[:5])
+        if len(pv) > 5:
+            pv_str += "..."
+        
+        cuts_str = f"tt:{self.cuts_tt},k:{self.cuts_killer},h:{self.cuts_history},c:{self.cuts_capture}"
+        
+        line = (
+            f"perf depth={depth} sel={self.sel_depth} nodes={self.nodes+self.qnodes} "
+            f"nps={nps} time={budget_str} score={score:.1f} "
+            f"pv={pv_str} swaps={self.pv_changes} "
+            f"fail[L/H]={self.asp_fail_low}/{self.asp_fail_high} "
+            f"tt={self.tt_hit_rate()*100:.0f}% cuts({cuts_str}) "
+            f"order[50/90]={self.cutoff_p50()}/{self.cutoff_p90()} "
+            f"q={self.q_ratio()*100:.0f}%"
+        )
+        return line
+
+
 class _SearchState:
     __slots__ = (
         "board",
@@ -628,6 +738,7 @@ class _SearchState:
         "killers",
         "history",
         "nodes",
+        "stats",
         "principal_variation",
         "eval_cache",
         "avoid_repetition",
@@ -662,6 +773,7 @@ class _SearchState:
         self.killers = KillerTable(tuning.search_depth + tuning.quiescence_depth, tuning.killer_slots)
         self.history = HistoryTable(tuning.history_decay)
         self.nodes = 0
+        self.stats = SearchStats()
         self.principal_variation: List[chess.Move] = []
         self.eval_cache: Dict[int, float] = {}
         self.avoid_repetition = meta.avoid_repetition
@@ -756,6 +868,19 @@ class PVSearchBackend(SearchBackend):
             "pv": [mv.uci() for mv in result.principal_variation],
             "tt_hit_rate": state.tt.hits / max(1, state.tt.probes),
         }
+
+        # Log comprehensive performance summary
+        state.stats.nodes = state.nodes
+        state.stats.tt_probes = state.tt.probes
+        state.stats.tt_hits = state.tt.hits
+        summary = state.stats.print_compact_summary(
+            depth=result.completed_depth,
+            score=result.score,
+            pv=list(result.principal_variation),
+            time_used=elapsed,
+            budget=state.budget
+        )
+        reporter.trace(summary)
 
         reporter.perf_summary(
             label="move",
@@ -885,6 +1010,12 @@ class PVSearchBackend(SearchBackend):
                     f"nodes={state.nodes}(+{depth_nodes}) time={depth_elapsed:.2f}s "
                     f"nps={depth_nps} pv={pv_text}"
                 )
+                
+                # Update stats for depth tracking
+                state.stats.nodes = state.nodes
+                state.stats.depth_scores.append(iteration_score)
+                state.stats.depth_nodes.append(state.nodes)
+                state.stats.depth_times.append(depth_elapsed)
                 
                 # Check if we should stop iterating due to budget consumption
                 if state.budget is not None and depth_elapsed >= state.budget * tuning.depth_stop_ratio:
