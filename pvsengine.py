@@ -855,9 +855,12 @@ class PVSearchBackend(SearchBackend):
                         fail_low = True
                     if iteration_score >= beta and beta < float(_MATE_SCORE):
                         fail_high = True
-                    alpha = max(-float(_MATE_SCORE), iteration_score - aspiration)
-                    beta = min(float(_MATE_SCORE), iteration_score + aspiration)
-                    continue
+                    
+                    # Only continue if there was an aspiration failure that requires re-search
+                    if fail_low or fail_high:
+                        alpha = max(-float(_MATE_SCORE), iteration_score - aspiration)
+                        beta = min(float(_MATE_SCORE), iteration_score + aspiration)
+                        continue
                 if iteration_score >= beta and beta < float(_MATE_SCORE):
                     aspiration *= tuning.aspiration_growth
                     alpha = max(-float(_MATE_SCORE), iteration_score - aspiration)
