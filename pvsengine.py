@@ -281,7 +281,7 @@ class SearchLimits:
         self.base_time = base_time
         self.time_factor = time_factor
 
-    def resolve_budget(self, context: StrategyContext) -> Optional[float]:
+    def resolve_budget(self, context: StrategyContext, reporter: Optional["SearchReporter"] = None) -> Optional[float]:
         tc = context.time_controls or {}
         if tc.get("infinite"):
             return None
@@ -322,7 +322,17 @@ class SearchLimits:
         if context.in_check or context.opponent_mate_in_one_threat:
             tension_factor = max(tension_factor, 1.35)
 
-        return self._clamp(self.base_time * complexity_factor * phase_factor * tension_factor)
+        budget = self.base_time * complexity_factor * phase_factor * tension_factor
+        clamped = self._clamp(budget)
+        
+        if reporter:
+            reporter.trace(
+                f"budget calc: complexity={complexity_factor:.2f}({complexity}mv) "
+                f"phase={phase_factor:.2f}({phase}pc) tension={tension_factor:.2f} "
+                f"base={self.base_time:.2f}s raw={budget:.2f}s => {clamped:.2f}s"
+            )
+        
+        return clamped
 
     def _clamp(self, seconds: float) -> float:
         return max(self.min_time, min(self.max_time, seconds))
@@ -1421,7 +1431,7 @@ def run_profile(fen: str, threads: int) -> None:
     board = chess.Board(fen) if fen else chess.Board()
     context = engine._build_context(board, None)
     reporter = SearchReporter(logger=lambda *_: None)
-    budget = limits.resolve_budget(context)
+    budget = limits.resolve_budget(context, reporter)
 
     board_copy = board.copy(stack=True)
 
@@ -1520,14 +1530,14 @@ class HeuristicSearchStrategy(MoveStrategy):
         if context.legal_moves_count == 0:
             return None
 
-        budget = self._limits.resolve_budget(context)
+        reporter = SearchReporter(logger=self._logger)
+        budget = self._limits.resolve_budget(context, reporter)
         budget_desc = "infinite" if budget is None else f"{budget:.2f}s"
         self._logger(
             f"{self.log_tag}: depth={self._tuning.search_depth} budget={budget_desc} moves={context.legal_moves_count}"
         )
 
         board_copy = board.copy(stack=True)
-        reporter = SearchReporter(logger=self._logger)
         outcome = self._backend.search(board_copy, context, self._limits, reporter, budget)
         if not outcome.move:
             self._logger(f"{self.log_tag}: backend returned no move")
