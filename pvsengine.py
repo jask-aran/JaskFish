@@ -1339,20 +1339,21 @@ class PVSearchBackend(SearchBackend):
                 if index == 0:
                     state.stats.first_move_cuts += 1
                 
-                # Classify cut type
+                # Classify cut type (priority order: TT > killer > history > capture > other)
                 if tt_move and move == tt_move:
                     state.stats.cuts_tt += 1
                 elif state.killers.is_killer(ply, move):
                     state.stats.cuts_killer += 1
-                elif is_capture:
-                    state.stats.cuts_capture += 1
-                else:
-                    # Check if history heuristic guided this
+                elif not is_capture:
+                    # Check if history heuristic guided this quiet move
                     hist_score = state.history.score(move, color)
-                    if hist_score > 1000:  # Significant history score
+                    if hist_score >= 10.0:  # Lowered threshold - depth 3+ records are 9+
                         state.stats.cuts_history += 1
                     else:
                         state.stats.cuts_other += 1
+                else:
+                    # Capture move caused cutoff
+                    state.stats.cuts_capture += 1
                 
                 if not is_capture:
                     state.record_killer(ply, move)
