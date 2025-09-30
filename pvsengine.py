@@ -666,6 +666,8 @@ class SearchStats:
     # Quiescence
     q_cutoffs: int = 0
     q_stand_pat_cuts: int = 0
+    q_delta_prunes: int = 0
+    q_see_prunes: int = 0
     
     # Timing (in seconds)
     time_order: float = 0.0
@@ -703,30 +705,70 @@ class SearchStats:
     
     def print_compact_summary(self, depth: int, score: float, pv: List[chess.Move], 
                              time_used: float, budget: Optional[float]) -> str:
-        """Generate compact one-line performance summary."""
-        nps = int((self.nodes + self.qnodes) / max(0.001, time_used))
+        """Generate comprehensive performance summary with clear node breakdown."""
+        total_nodes = self.nodes + self.qnodes
+        nps = int(total_nodes / max(0.001, time_used))
         budget_str = f"{time_used:.2f}/{budget:.2f}s" if budget else f"{time_used:.2f}s"
         
+        # PV and score stability
         pv_str = " ".join(m.uci() for m in pv[:5])
         if len(pv) > 5:
             pv_str += "..."
+        score_delta = 0.0
+        if len(self.depth_scores) >= 2:
+            score_delta = self.depth_scores[-1] - self.depth_scores[-2]
         
-        cuts_str = f"tt:{self.cuts_tt},k:{self.cuts_killer},h:{self.cuts_history},c:{self.cuts_capture},n:{self.cuts_null}"
+        # Node breakdown: regular vs quiescence
+        q_pct = int(self.q_ratio() * 100)
+        nodes_str = f"{total_nodes}(r:{self.nodes},q:{self.qnodes})"
+        
+        # TT stats
+        tt_hit_pct = int(self.tt_hit_rate() * 100)
+        tt_cut_pct = int(self.tt_cuts / max(1, self.total_beta_cuts) * 100) if self.total_beta_cuts > 0 else 0
+        
+        # Cut breakdown with percentages
+        total_cuts = self.beta_cut_total()
+        if total_cuts > 0:
+            cuts_str = (f"tt:{self.cuts_tt}({int(self.cuts_tt/total_cuts*100)}%) "
+                       f"k:{self.cuts_killer}({int(self.cuts_killer/total_cuts*100)}%) "
+                       f"h:{self.cuts_history} c:{self.cuts_capture} n:{self.cuts_null}")
+        else:
+            cuts_str = "tt:0 k:0 h:0 c:0 n:0"
+        
+        # Move ordering quality
         first_cut_pct = int(self.first_move_cut_rate() * 100)
         
-        # LMR and null stats
-        lmr_str = f"lmr:{self.lmr_applied}/{self.lmr_researched}" if self.lmr_applied > 0 else ""
-        null_str = f"null:{self.null_success}/{self.null_tried}" if self.null_tried > 0 else ""
-        extra_str = " " + " ".join(filter(None, [lmr_str, null_str]))
+        # LMR effectiveness
+        lmr_str = ""
+        if self.lmr_applied > 0:
+            lmr_success_pct = int((1 - self.lmr_researched / self.lmr_applied) * 100)
+            lmr_str = f" lmr:{self.lmr_applied}/{self.lmr_researched}({lmr_success_pct}%ok)"
+        
+        # Null move effectiveness
+        null_str = ""
+        if self.null_tried > 0:
+            null_success_pct = int(self.null_success / self.null_tried * 100)
+            null_str = f" null:{self.null_success}/{self.null_tried}({null_success_pct}%)"
+        
+        # Aspiration window health
+        asp_str = f"fail[L/H]={self.asp_fail_low}/{self.asp_fail_high}"
+        if self.asp_researches > 0:
+            asp_str += f"(re:{self.asp_researches})"
+        
+        # Quiescence pruning effectiveness
+        q_str = f"q={q_pct}%"
+        if self.qnodes > 0:
+            total_q_prunes = self.q_delta_prunes + self.q_see_prunes
+            if total_q_prunes > 0:
+                prune_pct = int(total_q_prunes / self.qnodes * 100)
+                q_str += f"(Δ:{self.q_delta_prunes} SEE:{self.q_see_prunes} {prune_pct}%pruned)"
         
         line = (
-            f"perf depth={depth} sel={self.sel_depth} nodes={self.nodes+self.qnodes} "
-            f"nps={nps} time={budget_str} score={score:.1f} "
-            f"pv={pv_str} swaps={self.pv_changes} "
-            f"fail[L/H]={self.asp_fail_low}/{self.asp_fail_high} "
-            f"tt={self.tt_hit_rate()*100:.0f}% cuts({cuts_str}) "
-            f"order[1st:{first_cut_pct}%,50/90:{self.cutoff_p50()}/{self.cutoff_p90()}] "
-            f"q={self.q_ratio()*100:.0f}%{extra_str}"
+            f"perf d={depth} sel={self.sel_depth} nodes={nodes_str} nps={nps} time={budget_str} | "
+            f"score={score:.1f}(Δ{score_delta:+.1f}) pv={pv_str} swaps={self.pv_changes} | "
+            f"tt={tt_hit_pct}%/cut:{tt_cut_pct}% {asp_str} | "
+            f"cuts[{cuts_str}] order:1st={first_cut_pct}% | "
+            f"{q_str}{lmr_str}{null_str}"
         )
         return line
 
@@ -875,7 +917,7 @@ class PVSearchBackend(SearchBackend):
             "tt_hit_rate": state.tt.hits / max(1, state.tt.probes),
         }
 
-        # Log comprehensive performance summary
+        # Log comprehensive performance summary (single consolidated line)
         state.stats.nodes = state.nodes
         state.stats.tt_probes = state.tt.probes
         state.stats.tt_hits = state.tt.hits
@@ -887,15 +929,6 @@ class PVSearchBackend(SearchBackend):
             budget=state.budget
         )
         reporter.trace(summary)
-
-        reporter.perf_summary(
-            label="move",
-            depth=result.completed_depth,
-            nodes=state.nodes,
-            time_spent=elapsed,
-            select_time=0.0,
-            timing_breakdown=None,
-        )
 
         return SearchOutcome(
             move=result.move,
@@ -1402,9 +1435,31 @@ class PVSearchBackend(SearchBackend):
         if depth <= 0:
             return stand_pat
 
+        # Delta pruning margin: queen value + safety buffer
+        delta_margin = 975.0  # Queen (900) + margin (75)
+        
         for move in self._generate_qmoves(board):
             if state.time_exceeded():
                 break
+            
+            # Delta pruning: Skip captures that can't possibly raise alpha
+            if board.is_capture(move):
+                captured_piece = board.piece_at(move.to_square)
+                if captured_piece:
+                    captured_value = EVAL_PIECE_VALUES.get(captured_piece.piece_type, 0)
+                    # Add promotion value if applicable
+                    promotion_value = EVAL_PIECE_VALUES.get(move.promotion, 0) if move.promotion else 0
+                    # Even with this capture + promotion, can't raise alpha
+                    if stand_pat + captured_value + promotion_value + delta_margin < alpha:
+                        state.stats.q_delta_prunes += 1
+                        continue
+            
+            # SEE pruning: Skip bad captures (losing material)
+            see_score = self._see(board, move)
+            if see_score < -50:  # Losing more than half a pawn
+                state.stats.q_see_prunes += 1
+                continue
+            
             board.push(move)
             try:
                 score = -self._quiescence(state, board, -beta, -alpha, depth - 1, ply + 1)
@@ -1905,9 +1960,9 @@ class ChessEngine:
             else:
                 self._log_debug("no strategy produced a move")
 
-            if nodes is not None and search_time is not None:
-                SearchReporter(logger=self._log_debug).perf_summary("move", depth, nodes, search_time, select_time, timers)
-            else:
+            # Performance summary already printed by search backend
+            # Just print select time if no search was performed
+            if nodes is None or search_time is None:
                 print(f"info string perf select={select_time:.3f}s")
 
             with self.state_lock:
