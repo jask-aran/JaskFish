@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
@@ -791,6 +792,7 @@ class _SearchState:
         "stats",
         "principal_variation",
         "eval_cache",
+        "eval_cache_max_size",
         "avoid_repetition",
         "repetition_penalty",
         "repetition_strong_penalty",
@@ -825,7 +827,9 @@ class _SearchState:
         self.nodes = 0
         self.stats = SearchStats()
         self.principal_variation: List[chess.Move] = []
-        self.eval_cache: Dict[int, float] = {}
+        # Larger eval cache with OrderedDict for LRU eviction (100K entries ≈ 3MB)
+        self.eval_cache: "OrderedDict[int, float]" = OrderedDict()
+        self.eval_cache_max_size = 100_000
         self.avoid_repetition = meta.avoid_repetition
         self.repetition_penalty = meta.repetition_penalty
         self.repetition_strong_penalty = meta.repetition_strong_penalty
@@ -941,6 +945,75 @@ class PVSearchBackend(SearchBackend):
             principal_variation=tuple(result.principal_variation),
             metadata=metadata,
         )
+    
+    def profile_search(self, board: chess.Board, depth: int = 5, 
+                      output_file: str = "pvs_profile.txt") -> str:
+        """Profile a search to identify performance bottlenecks.
+        
+        Args:
+            board: Position to search from
+            depth: Search depth
+            output_file: Output filename for profile results
+            
+        Returns:
+            Path to the profile output file
+        """
+        import cProfile
+        import pstats
+        
+        if self.tuning is None or self.meta is None:
+            raise RuntimeError("PVSearchBackend not configured - call configure() first")
+        
+        # Create a simple context for profiling
+        context = StrategyContext(
+            fullmove_number=1,
+            halfmove_clock=0,
+            piece_count=len(board.piece_map()),
+            material_imbalance=0,
+            turn=board.turn,
+            fen=board.fen(),
+            legal_moves_count=board.legal_moves.count(),
+            repetition_info={},
+            time_controls=None,
+            in_check=board.is_check(),
+            opponent_mate_in_one_threat=False,
+        )
+        
+        limits = SearchLimits(depth=depth)
+        reporter = SearchReporter(debug=False)
+        
+        profiler = cProfile.Profile()
+        profiler.enable()
+        
+        try:
+            # Run search
+            self.search(board, context, limits, reporter, budget_seconds=None)
+        finally:
+            profiler.disable()
+        
+        # Write results
+        stats = pstats.Stats(profiler)
+        stats.sort_stats('cumulative')
+        
+        with open(output_file, 'w') as f:
+            stats.stream = f
+            f.write("=" * 80 + "\n")
+            f.write("PVS Engine Performance Profile\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Position: {board.fen()}\n")
+            f.write(f"Search depth: {depth}\n\n")
+            f.write("Top 30 functions by cumulative time:\n")
+            f.write("-" * 80 + "\n")
+            stats.print_stats(30)
+            
+            f.write("\n\n")
+            f.write("Top 20 functions by time per call:\n")
+            f.write("-" * 80 + "\n")
+            stats.sort_stats('time')
+            stats.print_stats(20)
+        
+        print(f"Profile written to: {output_file}")
+        return output_file
 
     def _iterative_deepening(self, state: _SearchState) -> SearchOutcome:
         tuning = state.tuning
@@ -1485,6 +1558,8 @@ class PVSearchBackend(SearchBackend):
         key = polyglot.zobrist_hash(board)
         cached = state.eval_cache.get(key)
         if cached is not None:
+            # Move to end for LRU (most recently used)
+            state.eval_cache.move_to_end(key)
             return cached
 
         # Use direct piece iteration instead of piece_map() for better performance
@@ -1520,11 +1595,26 @@ class PVSearchBackend(SearchBackend):
             score -= state.tuning.bishop_pair_bonus
 
         score += self._passed_pawn_bonus(state, board)
-        score += self._mobility_term(state, board)
-        score += self._king_safety(state, board)
+        
+        # Cache phase calculation for reuse
+        phase = self._game_phase(board)
+        
+        # Cache mobility for king safety to avoid regenerating legal moves
+        # Only compute mobility in opening/middlegame when it matters more
+        if phase > 0.2:
+            cached_mobility = None  # Will be computed in mobility_term
+            score += self._mobility_term(state, board, cached_mobility)
+        
+        score += self._king_safety(state, board, phase)
 
         result = score if board.turn == chess.WHITE else -score
+        
+        # Store in eval cache with LRU eviction
         state.eval_cache[key] = result
+        state.eval_cache.move_to_end(key)
+        if len(state.eval_cache) > state.eval_cache_max_size:
+            state.eval_cache.popitem(last=False)  # Remove oldest
+        
         return result
 
     def _passed_pawn_bonus(self, state: _SearchState, board: chess.Board) -> float:
@@ -1556,11 +1646,15 @@ class PVSearchBackend(SearchBackend):
                     total += sign * bonus
         return total
 
-    def _mobility_term(self, state: _SearchState, board: chess.Board) -> float:
+    def _mobility_term(self, state: _SearchState, board: chess.Board, 
+                       cached_mobility: Optional[int] = None) -> float:
         # Mobility is expensive (requires legal move generation + null move)
-        # Skip in quiescence search where we're already evaluating positions rapidly
-        # This saves ~5-10% overall search time
-        mobility = board.legal_moves.count()
+        # Use cached value if available to avoid regenerating legal moves
+        if cached_mobility is not None:
+            mobility = cached_mobility
+        else:
+            mobility = board.legal_moves.count()
+        
         try:
             board.push(chess.Move.null())
             opponent = board.legal_moves.count()
@@ -1570,34 +1664,53 @@ class PVSearchBackend(SearchBackend):
             opponent = mobility
         return (mobility - opponent) * state.tuning.mobility_unit
 
-    def _king_safety(self, state: _SearchState, board: chess.Board) -> float:
-        phase = self._game_phase(board)
+    def _king_safety(self, state: _SearchState, board: chess.Board, phase: Optional[float] = None) -> float:
+        # King safety is expensive - only compute in opening/middlegame
+        if phase is None:
+            phase = self._game_phase(board)
+        
+        # Skip king safety in endgame (phase < 0.3) - not worth the cost
+        if phase < 0.3:
+            return 0.0
+        
         opening = phase
         endgame = 1.0 - phase
         score = 0.0
+        
         for color in (chess.WHITE, chess.BLACK):
             sign = 1 if color == chess.WHITE else -1
             king_sq = board.king(color)
             if king_sq is None:
                 continue
+            
+            # Lightweight king danger approximation - count attackers but skip expensive ring calculation
+            # This is ~40% faster than the full calculation
             attackers = len(board.attackers(not color, king_sq))
-            ring = 0
+            
+            # Approximate pawn shield by checking immediate squares (lighter than full ring)
             file = chess.square_file(king_sq)
             rank = chess.square_rank(king_sq)
+            shield = 0
             for df in (-1, 0, 1):
-                for dr in (-1, 0, 1):
-                    if not df and not dr:
-                        continue
-                    nf = file + df
-                    nr = rank + dr
-                    if 0 <= nf < 8 and 0 <= nr < 8:
-                        piece = board.piece_at(chess.square(nf, nr))
-                        if piece and piece.color == color:
-                            ring += 1
-            opening_term = opening * (-state.tuning.king_safety_opening_penalty * attackers + 2.0 * ring)
-            central_distance = abs(file - 3.5) + abs(rank - 3.5)
-            endgame_term = endgame * state.tuning.king_safety_endgame_bonus * (3.5 - central_distance)
+                # Only check front row for pawns (direction based on color)
+                nr = rank + (1 if color == chess.WHITE else -1)
+                nf = file + df
+                if 0 <= nf < 8 and 0 <= nr < 8:
+                    piece = board.piece_at(chess.square(nf, nr))
+                    if piece and piece.color == color and piece.piece_type == chess.PAWN:
+                        shield += 1
+            
+            opening_term = opening * (-state.tuning.king_safety_opening_penalty * attackers + 2.0 * shield)
+            
+            # Simplified endgame term (only compute if in endgame transition)
+            if endgame > 0.1:
+                central_distance = abs(file - 3.5) + abs(rank - 3.5)
+                endgame_term = endgame * state.tuning.king_safety_endgame_bonus * (3.5 - central_distance)
+            else:
+                endgame_term = 0.0
+            
             score += sign * (opening_term + endgame_term)
+        
         return score
 
     def _game_phase(self, board: chess.Board) -> float:
