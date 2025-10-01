@@ -559,8 +559,13 @@ class HeuristicSearchStrategy(MoveStrategy):
             "q_nodes": 0,
             "q_cutoffs": 0,
             "q_moves_considered": 0,
+            "q_delta_prunes": 0,
+            "q_see_prunes": 0,
             "history_updates": 0,
             "killer_updates": 0,
+            "sel_depth": 0,
+            "first_move_cuts": 0,
+            "total_beta_cuts": 0,
         }
         self._decision_stats = stats
         return stats
@@ -781,6 +786,132 @@ class HeuristicSearchStrategy(MoveStrategy):
             f"q={qsearch.get('nodes', 0)}({q_ratio_pct:.0f}%) cut={qsearch.get('cutoffs', 0)}"
         )
         print(line_quality)
+
+    def _emit_consolidated_perf(
+        self,
+        depth: int,
+        score: float,
+        stats: Dict[str, Any],
+        budget: Optional[float],
+        time_used: float,
+        depth_nodes: int,
+        depth_time: float,
+    ) -> None:
+        """Emit concise one-line performance summary per depth (like PVS engine)."""
+        total_nodes = self._nodes_visited
+        depth_nps = int(depth_nodes / depth_time) if depth_time > 1e-6 else 0
+        
+        # PV - show first 5 moves
+        pv = self._principal_variation[:5]
+        pv_str = " ".join(m.uci() for m in pv) if pv else "-"
+        
+        # Concise one-line format matching pvsengine.py style
+        self._logger(
+            f"HS: depth={depth} score={score:.1f} "
+            f"nodes={total_nodes}(+{depth_nodes}) time={depth_time:.2f}s "
+            f"nps={depth_nps} pv={pv_str}"
+        )
+
+    def _emit_final_perf_summary(
+        self,
+        depth: int,
+        score: float,
+        stats: Dict[str, Any],
+        budget: Optional[float],
+        time_used: float,
+    ) -> None:
+        """Emit comprehensive performance summary at end of search (like PVS engine)."""
+        total_nodes = self._nodes_visited
+        q_nodes = stats.get("q_nodes", 0)
+        r_nodes = total_nodes - q_nodes
+        sel_depth = stats.get("sel_depth", 0)
+        nps = int(total_nodes / max(0.001, time_used))
+        
+        # Budget string
+        budget_str = f"{time_used:.2f}/{budget:.2f}s" if budget else f"{time_used:.2f}s"
+        
+        # PV and score stability
+        pv = self._principal_variation[:5]
+        pv_str = " ".join(m.uci() for m in pv) if pv else "-"
+        
+        root_scores = stats.get("root_scores", [])
+        score_delta = root_scores[-1] - root_scores[0] if len(root_scores) >= 2 else 0.0
+        pv_swaps = stats.get("pv_swaps", 0)
+        
+        # TT stats
+        tt_probes = stats.get("tt_probes", 0)
+        tt_hits = stats.get("tt_exact", 0) + stats.get("tt_lower", 0) + stats.get("tt_upper", 0)
+        tt_hit_pct = int(tt_hits / max(1, tt_probes) * 100)
+        total_beta_cuts = stats.get("total_beta_cuts", 0)
+        tt_cuts = stats.get("beta_cutoffs", {}).get("tt", 0)
+        tt_cut_pct = int(tt_cuts / max(1, total_beta_cuts) * 100) if total_beta_cuts > 0 else 0
+        
+        # Aspiration
+        asp_fl = stats.get("asp_fail_low", 0)
+        asp_fh = stats.get("asp_fail_high", 0)
+        asp_resets = stats.get("asp_resets", 0)
+        asp_str = f"fail[L/H]={asp_fl}/{asp_fh}"
+        if asp_resets > 0:
+            asp_str += f"(re:{asp_resets})"
+        
+        # Cutoff breakdown with percentages
+        cutoffs = stats.get("beta_cutoffs", {})
+        if total_beta_cuts > 0:
+            # Top 4 cutoff sources
+            top_cuts = sorted(cutoffs.items(), key=lambda x: x[1], reverse=True)[:4]
+            cuts_parts = []
+            for k, v in top_cuts:
+                if v > 0:
+                    pct = int(v / total_beta_cuts * 100)
+                    cuts_parts.append(f"{k}:{v}({pct}%)")
+            # Also include any remaining significant ones
+            for k, v in cutoffs.items():
+                if k not in [x[0] for x in top_cuts] and v > 0:
+                    cuts_parts.append(f"{k}:{v}")
+            cuts_str = " ".join(cuts_parts[:6])  # Limit to 6 total
+        else:
+            cuts_str = "-"
+        
+        # Move ordering
+        first_cuts = stats.get("first_move_cuts", 0)
+        first_cut_pct = int(first_cuts / max(1, total_beta_cuts) * 100)
+        
+        # Quiescence stats
+        q_ratio_pct = int(q_nodes / max(1, total_nodes) * 100)
+        q_delta_prunes = stats.get("q_delta_prunes", 0)
+        q_see_prunes = stats.get("q_see_prunes", 0)
+        total_q_prunes = q_delta_prunes + q_see_prunes
+        q_prune_pct = int(total_q_prunes / max(1, q_nodes) * 100) if q_nodes > 0 else 0
+        q_str = f"q={q_ratio_pct}%"
+        if total_q_prunes > 0:
+            q_str += f"(Δ:{q_delta_prunes} SEE:{q_see_prunes} {q_prune_pct}%pruned)"
+        
+        # LMR effectiveness
+        lmr_applied = stats.get("lmr_applied", 0)
+        lmr_research = stats.get("lmr_research", 0)
+        lmr_str = ""
+        if lmr_applied > 0:
+            lmr_ok_pct = int((1 - lmr_research / lmr_applied) * 100)
+            lmr_str = f" lmr:{lmr_applied}/{lmr_research}({lmr_ok_pct}%ok)"
+        
+        # Null move effectiveness
+        null_tried = stats.get("null_tried", 0)
+        null_success = stats.get("null_success", 0)
+        null_str = ""
+        if null_tried > 0:
+            null_pct = int(null_success / null_tried * 100)
+            null_str = f" null:{null_success}/{null_tried}({null_pct}%)"
+        
+        # Comprehensive final summary line
+        line = (
+            f"perf d={depth} sel={sel_depth} nodes={total_nodes}(r:{r_nodes},q:{q_nodes}) "
+            f"nps={nps} time={budget_str} | "
+            f"score={score:.1f}(Δ{score_delta:+.1f}) pv={pv_str} swaps={pv_swaps} | "
+            f"tt={tt_hit_pct}%/cut:{tt_cut_pct}% {asp_str} | "
+            f"cuts[{cuts_str}] order:1st={first_cut_pct}% | "
+            f"{q_str}{lmr_str}{null_str}"
+        )
+        self._logger(line)
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -1034,32 +1165,16 @@ class HeuristicSearchStrategy(MoveStrategy):
 
                     depth_time = time.perf_counter() - depth_start_time
                     depth_nodes = self._nodes_visited - depth_start_nodes
-                    pv_line = " ".join(
-                        move.uci() for move in self._principal_variation
-                    )
-                    nps = int(depth_nodes / depth_time) if depth_time > 0 else 0
-                    alpha_delta_ms = (
-                        timing_totals["alpha_beta"] - alpha_start_ns
-                    ) / 1_000_000
-                    order_delta_ms = (
-                        timing_totals["order_moves"] - order_start_ns
-                    ) / 1_000_000
-                    eval_delta_ms = (
-                        timing_totals["evaluate"] - eval_start_ns
-                    ) / 1_000_000
-                    q_delta_ms = (
-                        timing_totals["quiescence"] - q_start_ns
-                    ) / 1_000_000
-                    perf_line = (
-                        f"perf nps={nps} best_index={iteration_best_index} "
-                        f"alpha_ms={alpha_delta_ms:.3f} order_ms={order_delta_ms:.3f} "
-                        f"eval_ms={eval_delta_ms:.3f} q_ms={q_delta_ms:.3f}"
-                    )
-                    self._logger(
-                        f"{self._log_tag}: depth={current_depth} "
-                        f"score={iteration_best_score:.1f} nodes={self._nodes_visited} "
-                        f"(+{depth_nodes}) time={depth_time:.2f}s "
-                        f"pv={pv_line or iteration_best_move.uci()}\n{perf_line}"
+                    
+                    # Emit one-line performance summary for this depth
+                    self._emit_consolidated_perf(
+                        depth=current_depth,
+                        score=iteration_best_score,
+                        stats=stats,
+                        budget=time_budget,
+                        time_used=time.perf_counter() - self._search_start_time,
+                        depth_nodes=depth_nodes,
+                        depth_time=depth_time,
                     )
 
                     if self._search_deadline is not None:
@@ -1097,33 +1212,29 @@ class HeuristicSearchStrategy(MoveStrategy):
             self._decision_stats = None
             return None
 
+        # Emit comprehensive final performance summary
+        self._emit_final_perf_summary(
+            depth=completed_depth,
+            score=best_score,
+            stats=stats,
+            budget=time_budget,
+            time_used=search_time,
+        )
+        
+        # Simple completion message
         self._logger(
             f"{self._log_tag}: completed depth={completed_depth} score={best_score:.1f} "
-            f"best={best_move.uci()} nodes={self._nodes_visited} time={search_time:.2f}s "
-            f"interrupted={search_interrupted} capped={capped_by_budget}"
+            f"nodes={self._nodes_visited} time={search_time:.2f}s"
         )
 
+        # Build analysis summary for metadata, but skip old-style triple-line reporting
+        # since we now emit consolidated perf lines per depth
         timing_totals_sec: Optional[Dict[str, float]] = None
         analysis_summary: Optional[Dict[str, Any]] = None
         if self._timing_totals:
             timing_totals_sec = {
                 key: value / NSEC_PER_SEC for key, value in self._timing_totals.items()
             }
-            nps_total = int(self._nodes_visited / search_time) if search_time else 0
-            summary_segments = [
-                f"info string perf summary depth={completed_depth}",
-                f"nodes={self._nodes_visited}",
-                f"time={search_time:.3f}s",
-                f"nps={nps_total}",
-            ]
-            timer_parts = [
-                f"{key.split('_')[0]}={timing_totals_sec[key]:.3f}s"
-                for key in ("alpha_beta", "order_moves", "evaluate", "quiescence")
-                if key in timing_totals_sec
-            ]
-            if timer_parts:
-                summary_segments.append("timers=" + ",".join(timer_parts))
-            print(" ".join(summary_segments))
             analysis_summary = self._build_analysis_summary(
                 stats,
                 completed_depth,
@@ -1133,8 +1244,10 @@ class HeuristicSearchStrategy(MoveStrategy):
                 capped_by_budget,
                 timing_totals_sec,
             )
-            if analysis_summary is not None:
-                self._emit_analysis_summary(analysis_summary)
+            # Optionally emit old-style detailed analysis for deeper inspection
+            # (disabled by default to match PVS clean output)
+            # if analysis_summary is not None:
+            #     self._emit_analysis_summary(analysis_summary)
 
         repetition_penalty = 0.0
         if self.avoid_repetition and best_move is not None:
@@ -1458,13 +1571,16 @@ class HeuristicSearchStrategy(MoveStrategy):
                         self._record_killer(ply, move)
                         self._record_history(color, move, depth)
                     if stats is not None:
+                        stats["total_beta_cuts"] += 1
+                        if move_index == 0:
+                            stats["first_move_cuts"] += 1
                         if was_tt_move:
                             category = "tt"
                         elif is_capture:
                             category = "capture"
                         elif was_killer:
                             category = "killer"
-                        elif history_score > 0:
+                        elif history_score >= 10.0:
                             category = "history"
                         elif gives_check:
                             category = "check"
@@ -1518,6 +1634,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             stats = self._decision_stats
             if stats is not None:
                 stats["q_nodes"] += 1
+                stats["sel_depth"] = max(stats["sel_depth"], ply)
             if self._time_exceeded():
                 raise _SearchTimeout()
 
@@ -2302,39 +2419,6 @@ class ChessEngine:
             else:
                 if self.debug:
                     self._log_debug("no strategy produced a move")
-
-            nodes = metadata.get("nodes") if metadata else None
-            search_time = metadata.get("time") if metadata else None
-            depth = metadata.get("depth") if metadata else None
-            timing_breakdown = metadata.get("timing") if metadata else None
-
-            if search_time is not None and nodes is not None:
-                nps_total = int(nodes / search_time) if search_time else 0
-                depth_display = depth if depth is not None else "-"
-                perf_segments = [
-                    f"info string perf move depth={depth_display}",
-                    f"nodes={nodes}",
-                    f"time={search_time:.3f}s",
-                    f"nps={nps_total}",
-                    f"select={selection_elapsed:.3f}s",
-                ]
-                if isinstance(timing_breakdown, dict):
-                    ordered_keys = [
-                        "alpha_beta",
-                        "order_moves",
-                        "evaluate",
-                        "quiescence",
-                    ]
-                    timer_parts = [
-                        f"{key.split('_')[0]}={timing_breakdown[key]:.3f}s"
-                        for key in ordered_keys
-                        if key in timing_breakdown
-                    ]
-                    if timer_parts:
-                        perf_segments.append("timers=" + ",".join(timer_parts))
-                print(" ".join(perf_segments))
-            else:
-                print(f"info string perf select={selection_elapsed:.3f}s")
 
             with self.state_lock:
                 if move:

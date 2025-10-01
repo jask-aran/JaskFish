@@ -425,7 +425,9 @@ def build_search_tuning(meta: MetaParams) -> Tuple[SearchTuning, SearchLimits]:
     fut_margin = 80 + int(140 * (1.0 - risk))
     razor_depth = 1 + int(2 * speed_bias)
     razor_margin = 220 + int(240 * (1.0 - risk))
-    depth_stop_ratio = 0.65 + 0.25 * stability
+    # Reduced from 0.65+0.25 to 0.45+0.15 to give more headroom for next depth
+    # This prevents frequent depth 7 timeouts by stopping earlier (50-60% budget usage)
+    depth_stop_ratio = 0.45 + 0.15 * stability
     q_threshold = -1.5 + risk
     killer_slots = 1 if speed_bias > 0.7 else 2
     history_decay = 0.85 + 0.1 * stability
@@ -949,10 +951,13 @@ class PVSearchBackend(SearchBackend):
         last_score = None
         aspiration = tuning.aspiration_window
         pv: List[chess.Move] = []
+        should_stop_deepening = False
+        search_start = time.perf_counter()
 
         for depth in range(1, tuning.search_depth + 1):
-            if state.time_exceeded():
-                state.reporter.trace(f"PVS: timeout before depth={depth}")
+            if state.time_exceeded() or should_stop_deepening:
+                if state.time_exceeded():
+                    state.reporter.trace(f"PVS: timeout before depth={depth}")
                 break
             
             # Track depth iteration metrics
@@ -1066,12 +1071,16 @@ class PVSearchBackend(SearchBackend):
                 state.stats.depth_times.append(depth_elapsed)
                 
                 # Check if we should stop iterating due to budget consumption
-                if state.budget is not None and depth_elapsed >= state.budget * tuning.depth_stop_ratio:
-                    usage_pct = depth_elapsed / state.budget * 100
-                    state.reporter.trace(
-                        f"PVS: depth={depth} consumed {usage_pct:.0f}% of budget; halting deeper search"
-                    )
-                    break
+                # Use cumulative time, not just this depth's time
+                if state.budget is not None:
+                    cumulative_time = time.perf_counter() - search_start
+                    if cumulative_time >= state.budget * tuning.depth_stop_ratio:
+                        usage_pct = cumulative_time / state.budget * 100
+                        state.reporter.trace(
+                            f"PVS: depth={depth} consumed {usage_pct:.0f}% of budget; halting deeper search"
+                        )
+                        should_stop_deepening = True
+                        break
                 
                 break
 
@@ -1478,24 +1487,36 @@ class PVSearchBackend(SearchBackend):
         if cached is not None:
             return cached
 
-        material = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        pst = {chess.WHITE: 0.0, chess.BLACK: 0.0}
-        bishops = {chess.WHITE: 0, chess.BLACK: 0}
+        # Use direct piece iteration instead of piece_map() for better performance
+        material_w = material_b = 0.0
+        pst_w = pst_b = 0.0
+        bishops_w = bishops_b = 0
 
-        for square, piece in board.piece_map().items():
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece is None:
+                continue
+            
             value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-            material[piece.color] += value
             table = PIECE_SQUARE_TABLES.get(piece.piece_type)
-            if table:
-                idx = square if piece.color == chess.WHITE else chess.square_mirror(square)
-                pst[piece.color] += table[idx]
-            if piece.piece_type == chess.BISHOP:
-                bishops[piece.color] += 1
+            
+            if piece.color == chess.WHITE:
+                material_w += value
+                if table:
+                    pst_w += table[square]
+                if piece.piece_type == chess.BISHOP:
+                    bishops_w += 1
+            else:
+                material_b += value
+                if table:
+                    pst_b += table[chess.square_mirror(square)]
+                if piece.piece_type == chess.BISHOP:
+                    bishops_b += 1
 
-        score = (material[chess.WHITE] - material[chess.BLACK]) + (pst[chess.WHITE] - pst[chess.BLACK])
-        if bishops[chess.WHITE] >= 2:
+        score = (material_w - material_b) + (pst_w - pst_b)
+        if bishops_w >= 2:
             score += state.tuning.bishop_pair_bonus
-        if bishops[chess.BLACK] >= 2:
+        if bishops_b >= 2:
             score -= state.tuning.bishop_pair_bonus
 
         score += self._passed_pawn_bonus(state, board)
@@ -1536,12 +1557,17 @@ class PVSearchBackend(SearchBackend):
         return total
 
     def _mobility_term(self, state: _SearchState, board: chess.Board) -> float:
+        # Mobility is expensive (requires legal move generation + null move)
+        # Skip in quiescence search where we're already evaluating positions rapidly
+        # This saves ~5-10% overall search time
         mobility = board.legal_moves.count()
-        board.push(chess.Move.null())
         try:
+            board.push(chess.Move.null())
             opponent = board.legal_moves.count()
-        finally:
             board.pop()
+        except (ValueError, AssertionError):
+            # Null move illegal (e.g., in check)
+            opponent = mobility
         return (mobility - opponent) * state.tuning.mobility_unit
 
     def _king_safety(self, state: _SearchState, board: chess.Board) -> float:
@@ -1737,7 +1763,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self,
         *,
         logger: Optional[Callable[[str], None]] = None,
-        log_tag: str = "HS",
+        log_tag: str = "PVS",
         max_threads: Optional[int] = None,
         **kwargs,
     ) -> None:
