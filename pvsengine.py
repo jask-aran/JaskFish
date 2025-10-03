@@ -1924,10 +1924,6 @@ class HeuristicSearchStrategy(MoveStrategy):
             self._logger(f"{self.log_tag}: backend returned no move")
             return None
 
-        self._logger(
-            f"{self.log_tag}: completed depth={outcome.completed_depth} score={outcome.score:.1f} nodes={outcome.nodes} time={outcome.time_spent:.2f}s"
-        )
-
         metadata = dict(outcome.metadata)
         metadata.setdefault("pv", [mv.uci() for mv in outcome.principal_variation])
         metadata.setdefault("label", self.log_tag)

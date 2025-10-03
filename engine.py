@@ -1220,12 +1220,7 @@ class HeuristicSearchStrategy(MoveStrategy):
             budget=time_budget,
             time_used=search_time,
         )
-        
-        # Simple completion message
-        self._logger(
-            f"{self._log_tag}: completed depth={completed_depth} score={best_score:.1f} "
-            f"nodes={self._nodes_visited} time={search_time:.2f}s"
-        )
+
 
         # Build analysis summary for metadata, but skip old-style triple-line reporting
         # since we now emit consolidated perf lines per depth
