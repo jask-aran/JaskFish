@@ -1,116 +1,116 @@
 ================================================================================
-Scenario: Opening - Start Position
-FEN: (start position)
+Scenario: Opening - Start position
+FEN: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
 ================================================================================
 info string strategy registered: MateInOneStrategy (priority=100)
-bestmove=g1f3 depth=4 score=0.0
-nodes=3283 time=2.207s nps=1487
-         4221137 function calls (4217526 primitive calls) in 2.241 seconds
+bestmove=b1c3 depth=5 score=48.0
+nodes=5280 time=2.520s nps=2095
+         6365115 function calls (6359422 primitive calls) in 2.526 seconds
+
+   Ordered by: cumulative time
+   List reduced from 168 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    2.590    2.590 /home/jask/JaskFish/pvsengine.py:893(search)
+        1    0.000    0.000    2.520    2.520 /home/jask/JaskFish/pvsengine.py:1018(_iterative_deepening)
+      100    0.000    0.000    2.490    0.025 /home/jask/JaskFish/pvsengine.py:1213(_search_root_move)
+ 5280/100    0.032    0.000    2.453    0.025 /home/jask/JaskFish/pvsengine.py:1313(_alpha_beta)
+4387/3874    0.010    0.000    1.692    0.000 /home/jask/JaskFish/pvsengine.py:1506(_quiescence)
+    75527    0.051    0.000    0.892    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1922(gives_check)
+     4455    0.061    0.000    0.851    0.000 /home/jask/JaskFish/pvsengine.py:1557(_evaluate)
+     2208    0.034    0.000    0.830    0.000 /home/jask/JaskFish/pvsengine.py:1751(_generate_qmoves)
+   171264    0.082    0.000    0.645    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3702(generate_legal_moves)
+    84377    0.292    0.000    0.632    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:2310(push)
+   171326    0.181    0.000    0.441    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1819(generate_pseudo_legal_moves)
+     1050    0.005    0.000    0.441    0.000 /home/jask/JaskFish/pvsengine.py:1485(_order_moves)
+     3263    0.006    0.000    0.376    0.000 {method 'sort' of 'list' objects}
+    22489    0.030    0.000    0.351    0.000 /home/jask/JaskFish/pvsengine.py:1488(score)
+     1850    0.008    0.000    0.331    0.000 /home/jask/JaskFish/pvsengine.py:1649(_mobility_term)
+     3700    0.015    0.000    0.309    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3944(count)
+     5871    0.003    0.000    0.248    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:274(zobrist_hash)
+     5871    0.007    0.000    0.245    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:269(__call__)
+    89361    0.027    0.000    0.223    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1918(is_check)
+     5871    0.096    0.000    0.204    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:225(hash_board)
+    89361    0.045    0.000    0.196    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1906(checkers_mask)
+   658366    0.130    0.000    0.176    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:414(scan_reversed)
+   165016    0.091    0.000    0.120    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1014(_remove_piece_at)
+   107689    0.109    0.000    0.109    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:905(attackers_mask)
+     1850    0.055    0.000    0.101    0.000 /home/jask/JaskFish/pvsengine.py:1620(_passed_pawn_bonus)
+
+================================================================================
+Scenario: Middlegame - Complex center
+FEN: r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2P1PN2/PP1NBPPP/R1BQ1RK1 w - - 0 10
+================================================================================
+info string strategy registered: MateInOneStrategy (priority=100)
+bestmove=d4c5 depth=3 score=14.5
+nodes=6751 time=5.801s nps=1163
+         15033252 function calls (15020829 primitive calls) in 5.743 seconds
 
    Ordered by: cumulative time
    List reduced from 167 to 25 due to restriction <25>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-        1    0.000    0.000    2.247    2.247 /home/jask/JaskFish/pvsengine.py:893(search)
-        1    0.000    0.000    2.207    2.207 /home/jask/JaskFish/pvsengine.py:1018(_iterative_deepening)
-       80    0.000    0.000    2.204    0.028 /home/jask/JaskFish/pvsengine.py:1213(_search_root_move)
-  3283/80    0.029    0.000    2.165    0.027 /home/jask/JaskFish/pvsengine.py:1313(_alpha_beta)
-2657/2249    0.009    0.000    1.487    0.001 /home/jask/JaskFish/pvsengine.py:1506(_quiescence)
-    57027    0.049    0.000    0.951    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1922(gives_check)
-     1644    0.038    0.000    0.908    0.001 /home/jask/JaskFish/pvsengine.py:1751(_generate_qmoves)
-    62611    0.300    0.000    0.684    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:2310(push)
-     2682    0.039    0.000    0.561    0.000 /home/jask/JaskFish/pvsengine.py:1557(_evaluate)
-   106825    0.066    0.000    0.491    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3702(generate_legal_moves)
-      743    0.004    0.000    0.412    0.001 /home/jask/JaskFish/pvsengine.py:1485(_order_moves)
-     2391    0.004    0.000    0.352    0.000 {method 'sort' of 'list' objects}
-    15138    0.026    0.000    0.335    0.000 /home/jask/JaskFish/pvsengine.py:1488(score)
-   106907    0.125    0.000    0.332    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1819(generate_pseudo_legal_moves)
-     3724    0.002    0.000    0.214    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:274(zobrist_hash)
-      860    0.003    0.000    0.213    0.000 /home/jask/JaskFish/pvsengine.py:1649(_mobility_term)
-     3724    0.006    0.000    0.212    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:269(__call__)
-    65980    0.022    0.000    0.203    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1918(is_check)
-     1720    0.008    0.000    0.200    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3944(count)
-    65980    0.042    0.000    0.181    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1906(checkers_mask)
-     3724    0.088    0.000    0.178    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:225(hash_board)
-   407279    0.130    0.000    0.148    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:414(scan_reversed)
-   123502    0.101    0.000    0.137    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1014(_remove_piece_at)
-    62611    0.046    0.000    0.112    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:2431(pop)
-   367715    0.102    0.000    0.102    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:835(piece_type_at)
+        1    0.000    0.000    5.845    5.845 /home/jask/JaskFish/pvsengine.py:893(search)
+        1    0.000    0.000    5.801    5.801 /home/jask/JaskFish/pvsengine.py:1018(_iterative_deepening)
+      139    0.001    0.000    5.797    0.042 /home/jask/JaskFish/pvsengine.py:1213(_search_root_move)
+ 6752/139    0.043    0.000    5.727    0.041 /home/jask/JaskFish/pvsengine.py:1313(_alpha_beta)
+11047/5237    0.039    0.000    4.495    0.001 /home/jask/JaskFish/pvsengine.py:1506(_quiescence)
+     4322    0.100    0.000    2.344    0.001 /home/jask/JaskFish/pvsengine.py:1751(_generate_qmoves)
+   190870    0.132    0.000    2.226    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1922(gives_check)
+    11094    0.138    0.000    2.020    0.000 /home/jask/JaskFish/pvsengine.py:1557(_evaluate)
+   211027    0.716    0.000    1.568    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:2310(push)
+   508431    0.214    0.000    1.437    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3702(generate_legal_moves)
+   508403    0.412    0.000    0.878    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1819(generate_pseudo_legal_moves)
+     4274    0.011    0.000    0.875    0.000 /home/jask/JaskFish/pvsengine.py:1649(_mobility_term)
+     5676    0.017    0.000    0.866    0.000 {method 'sort' of 'list' objects}
+     1349    0.008    0.000    0.855    0.001 /home/jask/JaskFish/pvsengine.py:1485(_order_moves)
+     8548    0.044    0.000    0.832    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3944(count)
+    45455    0.063    0.000    0.714    0.000 /home/jask/JaskFish/pvsengine.py:1488(score)
+   210043    0.063    0.000    0.510    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1918(is_check)
+    12616    0.006    0.000    0.477    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:274(zobrist_hash)
+    12616    0.016    0.000    0.471    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:269(__call__)
+   210043    0.104    0.000    0.447    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1906(checkers_mask)
+  1429790    0.316    0.000    0.411    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:414(scan_reversed)
+    12616    0.192    0.000    0.407    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:225(hash_board)
+   413511    0.237    0.000    0.313    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1014(_remove_piece_at)
+   494144    0.180    0.000    0.287    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3664(_is_safe)
+   259309    0.248    0.000    0.248    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:905(attackers_mask)
 
 ================================================================================
-Scenario: Midgame - Complex Center
-FEN: r2q1rk1/pp2bppp/2n1pn2/2pp4/3P4/2P1PN2/PP1NBPPP/R1BQ1RK1 w - - 0 10
-================================================================================
-info string strategy registered: MateInOneStrategy (priority=100)
-bestmove=d4c5 depth=3 score=362.8
-nodes=4759 time=5.687s nps=836
-         9745679 function calls (9737851 primitive calls) in 5.679 seconds
-
-   Ordered by: cumulative time
-   List reduced from 169 to 25 due to restriction <25>
-
-   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-        1    0.000    0.000    5.707    5.707 /home/jask/JaskFish/pvsengine.py:893(search)
-        1    0.000    0.000    5.687    5.687 /home/jask/JaskFish/pvsengine.py:1018(_iterative_deepening)
-      128    0.001    0.000    5.681    0.044 /home/jask/JaskFish/pvsengine.py:1213(_search_root_move)
- 4761/128    0.044    0.000    5.584    0.044 /home/jask/JaskFish/pvsengine.py:1313(_alpha_beta)
-7225/4030    0.037    0.000    4.419    0.001 /home/jask/JaskFish/pvsengine.py:1506(_quiescence)
-     2543    0.092    0.000    2.255    0.001 /home/jask/JaskFish/pvsengine.py:1751(_generate_qmoves)
-   111368    0.111    0.000    2.229    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1922(gives_check)
-     7273    0.144    0.000    2.042    0.000 /home/jask/JaskFish/pvsengine.py:1557(_evaluate)
-   126094    0.695    0.000    1.615    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:2310(push)
-   336497    0.196    0.000    1.349    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3702(generate_legal_moves)
-     2953    0.013    0.000    0.883    0.000 /home/jask/JaskFish/pvsengine.py:1649(_mobility_term)
-     5906    0.044    0.000    0.829    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3944(count)
-   336479    0.352    0.000    0.827    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1819(generate_pseudo_legal_moves)
-     3259    0.012    0.000    0.776    0.000 {method 'sort' of 'list' objects}
-      711    0.007    0.000    0.765    0.001 /home/jask/JaskFish/pvsengine.py:1485(_order_moves)
-    24733    0.048    0.000    0.654    0.000 /home/jask/JaskFish/pvsengine.py:1488(score)
-     8010    0.005    0.000    0.472    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:274(zobrist_hash)
-     8010    0.013    0.000    0.467    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:269(__call__)
-   124140    0.048    0.000    0.458    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1918(is_check)
-   124140    0.091    0.000    0.410    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1906(checkers_mask)
-     8010    0.203    0.000    0.402    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:225(hash_board)
-   922194    0.307    0.000    0.361    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:414(scan_reversed)
-   246283    0.243    0.000    0.324    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1014(_remove_piece_at)
-   126094    0.113    0.000    0.304    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:2431(pop)
-   322491    0.157    0.000    0.268    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3664(_is_safe)
-
-================================================================================
-Scenario: Midgame - Pressure on King
+Scenario: Middlegame - Pressure on king
 FEN: 2r2rk1/1b2bppp/p2p1n2/1p1Pp3/1P2P3/P1N1BN2/1B3PPP/2RR2K1 w - - 0 21
 ================================================================================
 info string strategy registered: MateInOneStrategy (priority=100)
 bestmove=d1d2 depth=3 score=298.2
-nodes=5004 time=5.133s nps=974
-         8430536 function calls (8423965 primitive calls) in 5.136 seconds
+nodes=5768 time=5.113s nps=1128
+         11310622 function calls (11301804 primitive calls) in 5.049 seconds
 
    Ordered by: cumulative time
-   List reduced from 167 to 25 due to restriction <25>
+   List reduced from 165 to 25 due to restriction <25>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
         1    0.000    0.000    5.162    5.162 /home/jask/JaskFish/pvsengine.py:893(search)
-        1    0.001    0.001    5.133    5.133 /home/jask/JaskFish/pvsengine.py:1018(_iterative_deepening)
-      111    0.001    0.000    5.126    0.046 /home/jask/JaskFish/pvsengine.py:1213(_search_root_move)
- 5005/111    0.047    0.000    5.035    0.045 /home/jask/JaskFish/pvsengine.py:1313(_alpha_beta)
-6047/4370    0.028    0.000    4.004    0.001 /home/jask/JaskFish/pvsengine.py:1506(_quiescence)
-     2782    0.094    0.000    2.238    0.001 /home/jask/JaskFish/pvsengine.py:1751(_generate_qmoves)
-   104514    0.111    0.000    2.082    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1922(gives_check)
-     6104    0.120    0.000    1.694    0.000 /home/jask/JaskFish/pvsengine.py:1557(_evaluate)
-   116303    0.643    0.000    1.501    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:2310(push)
-   287229    0.177    0.000    1.222    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3702(generate_legal_moves)
-     2499    0.012    0.000    0.738    0.000 /home/jask/JaskFish/pvsengine.py:1649(_mobility_term)
-   287614    0.299    0.000    0.710    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1819(generate_pseudo_legal_moves)
-     4998    0.037    0.000    0.690    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3944(count)
-     3412    0.009    0.000    0.585    0.000 {method 'sort' of 'list' objects}
-      626    0.005    0.000    0.585    0.001 /home/jask/JaskFish/pvsengine.py:1485(_order_moves)
-    18771    0.039    0.000    0.502    0.000 /home/jask/JaskFish/pvsengine.py:1488(score)
-   117930    0.046    0.000    0.431    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1918(is_check)
-   117930    0.088    0.000    0.385    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1906(checkers_mask)
-     6745    0.005    0.000    0.374    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:274(zobrist_hash)
-     6745    0.011    0.000    0.369    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:269(__call__)
-     6745    0.160    0.000    0.313    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/polyglot.py:225(hash_board)
-   227608    0.225    0.000    0.304    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:1014(_remove_piece_at)
-   756484    0.248    0.000    0.290    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:414(scan_reversed)
-   116303    0.102    0.000    0.274    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:2431(pop)
-   274099    0.144    0.000    0.264    0.000 /home/jask/JaskFish/.venv/lib/python3.10/site-packages/chess/__init__.py:3664(_is_safe)
+        1    0.000    0.000    5.113    5.113 /home/jask/JaskFish/pvsengine.py:1018(_iterative_deepening)
+      114    0.000    0.000    5.110    0.045 /home/jask/JaskFish/pvsengine.py:1213(_search_root_move)
+ 5768/114    0.040    0.000    5.057    0.044 /home/jask/JaskFish/pvsengine.py:1313(_alpha_beta)
+8042/4878    0.033    0.000    4.110    0.001 /home/jask/JaskFish/pvsengine.py:1506(_quiescence)
+     4564    0.111    0.000    2.570    0.001 /home/jask/JaskFish/pvsengine.py:1751(_generate_qmoves)
+   162474    0.129    0.000    2.189    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1922(gives_check)
+   176853    0.689    0.000    1.502    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:2310(push)
+     8099    0.094    0.000    1.442    0.000 /home/jask/JaskFish/pvsengine.py:1557(_evaluate)
+   375484    0.187    0.000    1.222    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3702(generate_legal_moves)
+   376386    0.335    0.000    0.708    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1819(generate_pseudo_legal_moves)
+     2993    0.009    0.000    0.627    0.000 /home/jask/JaskFish/pvsengine.py:1649(_mobility_term)
+     5444    0.012    0.000    0.607    0.000 {method 'sort' of 'list' objects}
+     5986    0.031    0.000    0.595    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3944(count)
+      876    0.007    0.000    0.584    0.001 /home/jask/JaskFish/pvsengine.py:1485(_order_moves)
+   179450    0.068    0.000    0.517    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1918(is_check)
+    26269    0.044    0.000    0.490    0.000 /home/jask/JaskFish/pvsengine.py:1488(score)
+   179450    0.115    0.000    0.449    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1906(checkers_mask)
+     8996    0.007    0.000    0.350    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:274(zobrist_hash)
+     8996    0.013    0.000    0.343    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:269(__call__)
+   991371    0.224    0.000    0.298    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:414(scan_reversed)
+   347720    0.219    0.000    0.294    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:1014(_remove_piece_at)
+     8996    0.136    0.000    0.289    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/polyglot.py:225(hash_board)
+   364850    0.156    0.000    0.264    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:3664(_is_safe)
+   224471    0.248    0.000    0.248    0.000 /home/jask/JaskFish/.venv/lib/python3.12/site-packages/chess/__init__.py:905(attackers_mask)
