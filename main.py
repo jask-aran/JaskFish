@@ -16,8 +16,8 @@ from utils import cleanup, debug_text, info_text, recieved_text, sending_text
 ENGINE_SPECS = {
     "engine1": {
         "number": 1,
-        "default_script": "engine.py",
-        "default_name": "JaskFish",
+        "default_script": "hsengine.py",
+        "default_name": "HS",
         "preferred_color": chess.WHITE,
     },
     "engine2": {
