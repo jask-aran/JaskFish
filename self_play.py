@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 
@@ -216,7 +217,27 @@ class SelfPlayManager:
         iso_stamp = (
             timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         )
-        filename = timestamp.strftime("self_play_%Y%m%dT%H%M%S.log")
+
+        pattern = re.compile(r"^(\d+)_selfplay(?:\.[^.]+)?$")
+        next_index = 1
+        try:
+            existing_indices = []
+            for entry in self._trace_directory.iterdir():
+                if not entry.is_file():
+                    continue
+                match = pattern.match(entry.name)
+                if not match:
+                    continue
+                try:
+                    existing_indices.append(int(match.group(1)))
+                except ValueError:
+                    continue
+            if existing_indices:
+                next_index = max(existing_indices) + 1
+        except Exception:
+            next_index = 1
+
+        filename = f"{next_index}_selfplay.txt"
         path = self._trace_directory / filename
         header_lines = [
             f"Self-play trace recorded at {iso_stamp}",
