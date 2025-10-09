@@ -65,6 +65,7 @@
 - `self_play_traces/` — chronological logs for automated matches stored as `<X>_selfplay.txt`. Sort numerically on `X` to find the latest run, then parse the `[White - …]`/`[Black - …]` sections to reconstruct engine dialogue.
 - `gamestates/` — GUI exports produce `chess_game_<timestamp>.json` with `fen-init`, `fen-final`, and SAN/UCI move lists; leverage these snapshots to rerun reproductions via `position` commands.
 - `pvs_profile_output.txt` — historical benchmark report for quick diffing; regenerate via `python benchmark_pvs.py profile --output pvs_profile_output.txt` when comparing branches.
+- `agent_plans/` — repository of planning notes (e.g., `testing_improvements_plan_<date>.md`) that capture coordinated test or profiling work; add future investigation plans here for discoverability.
 
 ## Coding Style & Naming Conventions
 - Follow PEP 8 with 4-space indentation; type hints and dataclasses are the norm for new Python code.
