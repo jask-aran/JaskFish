@@ -874,19 +874,38 @@ class SearchStats:
                     f"swaps={self.pv_changes}",
                 ]
             ),
-            "perf summary pruning "
-            + " ".join(
-                [
-                    f"tt_hit={tt_hit_pct}%",
-                    f"tt_cut={tt_cut_pct}%",
-                    f"fail_low={self.asp_fail_low}",
-                    f"fail_high={self.asp_fail_high}",
-                    f"research={self.asp_researches}",
-                    f"cuts={cuts_human}",
-                    f"order_first={first_cut_pct}%",
-                ]
-            ),
         ]
+
+        lines.extend(
+            [
+                "perf summary pruning tt "
+                + " ".join(
+                    [
+                        f"probes={self.tt_probes}",
+                        f"hits={self.tt_hits}",
+                        f"hit_rate={tt_hit_pct}%",
+                        f"cut_share={tt_cut_pct}%",
+                        f"cuts={self.tt_cuts}",
+                    ]
+                ),
+                "perf summary pruning aspiration "
+                + " ".join(
+                    [
+                        f"fail_low={self.asp_fail_low}",
+                        f"fail_high={self.asp_fail_high}",
+                        f"researches={self.asp_researches}",
+                    ]
+                ),
+                "perf summary pruning cuts "
+                + " ".join(
+                    [
+                        f"total={total_cuts}",
+                        f"first_move_rate={first_cut_pct}%",
+                        f"breakdown={cuts_human}",
+                    ]
+                ),
+            ]
+        )
 
         heuristic_parts = [q_details]
         if lmr_details:
