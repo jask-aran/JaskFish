@@ -44,7 +44,7 @@
 - `pytest -m gui` — optional UI harness; run only in environments with a display server.
 
 ### Headless Self-Play Harness
-- `python self_play.py` — launches the same coordination logic used by the GUI, logging traces to `<X>_selfplay.txt` under `self_play_traces/`. Inspect the latest (highest `X`) file to review raw `info`/`bestmove` transcripts, inferred budgets, and stop reasons.
+- `python main.py --self-play` — launches the same coordination logic used by the GUI, logging traces to `<X>_selfplay.txt` under `self_play_traces/`. Inspect the latest (highest `X`) file to review raw `info`/`bestmove` transcripts, inferred budgets, and stop reasons. Add `--include-perf-payload` to keep the raw JSON payload lines in both logs and traces.
 - Use these traces to cross-check GUI expectations (time budgets, depth ceilings, timeout behaviour) or to diff engine output across revisions.
 
 ### Benchmarks & Profiling CLI

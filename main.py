@@ -1,16 +1,29 @@
 # MAIN
 import argparse
 import os
+import re
+import subprocess
 import sys
-from typing import Dict, Optional, Tuple
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 import chess
-from PySide6.QtCore import QProcess
-from PySide6.QtWidgets import QApplication
 
-from gui import ChessGUI
+try:  # pragma: no cover - optional dependency for GUI mode
+    from PySide6.QtCore import QProcess
+    from PySide6.QtWidgets import QApplication
+except ImportError:  # pragma: no cover
+    QProcess = None  # type: ignore[assignment]
+    QApplication = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from gui import ChessGUI  # pragma: no cover
+
+import chess_logic
 from utils import ReportingLevel
-from self_play import SelfPlayManager
 from utils import cleanup, debug_text, info_text, recieved_text, sending_text
 
 ENGINE_SPECS = {
@@ -31,15 +44,508 @@ ENGINE_ID_ORDER = tuple(ENGINE_SPECS.keys())
 COLOR_NAME = {chess.WHITE: "White", chess.BLACK: "Black"}
 
 
+EngineProcess = Any
+SendCommand = Callable[[EngineProcess, str], None]
+
+
+class _SelfPlayUI(Protocol):
+    """Protocol describing the UI hooks required by :class:`SelfPlayManager`."""
+
+    board: chess.Board
+
+    def set_self_play_active(self, active: bool) -> None:
+        ...
+
+    def set_board_interaction_enabled(self, enabled: bool) -> None:
+        ...
+
+    def set_manual_controls_enabled(self, enabled: bool) -> None:
+        ...
+
+    def set_info_message(self, message: str) -> None:
+        ...
+
+    def indicate_engine_activity(self, engine_label: str, context: str) -> None:
+        ...
+
+    def clear_engine_activity(self, message: Optional[str] = None) -> None:
+        ...
+
+    def self_play_evaluation_complete(self, engine_label: str) -> None:
+        ...
+
+
+class SelfPlayManager:
+    """Coordinates automated play between engine processes."""
+
+    def __init__(
+        self,
+        gui: _SelfPlayUI,
+        engines: Dict[bool, EngineProcess],
+        send_command: SendCommand,
+        engine_names: Dict[bool, str],
+        *,
+        capture_payload: bool = False,
+        trace_directory: Optional[Union[Path, str]] = None,
+    ) -> None:
+        if chess.WHITE not in engines or chess.BLACK not in engines:
+            raise ValueError("SelfPlayManager requires engines for both colors")
+
+        self._gui = gui
+        self._engines = engines
+        self._send_command = send_command
+        self._engine_names = engine_names
+
+        self._active = False
+        self._current_engine_color: Optional[bool] = None
+        self._pending_ignore_color: Optional[bool] = None
+        self._waiting_for_move = False
+        self._trace_directory = Path(trace_directory) if trace_directory else Path.cwd() / "self_play_traces"
+        self._capture_payload = capture_payload
+        self._session_traces: Dict[bool, List[str]] = {chess.WHITE: [], chess.BLACK: []}
+        self._session_start_fen: Optional[str] = None
+        self._session_started_at: Optional[datetime] = None
+        self._last_trace_path: Optional[Path] = None
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def last_trace_path(self) -> Optional[Path]:
+        return self._last_trace_path
+
+    def current_expected_color(self) -> Optional[bool]:
+        if not self._waiting_for_move:
+            return None
+        return self._current_engine_color
+
+    def update_engines(
+        self, engines: Dict[bool, EngineProcess], engine_names: Dict[bool, str]
+    ) -> None:
+        if chess.WHITE not in engines or chess.BLACK not in engines:
+            raise ValueError("SelfPlayManager requires engines for both colors")
+
+        if self._active:
+            self.stop("Self-play stopped (engine assignments updated)")
+
+        self._engines = engines
+        self._engine_names = engine_names
+        self._current_engine_color = None
+        self._pending_ignore_color = None
+        self._waiting_for_move = False
+
+    def start(self) -> bool:
+        if self._active:
+            return False
+
+        self._active = True
+        self._pending_ignore_color = None
+        self._current_engine_color = None
+        self._waiting_for_move = False
+        self._session_traces = {chess.WHITE: [], chess.BLACK: []}
+        self._session_start_fen = self._gui.board.fen()
+        self._session_started_at = datetime.now(timezone.utc)
+        self._last_trace_path = None
+
+        self._gui.set_self_play_active(True)
+        self._gui.set_board_interaction_enabled(False)
+        self._gui.set_manual_controls_enabled(False)
+        self._gui.set_info_message("Self-play running")
+
+        unique_engines = []
+        seen_ids = set()
+        for engine in self._engines.values():
+            engine_id = id(engine)
+            if engine_id in seen_ids:
+                continue
+            seen_ids.add(engine_id)
+            unique_engines.append(engine)
+
+        for engine in unique_engines:
+            self._dispatch(engine, "ucinewgame")
+
+        self._request_move(self._gui.board.turn)
+        return True
+
+    def stop(self, message: Optional[str] = None) -> bool:
+        if not self._active and not self._waiting_for_move:
+            return False
+
+        if self._waiting_for_move and self._current_engine_color is not None:
+            engine = self._engines[self._current_engine_color]
+            self._pending_ignore_color = self._current_engine_color
+            self._dispatch(engine, "stop")
+
+        self._active = False
+        self._waiting_for_move = False
+        self._current_engine_color = None
+
+        self._gui.set_self_play_active(False)
+        self._gui.set_board_interaction_enabled(True)
+        self._gui.set_manual_controls_enabled(True)
+        self._gui.clear_engine_activity(message or "Self-play stopped")
+        self._export_traces(message)
+        return True
+
+    def should_apply_move(self, color: bool) -> bool:
+        if self._pending_ignore_color is not None and color == self._pending_ignore_color:
+            self._pending_ignore_color = None
+            return False
+
+        if not self._active:
+            return True
+
+        return color == self._current_engine_color
+
+    def on_engine_move(self, color: bool, move_uci: str) -> None:
+        if not self._active or color != self._current_engine_color:
+            return
+
+        self._waiting_for_move = False
+        engine_label = self._engine_names.get(color, "Engine")
+        self._gui.self_play_evaluation_complete(engine_label)
+
+        if chess_logic.is_game_over(self._gui.board):
+            outcome = chess_logic.get_game_result(self._gui.board)
+            self.stop(message=f"Self-play finished: {outcome}")
+            return
+
+        next_color = not color
+        self._request_move(next_color)
+
+    def on_engine_output(self, color: bool, line: str) -> None:
+        if not (self._active or self._waiting_for_move):
+            return
+        if not self._capture_payload and line.startswith("info string perf payload="):
+            return
+        if color not in self._session_traces:
+            self._session_traces[color] = []
+        self._session_traces[color].append(line)
+
+    def _request_move(self, color: bool) -> None:
+        if not self._active:
+            return
+
+        engine = self._engines[color]
+        fen = self._gui.board.fen()
+        self._dispatch(engine, f"position fen {fen}")
+        self._dispatch(engine, "go")
+
+        self._current_engine_color = color
+        self._waiting_for_move = True
+        engine_label = self._engine_names.get(color, "Engine")
+        self._gui.indicate_engine_activity(engine_label, "Self-play")
+
+    def _dispatch(self, engine: EngineProcess, command: str) -> None:
+        self._send_command(engine, command)
+
+    def _export_traces(self, stop_message: Optional[str]) -> None:
+        has_trace = any(self._session_traces[color] for color in self._session_traces)
+        if not has_trace:
+            return
+        try:
+            self._trace_directory.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+
+        timestamp = self._session_started_at or datetime.now(timezone.utc)
+        iso_stamp = timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        pattern = re.compile(r"^(\d+)_selfplay(?:\.[^.]+)?$")
+        next_index = 1
+        try:
+            existing_indices = []
+            for entry in self._trace_directory.iterdir():
+                if not entry.is_file():
+                    continue
+                match = pattern.match(entry.name)
+                if not match:
+                    continue
+                try:
+                    existing_indices.append(int(match.group(1)))
+                except ValueError:
+                    continue
+            if existing_indices:
+                next_index = max(existing_indices) + 1
+        except Exception:
+            next_index = 1
+
+        filename = f"{next_index}_selfplay.txt"
+        path = self._trace_directory / filename
+        header_lines = [
+            f"Self-play trace recorded at {iso_stamp}",
+            f"Initial FEN: {self._session_start_fen or 'unknown'}",
+            f"Final FEN: {self._gui.board.fen()}",
+        ]
+        if stop_message:
+            header_lines.append(f"Stop reason: {stop_message}")
+
+        try:
+            with path.open("w", encoding="utf-8") as trace_file:
+                trace_file.write("\n".join(header_lines))
+                trace_file.write("\n\n")
+                for color in (chess.WHITE, chess.BLACK):
+                    label = self._engine_names.get(color, "Engine")
+                    trace_file.write(f"[{label}]\n")
+                    for line in self._session_traces.get(color, []):
+                        trace_file.write(f"  {line}\n")
+                    trace_file.write("\n")
+        except Exception:
+            return
+
+        self._last_trace_path = path
+        self._session_traces = {chess.WHITE: [], chess.BLACK: []}
+        self._session_started_at = None
+        self._session_start_fen = None
+
+
+class HeadlessEngineProcess:
+    """Minimal subprocess wrapper for headless self-play."""
+
+    def __init__(self, path: str, *, workdir: str) -> None:
+        self.path = path
+        self._proc = subprocess.Popen(
+            [sys.executable, path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=workdir,
+        )
+        self._write_lock = threading.Lock()
+
+    def send(self, command: str) -> None:
+        with self._write_lock:
+            if not self._proc.stdin:
+                return
+            try:
+                self._proc.stdin.write(command + "\n")
+                self._proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+    def readline(self) -> str:
+        if not self._proc.stdout:
+            return ""
+        try:
+            return self._proc.stdout.readline()
+        except Exception:
+            return ""
+
+    def poll(self) -> Optional[int]:
+        return self._proc.poll()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self.send("quit")
+        if self._proc.stdin:
+            try:
+                self._proc.stdin.close()
+            except Exception:
+                pass
+        try:
+            self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                try:
+                    self._proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+
+
+class HeadlessSelfPlayUI:
+    """Lightweight UI adapter that satisfies SelfPlayManager's expectations."""
+
+    def __init__(self, board: chess.Board, *, quiet: bool = False) -> None:
+        self.board = board
+        self.quiet = quiet
+        self.info_message: str = ""
+
+    def _log(self, message: str) -> None:
+        if not self.quiet and message:
+            print(info_text(message))
+
+    def set_self_play_active(self, active: bool) -> None:
+        state = "Self-play started" if active else "Self-play inactive"
+        self._log(state)
+
+    def set_board_interaction_enabled(self, enabled: bool) -> None:
+        # No-op for headless mode.
+        pass
+
+    def set_manual_controls_enabled(self, enabled: bool) -> None:
+        # No-op for headless mode.
+        pass
+
+    def set_info_message(self, message: str) -> None:
+        self.info_message = message
+        self._log(message)
+
+    def indicate_engine_activity(self, engine_label: str, context: str) -> None:
+        self._log(f"{context}: {engine_label} evaluating")
+
+    def clear_engine_activity(self, message: Optional[str] = None) -> None:
+        if message:
+            self.set_info_message(message)
+        else:
+            self._log("Engines idle")
+
+    def self_play_evaluation_complete(self, engine_label: str) -> None:
+        self._log(f"Self-play: {engine_label} move received")
+
+
+def run_headless_self_play(args, script_dir: str) -> None:
+    board = chess.Board(args.fen) if args.fen else chess.Board()
+    quiet = bool(args.self_play_quiet)
+    include_payload = bool(getattr(args, "include_perf_payload", False))
+
+    ui = HeadlessSelfPlayUI(board, quiet=quiet)
+    stop_event = threading.Event()
+    board_lock = threading.Lock()
+
+    def resolve_engine_path(default_script: str) -> str:
+        path = os.path.join(script_dir, default_script)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Engine script not found: {path}")
+        return path
+
+    white_spec = ENGINE_SPECS["engine1"]
+    black_spec = ENGINE_SPECS["engine2"]
+    white_path = resolve_engine_path(white_spec["default_script"])
+    black_path = resolve_engine_path(black_spec["default_script"])
+
+    white_engine = HeadlessEngineProcess(white_path, workdir=script_dir)
+    black_engine = HeadlessEngineProcess(black_path, workdir=script_dir)
+
+    engines: Dict[bool, HeadlessEngineProcess] = {
+        chess.WHITE: white_engine,
+        chess.BLACK: black_engine,
+    }
+
+    engine_labels = {
+        chess.WHITE: f"{COLOR_NAME[chess.WHITE]} - {white_spec['default_name']} [{white_spec['number']}]",
+        chess.BLACK: f"{COLOR_NAME[chess.BLACK]} - {black_spec['default_name']} [{black_spec['number']}]",
+    }
+    monitor_labels = {
+        white_engine: f"{white_spec['default_name']}[{white_spec['number']}][W]",
+        black_engine: f"{black_spec['default_name']}[{black_spec['number']}][B]",
+    }
+
+    def send_command(engine: HeadlessEngineProcess, command: str) -> None:
+        if not quiet:
+            label = monitor_labels.get(engine, "Engine")
+            print(sending_text(f"{label} {command}"))
+        engine.send(command)
+
+    manager = SelfPlayManager(
+        ui,
+        engines,
+        send_command,
+        engine_labels,
+        capture_payload=include_payload,
+    )
+
+    def handle_bestmove(color: bool, move_line: str) -> None:
+        parts = move_line.strip().split()
+        if len(parts) < 2:
+            return
+        move_uci = parts[1]
+        try:
+            move = chess.Move.from_uci(move_uci)
+        except ValueError:
+            if not quiet:
+                label = engine_labels.get(color, "Engine")
+                print(info_text(f"{label} produced invalid move: {move_uci}"))
+            return
+        with board_lock:
+            if move not in ui.board.legal_moves:
+                if not quiet:
+                    label = engine_labels.get(color, "Engine")
+                    print(info_text(f"{label} move illegal in current position: {move_uci}"))
+                return
+            ui.board.push(move)
+        manager.on_engine_move(color, move_uci)
+
+    def reader(color: bool, engine: HeadlessEngineProcess) -> None:
+        label = monitor_labels.get(engine, "Engine")
+        while not stop_event.is_set():
+            line = engine.readline()
+            if line == "":
+                if engine.poll() is not None:
+                    if manager.active:
+                        manager.stop(f"{label} terminated unexpectedly")
+                    break
+                time.sleep(0.01)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            manager.on_engine_output(color, line)
+            if not quiet and (include_payload or not line.startswith("info string perf payload=")):
+                print(recieved_text(f"{label} {line}"))
+            if line.startswith("bestmove"):
+                if not manager.should_apply_move(color):
+                    continue
+                handle_bestmove(color, line)
+
+    threads = [
+        threading.Thread(target=reader, args=(chess.WHITE, white_engine), daemon=True),
+        threading.Thread(target=reader, args=(chess.BLACK, black_engine), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    try:
+        started = manager.start()
+        if not started and not quiet:
+            print(info_text("Self-play already active; nothing to do"))
+        while manager.active or manager.current_expected_color() is not None:
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        manager.stop("Self-play interrupted by user")
+        if not quiet:
+            print(info_text("Self-play interrupted by user"))
+    finally:
+        stop_event.set()
+        for engine in engines.values():
+            engine.stop()
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+        trace_path = manager.last_trace_path
+        if not quiet and trace_path:
+            print(info_text(f"Self-play trace written -> {trace_path}"))
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-fen", help="Set the initial board state to the given FEN string"
     )
     parser.add_argument("-dev", action="store_true", help="Enable debug mode")
+    parser.add_argument(
+        "--self-play",
+        action="store_true",
+        help="Run headless self-play and exit instead of launching the GUI",
+    )
+    parser.add_argument(
+        "--self-play-quiet",
+        action="store_true",
+        help="Reduce console logging while running headless self-play",
+    )
+    parser.add_argument(
+        "--include-perf-payload",
+        action="store_true",
+        help="Include perf payload JSON lines in terminal output and self-play traces",
+    )
     return parser.parse_args()
 
-def handle_bestmove_line(bestmove_line: str, gui: ChessGUI, engine_label: str) -> Optional[str]:
+def handle_bestmove_line(bestmove_line: str, gui: "ChessGUI", engine_label: str) -> Optional[str]:
     parts = bestmove_line.strip().split()
     if len(parts) >= 2:
         move_uci = parts[1]
@@ -51,7 +557,7 @@ def handle_bestmove_line(bestmove_line: str, gui: ChessGUI, engine_label: str) -
 
 def engine_output_processor(
     proc: QProcess,
-    gui: ChessGUI,
+    gui: "ChessGUI",
     *,
     engine_id: Optional[str],
     resolve_log_label,
@@ -61,6 +567,7 @@ def engine_output_processor(
     self_play_manager: Optional[SelfPlayManager] = None,
     manual_pending: Optional[Dict[str, bool]] = None,
     manual_pending_color: Optional[Dict[str, Optional[bool]]] = None,
+    include_payload: bool = False,
 ) -> None:
     while proc.canReadLine():
         output = bytes(proc.readLine()).decode().strip()
@@ -113,10 +620,14 @@ def engine_output_processor(
         else:
             if self_play_manager and expected_color is not None:
                 self_play_manager.on_engine_output(expected_color, output)
+            if output.startswith("info string perf payload=") and not include_payload:
+                continue
             print(recieved_text(f"{monitor_label} {output}"))
 
 
 def start_engine_process(path: str) -> QProcess:
+    if QProcess is None:  # pragma: no cover - defensive
+        raise ImportError("PySide6 is required to start GUI engine processes")
     proc = QProcess()
     proc.setProcessChannelMode(QProcess.MergedChannels)
     proc.start(sys.executable, [path])
@@ -127,11 +638,21 @@ def start_engine_process(path: str) -> QProcess:
 
 def main():
     args = parse_args()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if args.self_play:
+        run_headless_self_play(args, script_dir)
+        return
+
+    if QApplication is None or QProcess is None:
+        raise ImportError("PySide6 is required for GUI mode; install PySide6 or use --self-play.")
+
+    from gui import ChessGUI  # Local import to avoid PySide requirement for headless use
+
     board = chess.Board() if not args.fen else chess.Board(args.fen)
     dev = not args.dev
     reporting_level = ReportingLevel.BASIC if dev else ReportingLevel.QUIET
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    include_perf_payload = bool(args.include_perf_payload)
 
     app = QApplication(sys.argv)
 
@@ -211,7 +732,7 @@ def main():
     }
     process_slot_lookup: Dict[int, str] = {}
 
-    gui: Optional[ChessGUI] = None
+    gui: Optional["ChessGUI"] = None
     self_play_manager: Optional[SelfPlayManager] = None
 
     def colors_for_engine(engine_id: str) -> Tuple[bool, ...]:
@@ -310,6 +831,7 @@ def main():
                 self_play_manager=self_play_manager,
                 manual_pending=manual_pending,
                 manual_pending_color=manual_pending_color,
+                include_payload=include_perf_payload,
             )
         )
 
@@ -404,6 +926,7 @@ def main():
         build_self_play_engine_map(),
         send_command_with_lookup,
         engine_labels_by_color.copy(),
+        capture_payload=include_perf_payload,
     )
 
     def refresh_engine_configuration(info_message: Optional[str] = None) -> None:

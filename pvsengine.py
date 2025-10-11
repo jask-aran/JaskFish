@@ -8,6 +8,7 @@ and UCI façade are easier to reason about and test in isolation.
 from __future__ import annotations
 
 import io
+import json
 import math
 import os
 import sys
@@ -706,74 +707,195 @@ class SearchStats:
     def first_move_cut_rate(self) -> float:
         return self.first_move_cuts / max(1, self.total_beta_cuts)
     
-    def print_compact_summary(self, depth: int, score: float, pv: List[chess.Move], 
-                             time_used: float, budget: Optional[float]) -> str:
-        """Generate comprehensive performance summary with clear node breakdown."""
+    def print_compact_summary(
+        self,
+        depth: int,
+        score: float,
+        pv: List[chess.Move],
+        time_used: float,
+        budget: Optional[float],
+    ) -> str:
+        """Generate comprehensive performance summary with machine-readable payload."""
         total_nodes = self.nodes + self.qnodes
         nps = int(total_nodes / max(0.001, time_used))
         budget_str = f"{time_used:.2f}/{budget:.2f}s" if budget else f"{time_used:.2f}s"
-        
-        # PV and score stability
-        pv_str = " ".join(m.uci() for m in pv[:5])
-        if len(pv) > 5:
-            pv_str += "..."
+
+        pv_moves = [m.uci() for m in pv]
+        display_pv = " ".join(pv_moves[:5])
+        if len(pv_moves) > 5:
+            display_pv += "..."
+
         score_delta = 0.0
         if len(self.depth_scores) >= 2:
             score_delta = self.depth_scores[-1] - self.depth_scores[-2]
-        
-        # Node breakdown: regular vs quiescence
-        q_pct = int(self.q_ratio() * 100)
+
+        q_ratio = self.q_ratio()
+        q_pct = int(q_ratio * 100)
         nodes_str = f"{total_nodes}(r:{self.nodes},q:{self.qnodes})"
-        
-        # TT stats
-        tt_hit_pct = int(self.tt_hit_rate() * 100)
-        tt_cut_pct = int(self.tt_cuts / max(1, self.total_beta_cuts) * 100) if self.total_beta_cuts > 0 else 0
-        
-        # Cut breakdown with percentages
+
         total_cuts = self.beta_cut_total()
-        if total_cuts > 0:
-            cuts_str = (f"tt:{self.cuts_tt}({int(self.cuts_tt/total_cuts*100)}%) "
-                       f"k:{self.cuts_killer}({int(self.cuts_killer/total_cuts*100)}%) "
-                       f"h:{self.cuts_history} c:{self.cuts_capture} n:{self.cuts_null}")
-        else:
-            cuts_str = "tt:0 k:0 h:0 c:0 n:0"
-        
-        # Move ordering quality
-        first_cut_pct = int(self.first_move_cut_rate() * 100)
-        
-        # LMR effectiveness
-        lmr_str = ""
-        if self.lmr_applied > 0:
-            lmr_success_pct = int((1 - self.lmr_researched / self.lmr_applied) * 100)
-            lmr_str = f" lmr:{self.lmr_applied}/{self.lmr_researched}({lmr_success_pct}%ok)"
-        
-        # Null move effectiveness
-        null_str = ""
-        if self.null_tried > 0:
-            null_success_pct = int(self.null_success / self.null_tried * 100)
-            null_str = f" null:{self.null_success}/{self.null_tried}({null_success_pct}%)"
-        
-        # Aspiration window health
-        asp_str = f"fail[L/H]={self.asp_fail_low}/{self.asp_fail_high}"
-        if self.asp_researches > 0:
-            asp_str += f"(re:{self.asp_researches})"
-        
-        # Quiescence pruning effectiveness
-        q_str = f"q={q_pct}%"
-        if self.qnodes > 0:
-            total_q_prunes = self.q_delta_prunes + self.q_see_prunes
-            if total_q_prunes > 0:
-                prune_pct = int(total_q_prunes / self.qnodes * 100)
-                q_str += f"(Δ:{self.q_delta_prunes} SEE:{self.q_see_prunes} {prune_pct}%pruned)"
-        
-        line = (
-            f"perf d={depth} sel={self.sel_depth} nodes={nodes_str} nps={nps} time={budget_str} | "
-            f"score={score:.1f}(Δ{score_delta:+.1f}) pv={pv_str} swaps={self.pv_changes} | "
-            f"tt={tt_hit_pct}%/cut:{tt_cut_pct}% {asp_str} | "
-            f"cuts[{cuts_str}] order:1st={first_cut_pct}% | "
-            f"{q_str}{lmr_str}{null_str}"
+        tt_hit_rate = self.tt_hit_rate()
+        tt_hit_pct = int(tt_hit_rate * 100)
+        tt_cut_share = self.tt_cuts / max(1, total_cuts) if total_cuts > 0 else 0.0
+        tt_cut_pct = int(tt_cut_share * 100)
+
+        first_cut_rate = self.first_move_cut_rate()
+        first_cut_pct = int(first_cut_rate * 100)
+
+        lmr_success_rate = (
+            (self.lmr_applied - self.lmr_researched) / self.lmr_applied
+            if self.lmr_applied > 0
+            else 0.0
         )
-        return line
+        null_success_rate = (
+            self.null_success / self.null_tried if self.null_tried > 0 else 0.0
+        )
+
+        total_q_prunes = self.q_delta_prunes + self.q_see_prunes
+        q_prune_ratio = (
+            total_q_prunes / self.qnodes if self.qnodes > 0 else 0.0
+        )
+        q_prune_pct = int(q_prune_ratio * 100)
+
+        cuts_human: str
+        if total_cuts > 0:
+            cuts_human = (
+                f"tt:{self.cuts_tt}({int(self.cuts_tt / total_cuts * 100)}%) "
+                f"k:{self.cuts_killer}({int(self.cuts_killer / total_cuts * 100)}%) "
+                f"h:{self.cuts_history} c:{self.cuts_capture} n:{self.cuts_null}"
+            )
+        else:
+            cuts_human = "tt:0 k:0 h:0 c:0 n:0"
+
+        q_details = f"q={q_pct}%"
+        if self.qnodes > 0 and total_q_prunes > 0:
+            q_details += (
+                f" (Δ:{self.q_delta_prunes} SEE:{self.q_see_prunes} pruned:{q_prune_pct}%)"
+            )
+
+        lmr_details = ""
+        if self.lmr_applied > 0:
+            lmr_details = (
+                f"lmr:{self.lmr_applied}/{self.lmr_researched}"
+                f"({int(lmr_success_rate * 100)}%ok)"
+            )
+
+        null_details = ""
+        if self.null_tried > 0:
+            null_details = (
+                f"null:{self.null_success}/{self.null_tried}"
+                f"({int(null_success_rate * 100)}%)"
+            )
+
+        payload = {
+            "strategy": "pvs",
+            "depth": depth,
+            "seldepth": self.sel_depth,
+            "nodes": {
+                "total": total_nodes,
+                "regular": self.nodes,
+                "quiescence": self.qnodes,
+            },
+            "nps": nps,
+            "time": {
+                "elapsed": time_used,
+                "budget": budget,
+            },
+            "score": {
+                "value": score,
+                "delta": score_delta,
+            },
+            "pv": pv_moves,
+            "pv_changes": self.pv_changes,
+            "tt": {
+                "probes": self.tt_probes,
+                "hits": self.tt_hits,
+                "hit_rate": tt_hit_rate,
+                "cuts": self.tt_cuts,
+                "cut_share": tt_cut_share,
+            },
+            "aspiration": {
+                "fail_low": self.asp_fail_low,
+                "fail_high": self.asp_fail_high,
+                "researches": self.asp_researches,
+            },
+            "cuts": {
+                "tt": self.cuts_tt,
+                "killer": self.cuts_killer,
+                "history": self.cuts_history,
+                "capture": self.cuts_capture,
+                "null": self.cuts_null,
+                "futility": self.cuts_futility,
+                "other": self.cuts_other,
+                "total": total_cuts,
+                "first_move_rate": first_cut_rate,
+            },
+            "quiescence": {
+                "ratio": q_ratio,
+                "cutoffs": self.q_cutoffs,
+                "stand_pat_cuts": self.q_stand_pat_cuts,
+                "delta_prunes": self.q_delta_prunes,
+                "see_prunes": self.q_see_prunes,
+                "prune_ratio": q_prune_ratio,
+            },
+            "reductions": {
+                "lmr": {
+                    "applied": self.lmr_applied,
+                    "researched": self.lmr_researched,
+                    "success_rate": lmr_success_rate,
+                },
+                "null": {
+                    "tried": self.null_tried,
+                    "success": self.null_success,
+                    "success_rate": null_success_rate,
+                },
+            },
+        }
+
+        json_blob = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+        lines = [
+            f"perf payload={json_blob}",
+            "perf summary core "
+            + " ".join(
+                [
+                    f"depth={depth if depth is not None else '-'}",
+                    f"sel={self.sel_depth}",
+                    f"nodes={nodes_str}",
+                    f"nps={nps}",
+                    f"time={budget_str}",
+                ]
+            ),
+            "perf summary eval "
+            + " ".join(
+                [
+                    f"score={score:.1f}(Δ{score_delta:+.1f})",
+                    f"pv={display_pv or '(empty)'}",
+                    f"swaps={self.pv_changes}",
+                ]
+            ),
+            "perf summary pruning "
+            + " ".join(
+                [
+                    f"tt_hit={tt_hit_pct}%",
+                    f"tt_cut={tt_cut_pct}%",
+                    f"fail_low={self.asp_fail_low}",
+                    f"fail_high={self.asp_fail_high}",
+                    f"research={self.asp_researches}",
+                    f"cuts={cuts_human}",
+                    f"order_first={first_cut_pct}%",
+                ]
+            ),
+        ]
+
+        heuristic_parts = [q_details]
+        if lmr_details:
+            heuristic_parts.append(lmr_details)
+        if null_details:
+            heuristic_parts.append(null_details)
+        lines.append("perf summary heuristics " + " ".join(heuristic_parts))
+
+        return "\n".join(lines)
 
 
 class _SearchState:

@@ -92,15 +92,15 @@ The engines use a **strategy stack** architecture:
 - Stdout is parsed in `engine_output_processor` to update the UI and relay moves
 - The GUI never evaluates positions directly; all analysis is delegated to engine processes
 
-### Self-Play Coordination (`self_play.py`)
+### Self-Play Coordination (`main.py`)
 
-`SelfPlayManager` abstracts the "issue `ucinewgame` → `position fen <...>` → `go`" protocol:
+`SelfPlayManager` (now defined in `main.py`) abstracts the "issue `ucinewgame` → `position fen <...>` → `go`" protocol:
 1. Sends `ucinewgame` to each engine once at session start
 2. Loops: send `position fen <current>` to side-to-move, send `go`, wait for `bestmove`, apply move, repeat
 3. `stop()` dispatches `stop` to the in-flight engine, cancels pending moves, restores UI controls
 4. Exports trace logs to `self_play_traces/` directory
 
-Both GUI and headless test harnesses use the same manager, ensuring behavioral consistency.
+Both GUI and headless (`python main.py --self-play`) harnesses use the same manager, ensuring behavioral consistency. Use `--include-perf-payload` when launching to preserve the raw JSON perf payload lines in logs and traces (they are filtered by default).
 
 ### Meta Configuration (`MetaParams`, `SearchTuning`)
 
@@ -139,9 +139,8 @@ These tests use:
 **Core Modules:**
 - `engine.py` / `pvsengine.py`: UCI engine with strategy stack and PV search backend
 - `simple_engine.py`: Lightweight heuristic-only engine for head-to-head testing
-- `main.py`: Launcher, boots two engine subprocesses and PySide6 GUI
+- `main.py`: Launcher, boots two engine subprocesses and PySide6 GUI, and hosts the self-play manager/headless loop
 - `gui.py`: PySide6 chess board UI and controls
-- `self_play.py`: Engine-versus-engine orchestration
 - `chess_logic.py`: Board utilities (move validation, repetition, PGN/SAN export)
 - `utils.py`: ANSI logging, Qt cleanup, glyph mapping, window placement
 

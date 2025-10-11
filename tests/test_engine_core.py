@@ -10,7 +10,7 @@ import chess
 import pytest
 
 import engine as engine_module
-from self_play import SelfPlayManager
+from main import SelfPlayManager
 
 
 class DummyStrategy(engine_module.MoveStrategy):
