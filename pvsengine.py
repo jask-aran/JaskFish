@@ -7,6 +7,7 @@ and UCI façade are easier to reason about and test in isolation.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import math
@@ -19,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import chess
 from chess import polyglot
@@ -117,6 +118,113 @@ PIECE_SQUARE_TABLES = {
         20, 30, 10, 0, 0, 10, 30, 20
     ]
 }
+
+
+PIECE_SQUARE_TABLES_BLACK: Dict[int, List[int]] = {
+    piece: [table[chess.square_mirror(square)] for square in chess.SQUARES]
+    for piece, table in PIECE_SQUARE_TABLES.items()
+}
+
+_FULL_BOARD_MASK = (1 << 64) - 1
+_ROOK_DIRECTIONS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_BISHOP_DIRECTIONS: Tuple[Tuple[int, int], ...] = ((1, 1), (1, -1), (-1, 1), (-1, -1))
+
+
+def _iterate_ray_targets(square: int, directions: Sequence[Tuple[int, int]], occupied: int) -> Iterable[int]:
+    start_file = chess.square_file(square)
+    start_rank = chess.square_rank(square)
+    for df, dr in directions:
+        file = start_file + df
+        rank = start_rank + dr
+        while 0 <= file < 8 and 0 <= rank < 8:
+            target = chess.square(file, rank)
+            target_bb = chess.BB_SQUARES[target]
+            if occupied & target_bb:
+                break
+            yield target
+            file += df
+            rank += dr
+
+
+def _direction_between(src: int, dst: int) -> Optional[Tuple[int, int]]:
+    file_diff = chess.square_file(dst) - chess.square_file(src)
+    rank_diff = chess.square_rank(dst) - chess.square_rank(src)
+    if file_diff == 0:
+        if rank_diff == 0:
+            return None
+        return (0, 1 if rank_diff > 0 else -1)
+    if rank_diff == 0:
+        return (1 if file_diff > 0 else -1, 0)
+    if abs(file_diff) == abs(rank_diff):
+        return (1 if file_diff > 0 else -1, 1 if rank_diff > 0 else -1)
+    return None
+
+
+def _path_clear(src: int, dst: int, occupied: int, direction: Tuple[int, int]) -> bool:
+    df, dr = direction
+    file = chess.square_file(src) + df
+    rank = chess.square_rank(src) + dr
+    while 0 <= file < 8 and 0 <= rank < 8:
+        square = chess.square(file, rank)
+        if square == dst:
+            return True
+        if occupied & chess.BB_SQUARES[square]:
+            return False
+        file += df
+        rank += dr
+    return False
+
+
+def _between_bitboard(src: int, dst: int, direction: Tuple[int, int]) -> int:
+    df, dr = direction
+    file = chess.square_file(src) + df
+    rank = chess.square_rank(src) + dr
+    mask = 0
+    while 0 <= file < 8 and 0 <= rank < 8:
+        square = chess.square(file, rank)
+        if square == dst:
+            break
+        mask |= chess.BB_SQUARES[square]
+        file += df
+        rank += dr
+    return mask
+
+
+def _generate_quiet_targets(
+    square: int,
+    piece_type: int,
+    color: bool,
+    occupied: int,
+) -> Set[int]:
+    results: Set[int] = set()
+    from_bb = chess.BB_SQUARES[square]
+    occupied_without_from = occupied & ~from_bb
+    empty_bb = (~occupied) & _FULL_BOARD_MASK
+
+    if piece_type == chess.KNIGHT:
+        mask = chess.BB_KNIGHT_ATTACKS[square] & empty_bb
+        results.update(chess.SquareSet(mask))
+    elif piece_type == chess.BISHOP:
+        results.update(_iterate_ray_targets(square, _BISHOP_DIRECTIONS, occupied_without_from))
+    elif piece_type == chess.ROOK:
+        results.update(_iterate_ray_targets(square, _ROOK_DIRECTIONS, occupied_without_from))
+    elif piece_type == chess.QUEEN:
+        results.update(_iterate_ray_targets(square, _BISHOP_DIRECTIONS, occupied_without_from))
+        results.update(_iterate_ray_targets(square, _ROOK_DIRECTIONS, occupied_without_from))
+    elif piece_type == chess.KING:
+        mask = chess.BB_KING_ATTACKS[square] & empty_bb
+        results.update(chess.SquareSet(mask))
+    elif piece_type == chess.PAWN:
+        forward = 8 if color == chess.WHITE else -8
+        one_step = square + forward
+        if 0 <= one_step < 64 and not (occupied & chess.BB_SQUARES[one_step]):
+            results.add(one_step)
+            start_rank = 1 if color == chess.WHITE else 6
+            if chess.square_rank(square) == start_rank:
+                two_step = one_step + forward
+                if 0 <= two_step < 64 and not (occupied & chess.BB_SQUARES[two_step]):
+                    results.add(two_step)
+    return results
 
 
 NSEC_PER_SEC = 1_000_000_000
@@ -312,13 +420,13 @@ class SearchLimits:
         if complexity <= 10:
             complexity_factor = 0.25
         elif complexity <= 20:
-            complexity_factor = 0.5
+            complexity_factor = 0.55
         elif complexity <= 35:
-            complexity_factor = 0.9
+            complexity_factor = 1.10
         elif complexity <= 60:
-            complexity_factor = 1.4
+            complexity_factor = 1.45
         else:
-            complexity_factor = 1.8 + min(0.6, (complexity - 60) * 0.01)
+            complexity_factor = 1.9 + min(0.6, (complexity - 60) * 0.01)
 
         tension_factor = 1.0
         if context.in_check or context.opponent_mate_in_one_threat:
@@ -427,9 +535,9 @@ def build_search_tuning(meta: MetaParams) -> Tuple[SearchTuning, SearchLimits]:
     fut_margin = 80 + int(140 * (1.0 - risk))
     razor_depth = 1 + int(2 * speed_bias)
     razor_margin = 220 + int(240 * (1.0 - risk))
-    # Reduced from 0.65+0.25 to 0.45+0.15 to give more headroom for next depth
-    # This prevents frequent depth 7 timeouts by stopping earlier (50-60% budget usage)
-    depth_stop_ratio = 0.45 + 0.15 * stability
+    # Allow deeper searches to consume more of the assigned budget while still
+    # leaving a safety margin for finalisation/communication.
+    depth_stop_ratio = 0.60 + 0.25 * stability
     q_threshold = -1.5 + risk
     killer_slots = 1 if speed_bias > 0.7 else 2
     history_decay = 0.85 + 0.1 * stability
@@ -506,6 +614,8 @@ class SearchBackend:
         limits: SearchLimits,
         reporter: SearchReporter,
         budget_seconds: Optional[float],
+        *,
+        stop_event: Optional[threading.Event] = None,
     ) -> SearchOutcome:
         raise NotImplementedError
 
@@ -917,15 +1027,259 @@ class SearchStats:
         return "\n".join(lines)
 
 
+class _SearchBoard:
+    __slots__ = (
+        "turn",
+        "occupied",
+        "occupied_white",
+        "occupied_black",
+        "piece_bitboards",
+        "castling_rights",
+        "ep_square",
+        "hash_key",
+        "_stack",
+    )
+
+    def __init__(self, board: chess.Board) -> None:
+        self.piece_bitboards = [[0] * 7, [0] * 7]
+        self._stack: List[
+            Tuple[
+                bool,
+                int,
+                int,
+                int,
+                Tuple[int, ...],
+                Tuple[int, ...],
+                int,
+                Optional[int],
+                int,
+            ]
+        ] = []
+        self._from_board(board)
+
+    def _from_board(self, board: chess.Board) -> None:
+        self.turn = board.turn
+        self.occupied = int(board.occupied)
+        self.occupied_white = int(board.occupied_co[chess.WHITE])
+        self.occupied_black = int(board.occupied_co[chess.BLACK])
+        for piece_type in range(1, 7):
+            self.piece_bitboards[0][piece_type] = int(board.pieces(piece_type, chess.WHITE).mask)
+            self.piece_bitboards[1][piece_type] = int(board.pieces(piece_type, chess.BLACK).mask)
+        self.castling_rights = board.castling_rights
+        self.ep_square = board.ep_square
+        try:
+            self.hash_key = board._transposition_key()
+        except AttributeError:
+            self.hash_key = polyglot.zobrist_hash(board)
+
+    def _snapshot(self) -> Tuple[
+        bool,
+        int,
+        int,
+        int,
+        Tuple[int, ...],
+        Tuple[int, ...],
+        int,
+        Optional[int],
+        int,
+    ]:
+        return (
+            self.turn,
+            self.occupied,
+            self.occupied_white,
+            self.occupied_black,
+            tuple(self.piece_bitboards[0]),
+            tuple(self.piece_bitboards[1]),
+            self.castling_rights,
+            self.ep_square,
+            self.hash_key,
+        )
+
+    def pop(self) -> None:
+        state = self._stack.pop()
+        (
+            self.turn,
+            self.occupied,
+            self.occupied_white,
+            self.occupied_black,
+            white_bitboards,
+            black_bitboards,
+            self.castling_rights,
+            self.ep_square,
+            self.hash_key,
+        ) = state
+        for piece_type in range(1, 7):
+            self.piece_bitboards[0][piece_type] = white_bitboards[piece_type]
+            self.piece_bitboards[1][piece_type] = black_bitboards[piece_type]
+
+    def push_move(self, board: chess.Board, move: chess.Move) -> None:
+        self._stack.append(self._snapshot())
+        color = board.turn
+        opponent = not color
+        color_idx = 0 if color else 1
+        opp_idx = 1 - color_idx
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            raise ValueError("Attempted to push move with no piece on from_square")
+
+        piece_type = piece.piece_type
+        from_bb = chess.BB_SQUARES[move.from_square]
+        to_bb = chess.BB_SQUARES[move.to_square]
+
+        # Remove moving piece from its origin square.
+        self.piece_bitboards[color_idx][piece_type] &= ~from_bb
+        if color == chess.WHITE:
+            self.occupied_white &= ~from_bb
+        else:
+            self.occupied_black &= ~from_bb
+        self.occupied &= ~from_bb
+
+        captured_piece_type: Optional[int] = None
+        capture_square = move.to_square
+
+        if board.is_en_passant(move):
+            capture_square = move.to_square - 8 if color == chess.WHITE else move.to_square + 8
+            capture_bb = chess.BB_SQUARES[capture_square]
+            captured_piece_type = chess.PAWN
+            self.piece_bitboards[opp_idx][chess.PAWN] &= ~capture_bb
+            if opponent == chess.WHITE:
+                self.occupied_white &= ~capture_bb
+            else:
+                self.occupied_black &= ~capture_bb
+            self.occupied &= ~capture_bb
+        else:
+            captured_piece = board.piece_at(move.to_square)
+            if captured_piece:
+                captured_piece_type = captured_piece.piece_type
+                capture_bb = to_bb
+                self.piece_bitboards[opp_idx][captured_piece_type] &= ~capture_bb
+                if opponent == chess.WHITE:
+                    self.occupied_white &= ~capture_bb
+                else:
+                    self.occupied_black &= ~capture_bb
+                self.occupied &= ~capture_bb
+
+        # Handle promotions.
+        placed_piece_type = move.promotion if move.promotion else piece_type
+        if move.promotion:
+            # Ensure promoted piece does not keep pawn bit.
+            self.piece_bitboards[color_idx][chess.PAWN] &= ~to_bb
+
+        self.piece_bitboards[color_idx][placed_piece_type] |= to_bb
+        if color == chess.WHITE:
+            self.occupied_white |= to_bb
+        else:
+            self.occupied_black |= to_bb
+        self.occupied |= to_bb
+
+        # Move rook for castling.
+        if piece_type == chess.KING and abs(move.to_square - move.from_square) == 2:
+            if color == chess.WHITE:
+                if move.to_square > move.from_square:
+                    rook_from, rook_to = chess.H1, chess.F1
+                else:
+                    rook_from, rook_to = chess.A1, chess.D1
+            else:
+                if move.to_square > move.from_square:
+                    rook_from, rook_to = chess.H8, chess.F8
+                else:
+                    rook_from, rook_to = chess.A8, chess.D8
+            rook_from_bb = chess.BB_SQUARES[rook_from]
+            rook_to_bb = chess.BB_SQUARES[rook_to]
+            self.piece_bitboards[color_idx][chess.ROOK] &= ~rook_from_bb
+            self.piece_bitboards[color_idx][chess.ROOK] |= rook_to_bb
+            if color == chess.WHITE:
+                self.occupied_white &= ~rook_from_bb
+                self.occupied_white |= rook_to_bb
+            else:
+                self.occupied_black &= ~rook_from_bb
+                self.occupied_black |= rook_to_bb
+            self.occupied &= ~rook_from_bb
+            self.occupied |= rook_to_bb
+
+        # Update castling rights.
+        rights = self.castling_rights
+        if piece_type == chess.KING:
+            if color == chess.WHITE:
+                rights &= ~(chess.BB_H1 | chess.BB_A1)
+            else:
+                rights &= ~(chess.BB_H8 | chess.BB_A8)
+        elif piece_type == chess.ROOK:
+            if move.from_square == chess.H1:
+                rights &= ~chess.BB_H1
+            elif move.from_square == chess.A1:
+                rights &= ~chess.BB_A1
+            elif move.from_square == chess.H8:
+                rights &= ~chess.BB_H8
+            elif move.from_square == chess.A8:
+                rights &= ~chess.BB_A8
+
+        if captured_piece_type == chess.ROOK:
+            if capture_square == chess.H1:
+                rights &= ~chess.BB_H1
+            elif capture_square == chess.A1:
+                rights &= ~chess.BB_A1
+            elif capture_square == chess.H8:
+                rights &= ~chess.BB_H8
+            elif capture_square == chess.A8:
+                rights &= ~chess.BB_A8
+
+        self.castling_rights = rights
+
+        # Update en-passant target.
+        if piece_type == chess.PAWN and abs(move.to_square - move.from_square) == 16:
+            self.ep_square = move.from_square + 8 if color == chess.WHITE else move.from_square - 8
+        else:
+            self.ep_square = None
+
+        # Toggle side to move.
+        self.turn = bool(opponent)
+        # Hash will be refreshed after the python-chess board state is updated.
+        self.hash_key = 0
+
+    def push_null(self) -> None:
+        self._stack.append(self._snapshot())
+        self.turn = not self.turn
+        self.ep_square = None
+        self.hash_key = 0
+
+    def finalize_move(self, board: chess.Board, verify: bool = False) -> None:
+        try:
+            self.hash_key = board._transposition_key()
+        except AttributeError:
+            self.hash_key = polyglot.zobrist_hash(board)
+        if verify:
+            self._assert_matches(board)
+
+    def _assert_matches(self, board: chess.Board) -> None:
+        assert self.turn == board.turn
+        assert self.occupied == int(board.occupied)
+        assert self.occupied_white == int(board.occupied_co[chess.WHITE])
+        assert self.occupied_black == int(board.occupied_co[chess.BLACK])
+        for piece_type in range(1, 7):
+            assert self.piece_bitboards[0][piece_type] == int(board.pieces(piece_type, chess.WHITE).mask)
+            assert self.piece_bitboards[1][piece_type] == int(board.pieces(piece_type, chess.BLACK).mask)
+        assert self.castling_rights == board.castling_rights
+        assert self.ep_square == board.ep_square
+        hash_val = getattr(board, "_transposition_key", None)
+        if callable(hash_val):
+            hash_val = hash_val()
+        else:
+            hash_val = polyglot.zobrist_hash(board)
+        assert self.hash_key == hash_val
+
+
 class _SearchState:
     __slots__ = (
         "board",
+        "search_board",
         "tuning",
         "meta",
         "limits",
         "reporter",
         "context",
         "deadline",
+        "stop_event",
         "tt",
         "killers",
         "history",
@@ -934,6 +1288,21 @@ class _SearchState:
         "principal_variation",
         "eval_cache",
         "eval_cache_max_size",
+        "mobility_cache",
+        "mobility_cache_max_size",
+        "king_safety_cache",
+        "king_safety_cache_max_size",
+        "see_cache",
+        "see_cache_max_size",
+        "qmove_cache",
+        "qmove_cache_max_size",
+        "material_w",
+        "material_b",
+        "pst_w",
+        "pst_b",
+        "bishops_w",
+        "bishops_b",
+        "eval_stack",
         "avoid_repetition",
         "repetition_penalty",
         "repetition_strong_penalty",
@@ -951,8 +1320,10 @@ class _SearchState:
         context: StrategyContext,
         budget: Optional[float],
         deadline: Optional[float] = None,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         self.board = board
+        self.search_board = _SearchBoard(board)
         self.tuning = tuning
         self.meta = meta
         self.limits = limits
@@ -961,6 +1332,7 @@ class _SearchState:
         self.budget = budget
         base_deadline = None if budget is None else time.perf_counter() + max(budget, tuning.min_time_limit)
         self.deadline = deadline if deadline is not None else base_deadline
+        self.stop_event = stop_event
         tt_size = int((meta.tt_budget_mb * 1024 * 1024) / 40)
         self.tt = PackedTranspositionTable(max(1024, tt_size))
         self.killers = KillerTable(tuning.search_depth + tuning.quiescence_depth, tuning.killer_slots)
@@ -971,11 +1343,30 @@ class _SearchState:
         # Larger eval cache with OrderedDict for LRU eviction (100K entries ≈ 3MB)
         self.eval_cache: "OrderedDict[int, float]" = OrderedDict()
         self.eval_cache_max_size = 100_000
+        self.mobility_cache: "OrderedDict[int, Tuple[int, int]]" = OrderedDict()
+        self.mobility_cache_max_size = 20_000
+        self.king_safety_cache: "OrderedDict[int, float]" = OrderedDict()
+        self.king_safety_cache_max_size = 20_000
+        self.see_cache: "OrderedDict[Tuple[int, int, int, Optional[int]], float]" = OrderedDict()
+        self.see_cache_max_size = 100_000
+        self.qmove_cache: "OrderedDict[int, Tuple[chess.Move, ...]]" = OrderedDict()
+        self.qmove_cache_max_size = 50_000
+        (
+            self.material_w,
+            self.material_b,
+            self.pst_w,
+            self.pst_b,
+            self.bishops_w,
+            self.bishops_b,
+        ) = self._compute_eval_totals(board)
+        self.eval_stack: List[Tuple[float, float, float, float, int, int]] = []
         self.avoid_repetition = meta.avoid_repetition
         self.repetition_penalty = meta.repetition_penalty
         self.repetition_strong_penalty = meta.repetition_strong_penalty
 
     def time_exceeded(self) -> bool:
+        if self.stop_event is not None and self.stop_event.is_set():
+            return True
         return self.deadline is not None and time.perf_counter() >= self.deadline
 
     def record_killer(self, ply: int, move: chess.Move) -> None:
@@ -1002,6 +1393,114 @@ class _SearchState:
         except ValueError:
             penalty = max(penalty, self.repetition_penalty)
         return penalty
+
+    def _compute_eval_totals(self, board: chess.Board) -> Tuple[float, float, float, float, int, int]:
+        material_w = material_b = 0.0
+        pst_w = pst_b = 0.0
+        bishops_w = bishops_b = 0
+
+        for piece_type, value in EVAL_PIECE_VALUES.items():
+            for square in board.pieces(piece_type, chess.WHITE):
+                material_w += value
+                pst_w += PIECE_SQUARE_TABLES[piece_type][square]
+                if piece_type == chess.BISHOP:
+                    bishops_w += 1
+            for square in board.pieces(piece_type, chess.BLACK):
+                material_b += value
+                pst_b += PIECE_SQUARE_TABLES_BLACK[piece_type][square]
+                if piece_type == chess.BISHOP:
+                    bishops_b += 1
+
+        return material_w, material_b, pst_w, pst_b, bishops_w, bishops_b
+
+    def push_eval(self, board: chess.Board, move: chess.Move) -> None:
+        self.search_board.push_move(board, move)
+        self.eval_stack.append(
+            (self.material_w, self.material_b, self.pst_w, self.pst_b, self.bishops_w, self.bishops_b)
+        )
+
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            return
+
+        color = piece.color
+        piece_type = piece.piece_type
+
+        if color == chess.WHITE:
+            self.pst_w -= PIECE_SQUARE_TABLES[piece_type][move.from_square]
+        else:
+            self.pst_b -= PIECE_SQUARE_TABLES_BLACK[piece_type][move.from_square]
+
+        captured_piece: Optional[chess.Piece]
+        if board.is_en_passant(move):
+            capture_square = move.to_square - 8 if color == chess.WHITE else move.to_square + 8
+            captured_piece = chess.Piece(chess.PAWN, not color)
+            if color == chess.WHITE:
+                self.material_b -= EVAL_PIECE_VALUES[chess.PAWN]
+                self.pst_b -= PIECE_SQUARE_TABLES_BLACK[chess.PAWN][capture_square]
+            else:
+                self.material_w -= EVAL_PIECE_VALUES[chess.PAWN]
+                self.pst_w -= PIECE_SQUARE_TABLES[chess.PAWN][capture_square]
+        else:
+            captured_piece = board.piece_at(move.to_square)
+            if captured_piece:
+                captured_type = captured_piece.piece_type
+                if captured_piece.color == chess.WHITE:
+                    self.material_w -= EVAL_PIECE_VALUES[captured_type]
+                    self.pst_w -= PIECE_SQUARE_TABLES[captured_type][move.to_square]
+                    if captured_type == chess.BISHOP:
+                        self.bishops_w -= 1
+                else:
+                    self.material_b -= EVAL_PIECE_VALUES[captured_type]
+                    self.pst_b -= PIECE_SQUARE_TABLES_BLACK[captured_type][move.to_square]
+                    if captured_type == chess.BISHOP:
+                        self.bishops_b -= 1
+
+        if move.promotion:
+            promotion_type = move.promotion
+            if color == chess.WHITE:
+                self.material_w -= EVAL_PIECE_VALUES[chess.PAWN]
+                self.material_w += EVAL_PIECE_VALUES[promotion_type]
+                self.pst_w += PIECE_SQUARE_TABLES[promotion_type][move.to_square]
+                if promotion_type == chess.BISHOP:
+                    self.bishops_w += 1
+            else:
+                self.material_b -= EVAL_PIECE_VALUES[chess.PAWN]
+                self.material_b += EVAL_PIECE_VALUES[promotion_type]
+                self.pst_b += PIECE_SQUARE_TABLES_BLACK[promotion_type][move.to_square]
+                if promotion_type == chess.BISHOP:
+                    self.bishops_b += 1
+        else:
+            if color == chess.WHITE:
+                self.pst_w += PIECE_SQUARE_TABLES[piece_type][move.to_square]
+            else:
+                self.pst_b += PIECE_SQUARE_TABLES_BLACK[piece_type][move.to_square]
+
+        if (
+            piece_type == chess.KING
+            and abs(chess.square_file(move.to_square) - chess.square_file(move.from_square)) == 2
+        ):
+            if color == chess.WHITE:
+                rook_from = move.to_square + 1 if move.to_square > move.from_square else move.to_square - 2
+                rook_to = move.to_square - 1 if move.to_square > move.from_square else move.to_square + 1
+                self.pst_w -= PIECE_SQUARE_TABLES[chess.ROOK][rook_from]
+                self.pst_w += PIECE_SQUARE_TABLES[chess.ROOK][rook_to]
+            else:
+                rook_from = move.to_square + 1 if move.to_square > move.from_square else move.to_square - 2
+                rook_to = move.to_square - 1 if move.to_square > move.from_square else move.to_square + 1
+                self.pst_b -= PIECE_SQUARE_TABLES_BLACK[chess.ROOK][rook_from]
+                self.pst_b += PIECE_SQUARE_TABLES_BLACK[chess.ROOK][rook_to]
+
+    def pop_eval(self) -> None:
+        self.search_board.pop()
+        (
+            self.material_w,
+            self.material_b,
+            self.pst_w,
+            self.pst_b,
+            self.bishops_w,
+            self.bishops_b,
+        ) = self.eval_stack.pop()
 
 
 class PVSearchBackend(SearchBackend):
@@ -1038,6 +1537,8 @@ class PVSearchBackend(SearchBackend):
         limits: SearchLimits,
         reporter: SearchReporter,
         budget_seconds: Optional[float],
+        *,
+        stop_event: Optional[threading.Event] = None,
     ) -> SearchOutcome:
         if self.tuning is None or self.meta is None:
             raise RuntimeError("PVSearchBackend not configured")
@@ -1050,6 +1551,7 @@ class PVSearchBackend(SearchBackend):
             reporter=reporter,
             context=context,
             budget=budget_seconds,
+            stop_event=stop_event,
         )
 
         start = time.perf_counter()
@@ -1128,7 +1630,7 @@ class PVSearchBackend(SearchBackend):
         
         try:
             # Run search
-            self.search(board, context, limits, reporter, budget_seconds=None)
+            self.search(board, context, limits, reporter, budget_seconds=None, stop_event=None)
         finally:
             profiler.disable()
         
@@ -1340,7 +1842,7 @@ class PVSearchBackend(SearchBackend):
             if principal_move and move == principal_move:
                 total += 11_000_000
             if board.is_capture(move):
-                total += 8_000_000 + int(self._see(board, move))
+                total += 8_000_000 + int(self._see(board, move, state))
             if move.promotion:
                 total += 6_000_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
             if board.gives_check(move):
@@ -1361,7 +1863,9 @@ class PVSearchBackend(SearchBackend):
         beta: float,
         is_pv: bool,
     ) -> float:
+        state.push_eval(board, move)
         board.push(move)
+        state.search_board.finalize_move(board)
         try:
             score = -self._alpha_beta(state, board, depth - 1, -beta, -alpha, ply=1, is_pv=is_pv, allow_null=True)
             penalty = 0.0
@@ -1370,6 +1874,7 @@ class PVSearchBackend(SearchBackend):
             score -= penalty
         finally:
             board.pop()
+            state.pop_eval()
         return score
 
     def _evaluate_root_parallel(
@@ -1447,6 +1952,7 @@ class PVSearchBackend(SearchBackend):
             context=parent_state.context,
             budget=parent_state.budget,
             deadline=parent_state.deadline,
+            stop_event=parent_state.stop_event,
         )
         score = self._search_root_move(local_state, local_board, move, depth, alpha, beta, False)
         return move, score, local_state.nodes
@@ -1494,9 +2000,17 @@ class PVSearchBackend(SearchBackend):
         in_check = board.is_check()
         static_eval = tt_entry.static_eval if tt_entry else None
 
-        if not in_check and not is_pv and allow_null and depth >= state.tuning.null_min_depth and self._has_material(board):
+        if (
+            not in_check
+            and not is_pv
+            and allow_null
+            and depth >= state.tuning.null_min_depth
+            and self._has_material(board)
+        ):
             state.stats.null_tried += 1
+            state.search_board.push_null()
             board.push(chess.Move.null())
+            state.search_board.finalize_move(board)
             try:
                 reduction = state.tuning.null_base_reduction + max(0, depth // max(1, state.tuning.null_depth_scale))
                 score = -self._alpha_beta(
@@ -1511,6 +2025,7 @@ class PVSearchBackend(SearchBackend):
                 )
             finally:
                 board.pop()
+                state.search_board.pop()
             if score >= beta:
                 state.stats.null_success += 1
                 state.stats.cuts_null += 1
@@ -1534,7 +2049,9 @@ class PVSearchBackend(SearchBackend):
             promotion = move.promotion is not None
             color = board.turn
 
+            state.push_eval(board, move)
             board.push(move)
+            state.search_board.finalize_move(board)
             try:
                 child_is_pv = is_pv and index == 0
                 new_allow_null = allow_null and not is_capture
@@ -1578,10 +2095,11 @@ class PVSearchBackend(SearchBackend):
                             -alpha,
                             ply=ply + 1,
                             is_pv=True,
-                            allow_null=new_allow_null,
-                        )
+                        allow_null=new_allow_null,
+                    )
             finally:
                 board.pop()
+                state.pop_eval()
 
             if score > best_value:
                 best_value = score
@@ -1633,7 +2151,7 @@ class PVSearchBackend(SearchBackend):
             if state.killers.is_killer(ply, move):
                 total += 9_500_000
             if board.is_capture(move):
-                total += 8_000_000 + int(self._see(board, move))
+                total += 8_000_000 + int(self._see(board, move, state))
             if move.promotion:
                 total += 6_000_000 + EVAL_PIECE_VALUES.get(move.promotion, 0)
             if board.gives_check(move):
@@ -1661,7 +2179,7 @@ class PVSearchBackend(SearchBackend):
         # Delta pruning margin: queen value + safety buffer
         delta_margin = 975.0  # Queen (900) + margin (75)
         
-        for move in self._generate_qmoves(board):
+        for move in self._generate_qmoves(state, board):
             if state.time_exceeded():
                 break
             
@@ -1678,16 +2196,19 @@ class PVSearchBackend(SearchBackend):
                         continue
             
             # SEE pruning: Skip bad captures (losing material)
-            see_score = self._see(board, move)
+            see_score = self._see(board, move, state)
             if see_score < -50:  # Losing more than half a pawn
                 state.stats.q_see_prunes += 1
                 continue
             
+            state.push_eval(board, move)
             board.push(move)
+            state.search_board.finalize_move(board)
             try:
                 score = -self._quiescence(state, board, -beta, -alpha, depth - 1, ply + 1)
             finally:
                 board.pop()
+                state.pop_eval()
             if score >= beta:
                 state.stats.q_cutoffs += 1
                 return beta
@@ -1696,38 +2217,18 @@ class PVSearchBackend(SearchBackend):
         return alpha
 
     def _evaluate(self, state: _SearchState, board: chess.Board) -> float:
-        key = polyglot.zobrist_hash(board)
+        key = board._transposition_key()
         cached = state.eval_cache.get(key)
         if cached is not None:
-            # Move to end for LRU (most recently used)
             state.eval_cache.move_to_end(key)
             return cached
 
-        # Use direct piece iteration instead of piece_map() for better performance
-        material_w = material_b = 0.0
-        pst_w = pst_b = 0.0
-        bishops_w = bishops_b = 0
-
-        for square in chess.SQUARES:
-            piece = board.piece_at(square)
-            if piece is None:
-                continue
-            
-            value = EVAL_PIECE_VALUES.get(piece.piece_type, 0)
-            table = PIECE_SQUARE_TABLES.get(piece.piece_type)
-            
-            if piece.color == chess.WHITE:
-                material_w += value
-                if table:
-                    pst_w += table[square]
-                if piece.piece_type == chess.BISHOP:
-                    bishops_w += 1
-            else:
-                material_b += value
-                if table:
-                    pst_b += table[chess.square_mirror(square)]
-                if piece.piece_type == chess.BISHOP:
-                    bishops_b += 1
+        material_w = state.material_w
+        material_b = state.material_b
+        pst_w = state.pst_w
+        pst_b = state.pst_b
+        bishops_w = state.bishops_w
+        bishops_b = state.bishops_b
 
         score = (material_w - material_b) + (pst_w - pst_b)
         if bishops_w >= 2:
@@ -1762,8 +2263,12 @@ class PVSearchBackend(SearchBackend):
         total = 0.0
         for color in (chess.WHITE, chess.BLACK):
             sign = 1 if color == chess.WHITE else -1
-            enemy_pawns = set(board.pieces(chess.PAWN, not color))
-            for square in board.pieces(chess.PAWN, color):
+            friendly_sq = board.pieces(chess.PAWN, color)
+            enemy_bb = board.pieces(chess.PAWN, not color).mask
+            bb = friendly_sq.mask
+            while bb:
+                lsb = bb & -bb
+                square = (lsb.bit_length() - 1)
                 file_idx = chess.square_file(square)
                 rank = chess.square_rank(square)
                 direction = 1 if color == chess.WHITE else -1
@@ -1775,7 +2280,7 @@ class PVSearchBackend(SearchBackend):
                     r = rank + direction
                     while 0 <= r < 8:
                         sq = chess.square(nf, r)
-                        if sq in enemy_pawns:
+                        if enemy_bb & chess.BB_SQUARES[sq]:
                             passed = False
                             break
                         r += direction
@@ -1785,24 +2290,32 @@ class PVSearchBackend(SearchBackend):
                     advancement = rank - 1 if color == chess.WHITE else 6 - rank
                     bonus = state.tuning.passed_pawn_base_bonus + state.tuning.passed_pawn_rank_bonus * max(0, advancement)
                     total += sign * bonus
+                bb ^= lsb
         return total
 
     def _mobility_term(self, state: _SearchState, board: chess.Board, 
                        cached_mobility: Optional[int] = None) -> float:
         # Mobility is expensive (requires legal move generation + null move)
-        # Use cached value if available to avoid regenerating legal moves
-        if cached_mobility is not None:
-            mobility = cached_mobility
+        key = board._transposition_key()
+        entry = state.mobility_cache.get(key)
+        if entry is not None:
+            state.mobility_cache.move_to_end(key)
+            mobility, opponent = entry
         else:
-            mobility = board.legal_moves.count()
-        
-        try:
-            board.push(chess.Move.null())
-            opponent = board.legal_moves.count()
-            board.pop()
-        except (ValueError, AssertionError):
-            # Null move illegal (e.g., in check)
-            opponent = mobility
+            if cached_mobility is not None:
+                mobility = cached_mobility
+            else:
+                mobility = board.legal_moves.count()
+            try:
+                board.push(chess.Move.null())
+                opponent = board.legal_moves.count()
+                board.pop()
+            except (ValueError, AssertionError):
+                opponent = mobility
+            state.mobility_cache[key] = (mobility, opponent)
+            state.mobility_cache.move_to_end(key)
+            if len(state.mobility_cache) > state.mobility_cache_max_size:
+                state.mobility_cache.popitem(last=False)
         return (mobility - opponent) * state.tuning.mobility_unit
 
     def _king_safety(self, state: _SearchState, board: chess.Board, phase: Optional[float] = None) -> float:
@@ -1813,6 +2326,12 @@ class PVSearchBackend(SearchBackend):
         # Skip king safety in endgame (phase < 0.3) - not worth the cost
         if phase < 0.3:
             return 0.0
+
+        key = board._transposition_key()
+        cached = state.king_safety_cache.get(key)
+        if cached is not None:
+            state.king_safety_cache.move_to_end(key)
+            return cached
         
         opening = phase
         endgame = 1.0 - phase
@@ -1851,7 +2370,10 @@ class PVSearchBackend(SearchBackend):
                 endgame_term = 0.0
             
             score += sign * (opening_term + endgame_term)
-        
+        state.king_safety_cache[key] = score
+        state.king_safety_cache.move_to_end(key)
+        if len(state.king_safety_cache) > state.king_safety_cache_max_size:
+            state.king_safety_cache.popitem(last=False)
         return score
 
     def _game_phase(self, board: chess.Board) -> float:
@@ -1889,25 +2411,265 @@ class PVSearchBackend(SearchBackend):
             probe.push(entry.move)
         return pv
 
-    def _generate_qmoves(self, board: chess.Board) -> Sequence[chess.Move]:
+    def _generate_qmoves(self, state: _SearchState, board: chess.Board) -> Sequence[chess.Move]:
+        key = board._transposition_key()
+        cached = state.qmove_cache.get(key)
+        if cached is not None:
+            state.qmove_cache.move_to_end(key)
+            return list(cached)
+
         in_check = board.is_check()
+        move_scores: List[Tuple[chess.Move, float, bool]] = []
+
+        if in_check:
+            for move in board.legal_moves:
+                see_score = self._see(board, move, state)
+                move_scores.append((move, see_score, board.gives_check(move)))
+        else:
+            capture_moves = self._generate_capture_moves(board)
+            seen: set[chess.Move] = set()
+            for move in capture_moves:
+                if move in seen:
+                    continue
+                seen.add(move)
+                see_score = self._see(board, move, state)
+                if see_score >= -50:
+                    move_scores.append((move, see_score, board.gives_check(move)))
+
+            for move in self._generate_quiet_promotions(board):
+                if move in seen:
+                    continue
+                seen.add(move)
+                see_score = self._see(board, move, state)
+                move_scores.append((move, see_score + 400.0, board.gives_check(move)))
+
+            for move in self._generate_quiet_checks(state, board, seen):
+                seen.add(move)
+                see_score = self._see(board, move, state)
+                move_scores.append((move, see_score + 250.0, True))
+
+        move_scores.sort(key=lambda entry: entry[1] + (500 if entry[2] else 0), reverse=True)
+        ordered = tuple(move for move, _, _ in move_scores)
+
+        state.qmove_cache[key] = ordered
+        state.qmove_cache.move_to_end(key)
+        if len(state.qmove_cache) > state.qmove_cache_max_size:
+            state.qmove_cache.popitem(last=False)
+
+        return list(ordered)
+
+    def _generate_capture_moves(self, board: chess.Board) -> List[chess.Move]:
+        color = board.turn
+        opponent = not color
+        occupied = board.occupied
+        enemy_bb = board.occupied_co[opponent]
         moves: List[chess.Move] = []
-        for move in board.legal_moves:
-            if in_check:
-                moves.append(move)
-                continue
-            if board.is_capture(move):
-                if self._see(board, move) >= -50:
+
+        for piece_type in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
+            for square in board.pieces(piece_type, color):
+                attacks = board.attacks(square)
+                capture_targets = attacks & chess.SquareSet(enemy_bb)
+                for to_square in capture_targets:
+                    if piece_type == chess.PAWN and chess.square_rank(to_square) in (0, 7):
+                        for promo in (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT):
+                            move = chess.Move(square, to_square, promotion=promo)
+                            if board.is_legal(move):
+                                moves.append(move)
+                        continue
+                    move = chess.Move(square, to_square)
+                    if board.is_legal(move):
+                        moves.append(move)
+
+        # En-passant capture if available
+        if board.ep_square is not None:
+            ep_square = board.ep_square
+            for from_square in chess.SquareSet(chess.BB_PAWN_ATTACKS[opponent][ep_square] & board.pieces(chess.PAWN, color).mask):
+                move = chess.Move(from_square, ep_square)
+                if board.is_legal(move):
                     moves.append(move)
-            elif move.promotion or board.gives_check(move):
-                moves.append(move)
-        moves.sort(key=lambda mv: self._see(board, mv) + (500 if board.gives_check(mv) else 0), reverse=True)
+
         return moves
 
-    def _see(self, board: chess.Board, move: chess.Move) -> float:
+    def _generate_quiet_promotions(self, board: chess.Board) -> List[chess.Move]:
+        color = board.turn
+        direction = 8 if color == chess.WHITE else -8
+        target_rank = 6 if color == chess.WHITE else 1
+        moves: List[chess.Move] = []
+        for square in board.pieces(chess.PAWN, color):
+            if chess.square_rank(square) != target_rank:
+                continue
+            to_square = square + direction
+            if not (0 <= to_square < 64):
+                continue
+            if board.piece_at(to_square) is not None:
+                continue
+            for promo in (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT):
+                move = chess.Move(square, to_square, promotion=promo)
+                if board.is_legal(move):
+                    moves.append(move)
+        return moves
+
+    def _generate_quiet_checks(
+        self,
+        state: _SearchState,
+        board: chess.Board,
+        seen: set[chess.Move],
+    ) -> List[chess.Move]:
+        enemy = not board.turn
+        enemy_king = board.king(enemy)
+        if enemy_king is None:
+            return []
+
+        search_board = state.search_board
+        color = board.turn
+        color_idx = 0 if color else 1
+        occupied = search_board.occupied
+        own_occ = search_board.occupied_white if color else search_board.occupied_black
+        opp_occ = search_board.occupied_black if color else search_board.occupied_white
+        enemy_king_bb = chess.BB_SQUARES[enemy_king]
+
+        candidates: Set[chess.Move] = set()
+
+        def consider(move: chess.Move) -> None:
+            if move in seen:
+                return
+            if board.piece_at(move.to_square) is not None:
+                return
+            if board.is_legal(move) and board.gives_check(move):
+                candidates.add(move)
+
+        # Pawn pushes that give immediate check.
+        pawn_bb = search_board.piece_bitboards[color_idx][chess.PAWN]
+        forward = 8 if color == chess.WHITE else -8
+        pawn_attacks = chess.BB_PAWN_ATTACKS[color]
+        for from_sq in chess.SquareSet(pawn_bb):
+            to_sq = from_sq + forward
+            if 0 <= to_sq < 64 and not (occupied & chess.BB_SQUARES[to_sq]):
+                if pawn_attacks[to_sq] & enemy_king_bb:
+                    consider(chess.Move(from_sq, to_sq))
+            start_rank = 1 if color == chess.WHITE else 6
+            if chess.square_rank(from_sq) == start_rank:
+                intermediate = from_sq + forward
+                to_sq = intermediate + forward
+                if (
+                    0 <= to_sq < 64
+                    and not (occupied & chess.BB_SQUARES[intermediate])
+                    and not (occupied & chess.BB_SQUARES[to_sq])
+                    and pawn_attacks[to_sq] & enemy_king_bb
+                ):
+                    consider(chess.Move(from_sq, to_sq))
+
+        # Knight jumps.
+        knight_bb = search_board.piece_bitboards[color_idx][chess.KNIGHT]
+        for from_sq in chess.SquareSet(knight_bb):
+            for to_sq in chess.SquareSet(chess.BB_KNIGHT_ATTACKS[from_sq] & _FULL_BOARD_MASK):
+                if occupied & chess.BB_SQUARES[to_sq]:
+                    continue
+                if chess.BB_KNIGHT_ATTACKS[to_sq] & enemy_king_bb:
+                    consider(chess.Move(from_sq, to_sq))
+
+        # Sliding pieces (bishops, rooks, queens).
+        def handle_slider(
+            bitboard: int,
+            directions: Sequence[Tuple[int, int]],
+            valid_dirs: Sequence[Tuple[int, int]],
+        ) -> None:
+            for from_sq in chess.SquareSet(bitboard):
+                from_bb = chess.BB_SQUARES[from_sq]
+                occupied_without_from = occupied & ~from_bb
+                for to_sq in _iterate_ray_targets(from_sq, directions, occupied_without_from):
+                    to_bb = chess.BB_SQUARES[to_sq]
+                    occupied_after = occupied_without_from | to_bb
+                    direction = _direction_between(to_sq, enemy_king)
+                    if direction is None or direction not in valid_dirs:
+                        continue
+                    if _path_clear(to_sq, enemy_king, occupied_after, direction):
+                        consider(chess.Move(from_sq, to_sq))
+
+        bishop_bb = search_board.piece_bitboards[color_idx][chess.BISHOP]
+        rook_bb = search_board.piece_bitboards[color_idx][chess.ROOK]
+        queen_bb = search_board.piece_bitboards[color_idx][chess.QUEEN]
+
+        handle_slider(bishop_bb, _BISHOP_DIRECTIONS, _BISHOP_DIRECTIONS)
+        handle_slider(rook_bb, _ROOK_DIRECTIONS, _ROOK_DIRECTIONS)
+        handle_slider(queen_bb, _BISHOP_DIRECTIONS, _BISHOP_DIRECTIONS)
+        handle_slider(queen_bb, _ROOK_DIRECTIONS, _ROOK_DIRECTIONS)
+
+        # King moves that give immediate check.
+        king_sq = board.king(color)
+        if king_sq is not None:
+            for to_sq in chess.SquareSet(chess.BB_KING_ATTACKS[king_sq] & _FULL_BOARD_MASK):
+                if occupied & chess.BB_SQUARES[to_sq]:
+                    continue
+                if chess.BB_KING_ATTACKS[to_sq] & enemy_king_bb:
+                    consider(chess.Move(king_sq, to_sq))
+
+        # Discovered checks by clearing lines for sliders.
+        def handle_discovered(
+            slider_bb: int,
+            valid_dirs: Sequence[Tuple[int, int]],
+        ) -> None:
+            for slider_sq in chess.SquareSet(slider_bb):
+                direction = _direction_between(slider_sq, enemy_king)
+                if direction is None or direction not in valid_dirs:
+                    continue
+                between_bb = _between_bitboard(slider_sq, enemy_king, direction)
+                if not between_bb:
+                    continue
+                if between_bb & opp_occ:
+                    continue
+                blockers = between_bb & own_occ
+                if not blockers or blockers & (blockers - 1):
+                    continue
+                blocker_sq = next(iter(chess.SquareSet(blockers)))
+                blocker_bb = chess.BB_SQUARES[blocker_sq]
+                piece_type = None
+                for candidate_type in range(1, 7):
+                    if search_board.piece_bitboards[color_idx][candidate_type] & blocker_bb:
+                        piece_type = candidate_type
+                        break
+                if piece_type is None:
+                    continue
+                for target in _generate_quiet_targets(blocker_sq, piece_type, color, occupied):
+                    if chess.BB_SQUARES[target] & between_bb:
+                        continue
+                    consider(chess.Move(blocker_sq, target))
+
+        straight_sliders = rook_bb | queen_bb
+        diagonal_sliders = bishop_bb | queen_bb
+        handle_discovered(straight_sliders, _ROOK_DIRECTIONS)
+        handle_discovered(diagonal_sliders, _BISHOP_DIRECTIONS)
+
+        return sorted(candidates, key=lambda m: (m.from_square, m.to_square, m.promotion or 0))
+
+    def _see(
+        self,
+        board: chess.Board,
+        move: chess.Move,
+        state: Optional[_SearchState] = None,
+    ) -> float:
+        cache_key: Optional[Tuple[int, int, int, Optional[int]]] = None
+        if state is not None:
+            cache_key = (
+                board._transposition_key(),
+                move.from_square,
+                move.to_square,
+                move.promotion,
+            )
+            cached_val = state.see_cache.get(cache_key)
+            if cached_val is not None:
+                state.see_cache.move_to_end(cache_key)
+                return cached_val
+
         if hasattr(board, "see"):
             try:
-                return float(board.see(move))
+                value = float(board.see(move))
+                if state is not None and cache_key is not None:
+                    state.see_cache[cache_key] = value
+                    state.see_cache.move_to_end(cache_key)
+                    if len(state.see_cache) > state.see_cache_max_size:
+                        state.see_cache.popitem(last=False)
+                return value
             except (ValueError, AttributeError):
                 pass
         captured = board.piece_at(move.to_square)
@@ -1916,7 +2678,13 @@ class PVSearchBackend(SearchBackend):
         captured_val = EVAL_PIECE_VALUES.get(captured.piece_type, 0) if captured else 0
         mover = board.piece_at(move.from_square)
         mover_val = EVAL_PIECE_VALUES.get(mover.piece_type, 0) if mover else 0
-        return captured_val - mover_val
+        value = captured_val - mover_val
+        if state is not None and cache_key is not None:
+            state.see_cache[cache_key] = value
+            state.see_cache.move_to_end(cache_key)
+            if len(state.see_cache) > state.see_cache_max_size:
+                state.see_cache.popitem(last=False)
+        return value
 
     def _has_material(self, board: chess.Board) -> bool:
         minor_or_rook = False
@@ -1959,7 +2727,7 @@ def run_profile(fen: str, threads: int) -> None:
 
     profiler = cProfile.Profile()
     profiler.enable()
-    outcome = backend.search(board_copy, context, limits, reporter, budget)
+    outcome = backend.search(board_copy, context, limits, reporter, budget, stop_event=None)
     profiler.disable()
 
     print(
@@ -1983,6 +2751,23 @@ def profile_cli(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--threads", type=int, default=1, help="Number of search worker threads")
     args = parser.parse_args(list(argv) if argv is not None else None)
     run_profile(args.fen, args.threads)
+
+
+def engine_main(argv: Optional[Sequence[str]] = None) -> None:
+    default_preset = os.environ.get("JASKFISH_PRESET", "balanced")
+    parser = argparse.ArgumentParser(description="JaskFish PV engine entrypoint", add_help=True)
+    parser.add_argument("--profile", action="store_true", help="Run the profiling helper instead of UCI loop")
+    parser.add_argument(
+        "--preset",
+        choices=sorted(MetaRegistry.PRESETS.keys()),
+        default=default_preset,
+        help="Meta parameter preset to load",
+    )
+    args, remaining = parser.parse_known_args(list(argv) if argv is not None else None)
+    if args.profile:
+        profile_cli(remaining)
+    else:
+        ChessEngine(meta_preset=args.preset).start()
 
 
 class MateInOneStrategy(MoveStrategy):
@@ -2027,6 +2812,7 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._meta: Optional[MetaParams] = None
         self._tuning: Optional[SearchTuning] = None
         self._limits: Optional[SearchLimits] = None
+        self._stop_event: Optional[threading.Event] = None
         if max_threads is None:
             # Default to single-threaded to minimize Python GIL overhead
             # Multi-threading can be enabled by passing max_threads explicitly
@@ -2042,6 +2828,9 @@ class HeuristicSearchStrategy(MoveStrategy):
         self._tuning = tuning
         self._limits = limits
         self._backend.configure(tuning, meta)
+
+    def set_stop_event(self, event: threading.Event) -> None:
+        self._stop_event = event
 
     def is_applicable(self, context: StrategyContext) -> bool:
         return context.legal_moves_count > 0
@@ -2060,7 +2849,14 @@ class HeuristicSearchStrategy(MoveStrategy):
         )
 
         board_copy = board.copy(stack=True)
-        outcome = self._backend.search(board_copy, context, self._limits, reporter, budget)
+        outcome = self._backend.search(
+            board_copy,
+            context,
+            self._limits,
+            reporter,
+            budget,
+            stop_event=self._stop_event,
+        )
         if not outcome.move:
             self._logger(f"{self.log_tag}: backend returned no move")
             return None
@@ -2087,6 +2883,8 @@ class ChessEngine:
         self.move_calculating = False
         self.running = True
         self.state_lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.current_worker: Optional[threading.Thread] = None
 
         active_toggles = {toggle for toggle in (toggles or (StrategyToggle.MATE_IN_ONE, StrategyToggle.HEURISTIC))}
         self.meta_name = meta_preset
@@ -2098,6 +2896,7 @@ class ChessEngine:
         if StrategyToggle.HEURISTIC in active_toggles:
             heuristic = HeuristicSearchStrategy(logger=self._log_debug)
             heuristic.apply_config(self.meta_params)
+            heuristic.set_stop_event(self.stop_event)
             self.selector.register(heuristic)
 
         self.dispatch_table = {
@@ -2107,6 +2906,7 @@ class ChessEngine:
             "position": self.handle_position,
             "boardpos": self.handle_boardpos,
             "go": self.handle_go,
+            "stop": self.handle_stop,
             "ucinewgame": self.handle_ucinewgame,
             "uci": self.handle_uci,
             "setoption": self.handle_setoption,
@@ -2147,6 +2947,12 @@ class ChessEngine:
 
     def handle_quit(self, _: str) -> None:
         print("info string Engine shutting down")
+        with self.state_lock:
+            self.running = False
+            self.stop_event.set()
+            worker = self.current_worker
+        if worker and worker.is_alive():
+            worker.join(timeout=5.0)
         self.running = False
 
     def handle_debug(self, args: str) -> None:
@@ -2200,10 +3006,24 @@ class ChessEngine:
             if self.move_calculating:
                 print("info string Please wait for computer move")
                 return
+            self.stop_event.clear()
             self.move_calculating = True
 
         worker = threading.Thread(target=self._compute_move, args=(time_controls,))
+        with self.state_lock:
+            self.current_worker = worker
         worker.start()
+
+    def handle_stop(self, _: str) -> None:
+        with self.state_lock:
+            if not self.move_calculating:
+                print("info string Stop ignored; engine idle")
+                return
+            self.stop_event.set()
+            worker = self.current_worker
+        print("info string Stop signal received")
+        if worker and worker.is_alive():
+            worker.join(timeout=5.0)
 
     def _compute_move(self, time_controls: Optional[Dict[str, int]]) -> None:
         try:
@@ -2248,6 +3068,7 @@ class ChessEngine:
                     print("bestmove (none)")
                 print("readyok")
                 self.move_calculating = False
+                self.current_worker = None
 
         except Exception as exc:
             print(f"info string Error generating move: {exc}")
@@ -2255,6 +3076,7 @@ class ChessEngine:
                 print("bestmove (none)")
                 print("readyok")
                 self.move_calculating = False
+                self.current_worker = None
 
     def handle_ucinewgame(self, _: str) -> None:
         with self.state_lock:
@@ -2332,8 +3154,4 @@ class ChessEngine:
 
 
 if __name__ == "__main__":
-    if "--profile" in sys.argv[1:]:
-        args = [arg for arg in sys.argv[1:] if arg != "--profile"]
-        profile_cli(args)
-    else:
-        ChessEngine().start()
+    engine_main(sys.argv[1:])
