@@ -1,13 +1,13 @@
 # PVS Engine Improvement Plan
 
 ## 1. Context
-- Recent analysis of Sunfish’s architecture (`agent_plans/sunfish_engine_analysis.md`) highlighted how a compact engine derives strength from incremental evaluation and aggressive pruning rather than elaborate piece-square tables (PSTs).
+- Recent analysis of Sunfish’s architecture (`docs/sunfish_engine_analysis.md`) highlighted how a compact engine derives strength from incremental evaluation and aggressive pruning rather than elaborate piece-square tables (PSTs).
 - Self-play logs (e.g., `self_play_traces/3_selfplay.txt`) show PVS and HS entering nearly identical knight-first openings due to shared heuristics and deterministic search.
 
 ## 2. Findings Summary
 - Our evaluator combines fixed PSTs with additional terms (material, bishop pair, passed pawns, mobility, king safety). This already exceeds Sunfish’s PST-only scoring, so swapping tables would require retuning every auxiliary heuristic to avoid double-counting.
 - The deterministic move ordering coupled with mirrored PSTs explains repetitive openings more than PST quality itself; we see rooted convergence even when both sides run different engine wrappers.
-- Sunfish’s PST layout embeds material and uses a 10×12 index (`agent_plans/sunfish_engine_analysis.md`, sections 2.2 and 7). Direct transplantation would break evaluation scaling inside PVS.
+- Sunfish’s PST layout embeds material and uses a 10×12 index (`docs/sunfish_engine_analysis.md`, sections 2.2 and 7). Direct transplantation would break evaluation scaling inside PVS.
 
 ## 3. Planned Improvements
 1. **Search Efficiency Profiling**  
