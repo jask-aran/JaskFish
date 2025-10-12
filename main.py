@@ -450,10 +450,10 @@ def run_headless_self_play(args, script_dir: str) -> None:
         capture_payload=include_payload,
     )
 
-    def handle_bestmove(color: bool, move_line: str) -> None:
+    def handle_bestmove(color: bool, move_line: str) -> Optional[str]:
         parts = move_line.strip().split()
         if len(parts) < 2:
-            return
+            return None
         move_uci = parts[1]
         try:
             move = chess.Move.from_uci(move_uci)
@@ -461,18 +461,26 @@ def run_headless_self_play(args, script_dir: str) -> None:
             if not quiet:
                 label = engine_labels.get(color, "Engine")
                 print(info_text(f"{label} produced invalid move: {move_uci}"))
-            return
+            return None
         with board_lock:
             if move not in ui.board.legal_moves:
                 if not quiet:
                     label = engine_labels.get(color, "Engine")
                     print(info_text(f"{label} move illegal in current position: {move_uci}"))
-                return
+                return None
             ui.board.push(move)
-        manager.on_engine_move(color, move_uci)
+        return move_uci
 
     def reader(color: bool, engine: HeadlessEngineProcess) -> None:
         label = monitor_labels.get(engine, "Engine")
+        def emit(line: str) -> None:
+            if quiet:
+                return
+            print(recieved_text(f"{label} {line}"))
+
+        def bestmove_handler(line: str) -> Optional[str]:
+            return handle_bestmove(color, line)
+
         while not stop_event.is_set():
             line = engine.readline()
             if line == "":
@@ -485,13 +493,14 @@ def run_headless_self_play(args, script_dir: str) -> None:
             line = line.strip()
             if not line:
                 continue
-            manager.on_engine_output(color, line)
-            if not quiet and (include_payload or not line.startswith("info string perf payload=")):
-                print(recieved_text(f"{label} {line}"))
-            if line.startswith("bestmove"):
-                if not manager.should_apply_move(color):
-                    continue
-                handle_bestmove(color, line)
+            process_engine_output_line(
+                line,
+                expected_color=color,
+                manager=manager,
+                include_payload=include_payload,
+                emit=emit,
+                handle_bestmove=bestmove_handler,
+            )
 
     threads = [
         threading.Thread(target=reader, args=(chess.WHITE, white_engine), daemon=True),
@@ -555,6 +564,36 @@ def handle_bestmove_line(bestmove_line: str, gui: "ChessGUI", engine_label: str)
     return None
 
 
+def process_engine_output_line(
+    line: str,
+    *,
+    expected_color: Optional[bool],
+    manager: Optional[SelfPlayManager],
+    include_payload: bool,
+    emit: Callable[[str], None],
+    handle_bestmove: Callable[[str], Optional[str]],
+    manual_complete: Optional[Callable[[], None]] = None,
+) -> None:
+    if manager and expected_color is not None:
+        manager.on_engine_output(expected_color, line)
+
+    if line.startswith("bestmove"):
+        if manager and expected_color is not None and not manager.should_apply_move(expected_color):
+            return
+        emit(line)
+        move_uci = handle_bestmove(line)
+        if move_uci and manager and expected_color is not None:
+            manager.on_engine_move(expected_color, move_uci)
+        if manual_complete:
+            manual_complete()
+        return
+
+    if line.startswith("info string perf payload=") and not include_payload:
+        return
+
+    emit(line)
+
+
 def engine_output_processor(
     proc: QProcess,
     gui: "ChessGUI",
@@ -599,30 +638,32 @@ def engine_output_processor(
             if resolve_monitor_label is not None:
                 monitor_label = resolve_monitor_label(engine_id, expected_color)
 
-        if output.startswith("bestmove"):
-            if self_play_manager and expected_color is not None:
-                self_play_manager.on_engine_output(expected_color, output)
-            if self_play_manager and expected_color is not None:
-                if not self_play_manager.should_apply_move(expected_color):
-                    continue
+        def emit(line: str) -> None:
+            print(recieved_text(f"{monitor_label} {line}"))
 
-            print(recieved_text(f"{monitor_label} {output}"))
-            move_uci = handle_bestmove_line(output, gui, engine_label)
-            if move_uci and self_play_manager and expected_color is not None:
-                self_play_manager.on_engine_move(expected_color, move_uci)
+        def bestmove_handler(line: str) -> Optional[str]:
+            return handle_bestmove_line(line, gui, engine_label)
 
-            if manual_pending is not None and engine_id is not None:
+        manual_complete: Optional[Callable[[], None]] = None
+        if manual_pending is not None and engine_id is not None:
+            def _manual_complete() -> None:
                 if manual_pending.get(engine_id):
                     manual_pending[engine_id] = False
                     if manual_pending_color is not None:
                         manual_pending_color[engine_id] = None
                     gui.manual_evaluation_complete(engine_label)
-        else:
-            if self_play_manager and expected_color is not None:
-                self_play_manager.on_engine_output(expected_color, output)
-            if output.startswith("info string perf payload=") and not include_payload:
-                continue
-            print(recieved_text(f"{monitor_label} {output}"))
+
+            manual_complete = _manual_complete
+
+        process_engine_output_line(
+            output,
+            expected_color=expected_color,
+            manager=self_play_manager,
+            include_payload=include_payload,
+            emit=emit,
+            handle_bestmove=bestmove_handler,
+            manual_complete=manual_complete,
+        )
 
 
 def start_engine_process(path: str) -> QProcess:
