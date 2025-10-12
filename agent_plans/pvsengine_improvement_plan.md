@@ -24,5 +24,5 @@
 - Any PST experiments must subtract base material and align indices before comparison; reference section 7 of the Sunfish analysis for transformation requirements.
 
 ## 5. Next Actions
-- Set up benchmark runs (`pytest -m "not gui"` plus targeted search profiling) before and after search tweaks.
+- Set up benchmark runs (`pytest` plus targeted search profiling with `pytest -S tests/test_pvsengine_pvsearch.py`) before and after search tweaks.
 - Draft instrumentation tasks for incremental evaluation and tie-breaker randomness, then circulate for review.

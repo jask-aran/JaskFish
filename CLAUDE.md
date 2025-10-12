@@ -34,21 +34,20 @@ python pvsengine.py
 
 ### Testing
 ```bash
-# Run all tests except GUI and dev-marked tests
+# Run fast unit suite (GUI and slow search smoke tests are skipped by default)
 pytest
 
 # Run specific test file
-pytest tests/test_engine_core.py
+pytest tests/test_pvsengine_engine.py
 
-# Run only engine core tests (quick)
-pytest tests/test_engine_core.py -q
+# Run only engine core tests (quiet)
+pytest tests/test_pvsengine_engine.py -q
 
-# Run dev-marked headless self-play trace tests (slow, ~50s total)
-pytest -m dev tests/test_engine_core.py::test_headless_self_play_debug_trace
-pytest -m dev tests/test_engine_core.py::test_headless_self_play_midgame_trace
+# Include PV search smoke tests (longer-running engine searches)
+pytest -S tests/test_pvsengine_pvsearch.py
 
 # Run GUI tests (requires display or Xvfb)
-pytest -m gui tests/test_gui.py
+QT_QPA_PLATFORM=offscreen pytest -G tests/test_gui.py
 
 # Run with verbose output
 pytest -v

@@ -11,12 +11,17 @@
 - Tests are in `tests/` with shared fixtures in `conftest.py`; benchmarks and profiling helpers are in `benchmark_pvs.py` and `pvs_profile_output.txt`.
 
 ## Test Execution & Tooling
-- `pytest -m "not gui"` — default regression sweep; covers search heuristics, UCI handling, and self-play orchestration without the PySide6 dependency.
-- `pytest tests/test_engine_core.py` — validates the full UCI command surface (e.g. `uci`, `isready`, `position`, `go` parsing) with deterministic fixtures.
-- `pytest tests/test_search_backend.py -k "principal_variation"` — exercises the iterative-deepening and PVS pipeline; use `-k` filters to focus tight subtests.
-- `pytest tests/test_simple_engine.py` — regression tests for the lightweight search engine variant.
-- `pytest tests/test_self_play_manager.py` — headless verification of the self-play coordinator used by both GUI and tooling.
-- `pytest -m gui` — opt-in UI suite that boots PySide6; run inside a display-capable environment only.
+(See `docs/testing_architecture.md` for a deeper breakdown of suites, markers, and command recipes.)
+- `pytest` — default regression sweep. GUI tests and search smoke checks are skipped unless explicitly enabled, so this run stays fast and focuses on unit-level validation.
+- `pytest tests/test_pvsengine_engine.py` — validates the primary engine façade (`uci`, `position`, `go`, context helpers, mate detection) with deterministic fixtures.
+- `pytest tests/test_pvsengine_strategy_selector.py` — ensures strategy prioritisation, tie-breaking, and error handling are stable.
+- `pytest tests/test_pvsengine_search_limits.py` — exercises time-budget resolution and meta-parameter clamping.
+- `pytest tests/test_pvsengine_heuristic_strategy.py` — checks the heuristic strategy contract with the backend, including metadata normalisation.
+- `pytest -S tests/test_pvsengine_pvsearch.py` — opt-in PV search smoke run across curated FENs for legal move production and PV metadata.
+- `pytest tests/test_self_play_manager.py` — headless verification of self-play coordination, trace export, and engine swapping.
+- `pytest tests/test_simple_engine.py` — regression tests for the lightweight static-eval engine.
+- `pytest tests/test_chess_logic.py` / `tests/test_utils.py` — cover supporting helpers for board logic and terminal styling.
+- `pytest -G` — opt-in UI suite (`tests/test_gui.py`) that boots PySide6; run inside a display-capable environment only.
 
 ## Headless Engine Interaction
 - `python pvsengine.py` — spins up the primary engine in a blocking stdin/stdout loop. Send commands such as:
@@ -25,7 +30,7 @@
   - `position startpos` or `position fen <FEN>` to seed the board.
   - `go depth 4`, `go movetime 2000`, or `stop` to control analysis; monitor best-move lines via the streamed UCI output.
 - `python simple_engine.py` / `python hsengine.py` — launch alternative engines with the same UCI contract for differential testing.
-- Pipe scripted command sequences from fixtures (see `tests/test_engine_core.py`) to reproduce UCI edge cases without the GUI.
+- Pipe scripted command sequences from fixtures (see `tests/test_pvsengine_engine.py`) to reproduce UCI edge cases without the GUI.
 - Terminal output from the GUI and helpers is color coded via `utils.sending_text`/`utils.recieved_text`; expect mirrored `SENDING`/`RECIEVED` lines for every UCI command and engine response.
 
 ## GUI Command Pipeline & Time Budgets
@@ -37,11 +42,10 @@
 ## Testing & Validation Methods
 
 ### Pytest Suites
-- `pytest -m "not gui"` — primary regression sweep; covers strategy selection, UCI handlers, and self-play orchestration without PySide6.
-- `pytest tests/test_engine_core.py` — exercises the full UCI surface (`uci`, `isready`, `position`, `go`) and validates time-budget parsing edge cases.
-- `pytest tests/test_search_backend.py -k "principal_variation"` — focuses on iterative deepening, aspiration windows, and PV stability.
-- `pytest tests/test_simple_engine.py` / `pytest tests/test_self_play_manager.py` — verify the lightweight engine and self-play controller independently.
-- `pytest -m gui` — optional UI harness; run only in environments with a display server.
+- **Core engine & strategy** — `pytest tests/test_pvsengine_engine.py tests/test_pvsengine_strategy_selector.py`.
+- **Search configuration & backend** — `pytest tests/test_pvsengine_search_limits.py tests/test_pvsengine_heuristic_strategy.py` (add `-S` to include `tests/test_pvsengine_pvsearch.py`).
+- **Coordinator & auxiliaries** — `pytest tests/test_self_play_manager.py tests/test_simple_engine.py tests/test_chess_logic.py tests/test_utils.py`.
+- **GUI** — `pytest -G` (or `--gui`) to run `tests/test_gui.py`; requires PySide6 and a display/virtual frame buffer.
 
 ### Headless Self-Play Harness
 - `python main.py --self-play` — launches the same coordination logic used by the GUI, logging traces to `<X>_selfplay.txt` under `self_play_traces/`. Inspect the latest (highest `X`) file to review raw `info`/`bestmove` transcripts, inferred budgets, and stop reasons. Add `--include-perf-payload` to keep the raw JSON payload lines in both logs and traces.
@@ -54,7 +58,7 @@
 
 ### Direct UCI Sessions
 - `python pvsengine.py` (or `simple_engine.py` / `hsengine.py`) — interact via stdin/stdout using UCI commands. Send `uci`, `isready`, `position startpos`, and `go` to simulate the GUI pipeline; capture `info string` and `bestmove` responses directly.
-- Reuse scripted command batches from `tests/test_engine_core.py` to recreate corner cases, or issue commands manually to probe new heuristics while observing the live budget calculations and `info string perf …` summaries.
+- Reuse scripted command batches from `tests/test_pvsengine_engine.py` to recreate corner cases, or issue commands manually to probe new heuristics while observing the live budget calculations and `info string perf …` summaries.
 
 ## Build & Development Shortcuts
 - `python main.py` — launch the PySide6 GUI with the default engine pairing.
@@ -74,7 +78,7 @@
 
 ## Testing Guidelines
 - Tests use `pytest`; store new cases under `tests/` mirroring the module under test (e.g., `tests/test_pvsengine.py`).
-- Mark slow or GUI-dependent checks with the configured markers from `pytest.ini` (`@pytest.mark.gui`, `@pytest.mark.performance`).
+- Mark slow or GUI-dependent checks with the configured markers from `pytest.ini` (`@pytest.mark.gui`, `@pytest.mark.search_slow`, `@pytest.mark.performance`); opt in via `pytest -G`/`--gui` or `pytest -S`/`--search`.
 - Provide deterministic FEN fixtures and assert principal variation or score deltas rather than raw stdout.
 
 ## Commit & Pull Request Guidelines

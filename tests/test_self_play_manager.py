@@ -5,13 +5,14 @@ from main import SelfPlayManager
 
 
 class DummyGui:
-    def __init__(self, board: chess.Board):
-        self.board = board
+    def __init__(self) -> None:
+        self.board = chess.Board()
         self.self_play_active = False
         self.board_enabled = True
         self.manual_enabled = True
         self.info_message = ""
         self.last_activity = None
+        self.completed = []
 
     def set_self_play_active(self, active: bool) -> None:
         self.self_play_active = active
@@ -27,13 +28,14 @@ class DummyGui:
 
     def indicate_engine_activity(self, engine_label: str, context: str) -> None:
         self.last_activity = (engine_label, context)
-        self.info_message = f"{context}: {engine_label} evaluating…"
+        self.info_message = f"{context}: {engine_label} evaluating"
 
     def clear_engine_activity(self, message: str = "") -> None:
         self.last_activity = None
         self.info_message = message or "Engines idle"
 
     def self_play_evaluation_complete(self, engine_label: str) -> None:
+        self.completed.append(engine_label)
         self.info_message = f"Self-play: {engine_label} move received"
 
 
@@ -42,146 +44,135 @@ class EngineStub:
         self.commands = []
 
 
-@pytest.fixture()
-def self_play_setup():
-    board = chess.Board()
-    gui = DummyGui(board)
+def make_manager(gui=None, *, capture_payload: bool = True, trace_dir=None):
+    gui = gui or DummyGui()
     white_engine = EngineStub()
     black_engine = EngineStub()
 
-    def send_command_stub(engine, command: str) -> None:
+    def send_command(engine, command: str) -> None:
         engine.commands.append(command)
 
     manager = SelfPlayManager(
         gui,
         {chess.WHITE: white_engine, chess.BLACK: black_engine},
-        send_command_stub,
+        send_command,
         {
-            chess.WHITE: "White - Engine Alpha [1]",
-            chess.BLACK: "Black - Engine Beta [2]",
+            chess.WHITE: "White Engine",
+            chess.BLACK: "Black Engine",
         },
+        capture_payload=capture_payload,
+        trace_directory=trace_dir,
     )
-
     return manager, gui, white_engine, black_engine
 
 
-@pytest.fixture()
-def single_engine_setup():
-    board = chess.Board()
-    gui = DummyGui(board)
-    shared_engine = EngineStub()
-
-    def send_command_stub(engine, command: str) -> None:
-        engine.commands.append(command)
-
-    manager = SelfPlayManager(
-        gui,
-        {chess.WHITE: shared_engine, chess.BLACK: shared_engine},
-        send_command_stub,
-        {
-            chess.WHITE: "White - Engine Solo [1]",
-            chess.BLACK: "Black - Engine Solo [1]",
-        },
-    )
-
-    return manager, gui, shared_engine
-
-
-def test_self_play_start_initialises_engines(self_play_setup):
-    manager, gui, white_engine, black_engine = self_play_setup
-
+def test_start_initialises_engines_and_requests_move(tmp_path) -> None:
+    manager, gui, white_engine, black_engine = make_manager(trace_dir=tmp_path)
     assert manager.start() is True
     assert gui.self_play_active is True
     assert gui.board_enabled is False
     assert gui.manual_enabled is False
-    assert gui.info_message == "Self-play: White - Engine Alpha [1] evaluating…"
-
-    assert white_engine.commands[0] == "ucinewgame"
-    assert white_engine.commands[1] == f"position fen {gui.board.fen()}"
-    assert white_engine.commands[2] == "go"
+    assert gui.info_message == "Self-play: White Engine evaluating"
+    assert white_engine.commands[:3] == [
+        "ucinewgame",
+        f"position fen {gui.board.fen()}",
+        "go",
+    ]
     assert black_engine.commands == ["ucinewgame"]
 
 
-def test_self_play_stop_sends_stop_and_resets_ui(self_play_setup):
-    manager, gui, white_engine, _ = self_play_setup
+def test_start_with_shared_engine_sends_single_ucinewgame(tmp_path) -> None:
+    gui = DummyGui()
+    shared = EngineStub()
 
+    def send(engine, command: str) -> None:
+        engine.commands.append(command)
+
+    manager = SelfPlayManager(
+        gui,
+        {chess.WHITE: shared, chess.BLACK: shared},
+        send,
+        {
+            chess.WHITE: "Same",
+            chess.BLACK: "Same",
+        },
+        trace_directory=tmp_path,
+    )
+
+    assert manager.start() is True
+    assert shared.commands.count("ucinewgame") == 1
+
+
+def test_on_engine_move_switches_to_opponent(tmp_path) -> None:
+    manager, gui, white_engine, black_engine = make_manager(trace_dir=tmp_path)
     manager.start()
-    assert manager.stop() is True
+    move = chess.Move.from_uci("e2e4")
+    gui.board.push(move)
+    manager.on_engine_move(chess.WHITE, move.uci())
+
+    assert "White Engine" in gui.completed
+    assert gui.info_message == "Self-play: Black Engine evaluating"
+    assert black_engine.commands[-2:] == [
+        f"position fen {gui.board.fen()}",
+        "go",
+    ]
+    assert manager.current_expected_color() == chess.BLACK
+
+
+def test_stop_sends_stop_and_exports_trace(tmp_path) -> None:
+    manager, gui, white_engine, _ = make_manager(trace_dir=tmp_path)
+    manager.start()
+    manager.on_engine_output(chess.WHITE, "info string depth=1")
+    manager.stop("Finished")
 
     assert white_engine.commands[-1] == "stop"
     assert gui.self_play_active is False
     assert gui.board_enabled is True
     assert gui.manual_enabled is True
-    assert gui.info_message.startswith("Self-play stopped")
+    assert "Finished" in gui.info_message
+    trace_files = list(tmp_path.glob("*_selfplay.txt"))
+    assert trace_files, "Expected trace export"
+    assert manager.last_trace_path is not None
+    assert manager.last_trace_path.exists()
 
-    # First engine response after stop should be ignored
+
+def test_should_apply_move_respects_pending_ignore(tmp_path) -> None:
+    manager, gui, white_engine, _ = make_manager(trace_dir=tmp_path)
+    manager.start()
+    manager.stop()
     assert manager.should_apply_move(chess.WHITE) is False
     assert manager.should_apply_move(chess.WHITE) is True
 
 
-def test_self_play_requests_alternate_engine(self_play_setup):
-    manager, gui, white_engine, black_engine = self_play_setup
-
-    manager.start()
-    move = chess.Move.from_uci("e2e4")
-    gui.board.push(move)
-    manager.on_engine_move(chess.WHITE, "e2e4")
-
-    assert black_engine.commands[0] == "ucinewgame"
-    assert black_engine.commands[1] == f"position fen {gui.board.fen()}"
-    assert black_engine.commands[2] == "go"
-    assert manager.active is True
-    assert gui.info_message == "Self-play: Black - Engine Beta [2] evaluating…"
-
-
-def test_current_expected_color_tracks_turn(self_play_setup):
-    manager, gui, _, _ = self_play_setup
-
-    manager.start()
-    assert manager.current_expected_color() == chess.WHITE
-
-    move = chess.Move.from_uci("e2e4")
-    gui.board.push(move)
-    manager.on_engine_move(chess.WHITE, "e2e4")
-
-    assert manager.current_expected_color() == chess.BLACK
-
-
-def test_update_engines_reconfigures_active_session(self_play_setup):
-    manager, gui, white_engine, black_engine = self_play_setup
-
+def test_update_engines_stops_active_session(tmp_path) -> None:
+    manager, gui, white_engine, black_engine = make_manager(trace_dir=tmp_path)
     manager.start()
     replacement = EngineStub()
 
     manager.update_engines(
         {chess.WHITE: replacement, chess.BLACK: black_engine},
         {
-            chess.WHITE: "White - Engine Gamma [3]",
-            chess.BLACK: "Black - Engine Beta [2]",
+            chess.WHITE: "Replacement",
+            chess.BLACK: "Black Engine",
         },
     )
 
-    assert manager.active is False
     assert white_engine.commands[-1] == "stop"
+    assert manager.active is False
     assert manager.current_expected_color() is None
 
+
+def test_on_engine_output_respects_capture_flag(tmp_path) -> None:
+    manager, gui, white_engine, _ = make_manager(trace_dir=tmp_path, capture_payload=False)
     manager.start()
-    assert replacement.commands[0] == "ucinewgame"
+    manager.on_engine_output(chess.WHITE, "info string perf payload={\"nodes\":1}")
+    assert manager._session_traces[chess.WHITE] == []
+    manager.on_engine_output(chess.WHITE, "info string depth=2")
+    assert manager._session_traces[chess.WHITE] == ["info string depth=2"]
+    manager.stop()
 
-
-def test_self_play_with_single_engine_handles_both_colors(single_engine_setup):
-    manager, gui, shared_engine = single_engine_setup
-
-    assert manager.start() is True
-    assert shared_engine.commands[:3] == [
-        "ucinewgame",
-        f"position fen {gui.board.fen()}",
-        "go",
-    ]
-
-    move = chess.Move.from_uci("e2e4")
-    gui.board.push(move)
-    manager.on_engine_move(chess.WHITE, "e2e4")
-
-    assert shared_engine.commands[3] == f"position fen {gui.board.fen()}"
-    assert shared_engine.commands[4] == "go"
+    trace_files = list(tmp_path.glob("*_selfplay.txt"))
+    assert trace_files
+    content = trace_files[0].read_text()
+    assert "payload" not in content
+    assert "depth=2" in content

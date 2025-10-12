@@ -79,7 +79,7 @@
 
 ## 6. Suggested Next Steps
 - Prototype a sandbox branch to evaluate rotate/swapcase position handling inside `pvsengine.Position`, ensuring UCI integration remains stable.
-- Build new PST tables (or reuse Sunfish’s as a baseline) and wire incremental `value(move)` logic, verifying via existing regression suites (`pytest -m "not gui"`).
+- Build new PST tables (or reuse Sunfish’s as a baseline) and wire incremental `value(move)` logic, verifying via existing regression suites (`pytest` plus `pytest -S tests/test_pvsengine_pvsearch.py`).
 - Experiment with intrinsic capture thresholds in quiescence while logging node counts and search stability to compare against current heuristics.
 
 ## 7. Piece-Square Table Observations
