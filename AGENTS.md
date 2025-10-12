@@ -1,91 +1,140 @@
-# Repository Guidelines
+# Agent Guide
+
+This guide collects everything an agent needs to work productively in the JaskFish
+codebase. It blends the high-level architectural overview from the historical
+`CLAUDE.md` notes with the day-to-day workflows already documented for agents.
+
+## Overview
+- **Purpose**: JaskFish is a UCI-compliant chess engine with a PySide6 GUI. The
+  engine stack prioritises composable search strategies, deterministic testing,
+  and traceable time budgeting.
+- **Entrypoints**: `pvsengine.py` for the primary PVS engine, `simple_engine.py`
+  for the lightweight heuristic engine, `hsengine.py` for the hybrid stack, and
+  `main.py` for the GUI/self-play harness.
+- **Docs**: `docs/testing_architecture.md` (test layout) and
+  `docs/sunfish_engine_analysis.md` (legacy sunfish notes) are the authoritative
+  references beyond this file.
 
 ## Environment Setup
-- Always work inside the repository-managed virtual environment `.venv` so the engine runs against the pinned dependency set. Activate it with `source .venv/bin/activate` on Unix-like shells or `.venv\Scripts\activate` on Windows PowerShell before running any commands.
-- Install or refresh dependencies with `pip install -r requirements.txt` while the virtual environment is active.
+- Always activate the repository-managed virtual environment: `source .venv/bin/activate`
+  (Unix) or `.venv\Scripts\activate` (Windows PowerShell).
+- Refresh dependencies with `pip install -r requirements.txt` while the virtualenv
+  is active. The test suite and GUI expect the pinned versions.
+- Use `python -m pip` for per-module installs so the interpreter inside the
+  virtualenv is used explicitly.
 
-## Project Structure & Module Organization
-- Core engine logic lives in `pvsengine.py`; simplified or legacy variants sit in `simple_engine.py`, `hsengine.py`, and `legacy/`.
-- GUI entry point is `main.py` with supporting widgets in `gui.py`; reusable utilities live in `utils.py`.
-- Gameplay traces, saved games, and profiling artefacts are stored in `self_play_traces/`, `gamestates/`, and `profiles/` respectively.
-- Tests are in `tests/` with shared fixtures in `conftest.py`; benchmarks and profiling helpers are in `benchmark_pvs.py` and `pvs_profile_output.txt`.
+## Quick Command Reference
 
-## Test Execution & Tooling
-(See `docs/testing_architecture.md` for a deeper breakdown of suites, markers, and command recipes.)
-- `pytest` — default regression sweep. GUI tests and search smoke checks are skipped unless explicitly enabled, so this run stays fast and focuses on unit-level validation.
-- `pytest tests/test_pvsengine_engine.py` — validates the primary engine façade (`uci`, `position`, `go`, context helpers, mate detection) with deterministic fixtures.
-- `pytest tests/test_pvsengine_strategy_selector.py` — ensures strategy prioritisation, tie-breaking, and error handling are stable.
-- `pytest tests/test_pvsengine_search_limits.py` — exercises time-budget resolution and meta-parameter clamping.
-- `pytest tests/test_pvsengine_heuristic_strategy.py` — checks the heuristic strategy contract with the backend, including metadata normalisation.
-- `pytest -S tests/test_pvsengine_pvsearch.py` — opt-in PV search smoke run across curated FENs for legal move production and PV metadata.
-- `pytest tests/test_self_play_manager.py` — headless verification of self-play coordination, trace export, and engine swapping.
-- `pytest tests/test_simple_engine.py` — regression tests for the lightweight static-eval engine.
-- `pytest tests/test_chess_logic.py` / `tests/test_utils.py` — cover supporting helpers for board logic and terminal styling.
-- `pytest -G` — opt-in UI suite (`tests/test_gui.py`) that boots PySide6; run inside a display-capable environment only.
+### Application & Self-Play
+- `python main.py` — launch the GUI with default engine pairings.
+- `python main.py -fen "<fen>"` — start the GUI at a custom position.
+- `python main.py --self-play [--include-perf-payload]` — run headless self-play;
+  logs land in `self_play_traces/<n>_selfplay.txt`.
 
-## Headless Engine Interaction
-- `python pvsengine.py` — spins up the primary engine in a blocking stdin/stdout loop. Send commands such as:
-  - `uci` ➝ expect `id`/`uciok`.
-  - `isready` ➝ wait for `readyok` (engine reports busy if a search is in flight).
-  - `position startpos` or `position fen <FEN>` to seed the board.
-  - `go depth 4`, `go movetime 2000`, or `stop` to control analysis; monitor best-move lines via the streamed UCI output.
-- `python simple_engine.py` / `python hsengine.py` — launch alternative engines with the same UCI contract for differential testing.
-- Pipe scripted command sequences from fixtures (see `tests/test_pvsengine_engine.py`) to reproduce UCI edge cases without the GUI.
-- Terminal output from the GUI and helpers is color coded via `utils.sending_text`/`utils.recieved_text`; expect mirrored `SENDING`/`RECIEVED` lines for every UCI command and engine response.
+### Engines (UCI loops)
+- `python pvsengine.py` — primary engine; responds to `uci`, `position`, `go`.
+- `python simple_engine.py` — deterministic heuristic engine for fast testing.
+- `python hsengine.py` — hybrid strategy stack useful for regression comparisons.
 
-## GUI Command Pipeline & Time Budgets
-- Manual analysis uses `ChessGUI.go_command`, which issues `position fen <current>` followed by bare `go`. No explicit `depth`/`movetime` is supplied; `pvsengine.SearchLimits.resolve_budget` infers budgets from the board state. Early moves commonly receive ~2.5 s with a nominal depth limit of 5, while late middlegame searches drop toward ~1.3 s as seen in `self_play_traces/1_selfplay.txt`.
-- The GUI mirrors this through terminal logs: for every action you will see `SENDING` lines (e.g. `SENDING   White[W] position fen …`) followed by `RECIEVED` lines echoing `info string …`, `bestmove …`, and `readyok`. Expect patterns such as `info string HS: start search depth_limit=5 time_budget=2.51s legal_moves=22` and subsequent iterative deepening summaries down to aspiration-window adjustments or `search timeout` when the allocated window is exhausted.
-- Self-play reuses the same pipeline via `SelfPlayManager._request_move`, so the most recent `<X>_selfplay.txt` file reflects exactly what a GUI-initiated evaluation prints in the terminal, including `info string perf … time=1.66/2.51s` summaries and post-search `bestmove` announcements.
-- When comparing against benchmarks or scripted runs, match this GUI behaviour by letting the engine manage time autonomously (omit `go depth <n>`), then validate that the streamed `time_budget=` and `time=…/…` figures align with expectations.
+### Testing (Pytest markers are short options)
+- `pytest` — fast regression sweep (GUI and search smoke tests are skipped).
+- `pytest -S` or `pytest --search` — include PVS search smoke tests that drive
+  real engine searches.
+- `QT_QPA_PLATFORM=offscreen pytest -G` (or `--gui`) — run the PySide6 GUI tests
+  with an offscreen backend; omit the env var if a display server is available.
+- See `docs/testing_architecture.md` for suite-by-suite detail and extension tips.
 
-## Testing & Validation Methods
+### Benchmarking & Profiling
+- `python benchmark_pvs.py benchmark --threads 1 --depth 5` — throughput check on
+  curated FENs; compares nodes/sec and PVs.
+- `python benchmark_pvs.py profile --threads 1 --output profiles/pvs_profile.txt`
+  — emit a combined cProfile trace suitable for hotspot analysis.
 
-### Pytest Suites
-- **Core engine & strategy** — `pytest tests/test_pvsengine_engine.py tests/test_pvsengine_strategy_selector.py`.
-- **Search configuration & backend** — `pytest tests/test_pvsengine_search_limits.py tests/test_pvsengine_heuristic_strategy.py` (add `-S` to include `tests/test_pvsengine_pvsearch.py`).
-- **Coordinator & auxiliaries** — `pytest tests/test_self_play_manager.py tests/test_simple_engine.py tests/test_chess_logic.py tests/test_utils.py`.
-- **GUI** — `pytest -G` (or `--gui`) to run `tests/test_gui.py`; requires PySide6 and a display/virtual frame buffer.
+## Architecture
 
-### Headless Self-Play Harness
-- `python main.py --self-play` — launches the same coordination logic used by the GUI, logging traces to `<X>_selfplay.txt` under `self_play_traces/`. Inspect the latest (highest `X`) file to review raw `info`/`bestmove` transcripts, inferred budgets, and stop reasons. Add `--include-perf-payload` to keep the raw JSON payload lines in both logs and traces.
-- Use these traces to cross-check GUI expectations (time budgets, depth ceilings, timeout behaviour) or to diff engine output across revisions.
+### Engine Stack (`pvsengine.py`)
+- **StrategySelector** orchestrates ordered strategies. Each `MoveStrategy`
+  returns a `StrategyResult` and may short-circuit by setting `definitive=True`.
+- **Built-in strategies**:
+  - `MateInOneStrategy` (highest priority) brute-forces mate threats and returns
+    immediately when a forced mate is found.
+  - `HeuristicSearchStrategy` performs iterative deepening PV search with
+    aspiration windows, quiescence, killer/history tables, null-move pruning,
+    late-move reductions, and repetition penalties.
+- **StrategyContext** snapshots board state (FEN, legal move count, repetition
+  info, check status, material data, resolved time controls) so strategies stay
+  side-effect free.
+- **Meta configuration**: `MetaParams` presets (`balanced`, `fastblitz`,
+  `tournament`) feed into `build_search_tuning`, which produces both `SearchTuning`
+  heuristics and `SearchLimits` (budget clamps, aspiration margins, depth goals).
+  Apply alternate configs with `HeuristicSearchStrategy.apply_config`.
+- **Budgeting & threading**: `SearchLimits.resolve_budget` clamps search windows
+  between safe minimum/maximum bounds. `ChessEngine.handle_go` runs the search in a
+  worker thread (via `ThreadPoolExecutor` for multi-root evaluation) to keep the
+  UCI loop responsive.
+- **Reporting**: `SearchReporter` standardises trace output: iterative deepening
+  summaries, aspiration adjustments, timeout reasons, and per-depth NPS metrics.
 
-### Benchmarks & Profiling CLI
-- `python benchmark_pvs.py benchmark --threads 1 --depth 5` — measures nodes-per-second over curated FENs; compare reported PVs and scores to GUI/self-play transcripts.
-- `python benchmark_pvs.py profile --threads 1 --output profiles/pvs_profile.txt` — writes combined `cProfile` output for hotspot analysis.
-- Prefer the same depth/budget settings as GUI runs when validating behavioural regressions; combine with self-play logs to ensure consistent PV ordering.
+### GUI & Self-Play (`main.py`, `gui.py`)
+- **Process model**: The GUI launches engine subprocesses defined in `ENGINE_SPECS`.
+  All analysis commands (`uci`, `position`, `go`, `stop`) flow through
+  `send_command_with_lookup`, and stdout is parsed by `engine_output_processor`
+  to update boards, logs, and clocks.
+- **SelfPlayManager** (headless and GUI) issues `ucinewgame`, manages alternating
+  `position`/`go` loops, and records transcripts to `self_play_traces/`. Both GUI
+  and headless runs therefore share identical command sequencing.
+- **Logging**: Use `utils.sending_text`, `utils.recieved_text`, and
+  `SearchReporter.trace` rather than ad-hoc prints so terminal colour coding and
+  tests remain consistent.
 
-### Direct UCI Sessions
-- `python pvsengine.py` (or `simple_engine.py` / `hsengine.py`) — interact via stdin/stdout using UCI commands. Send `uci`, `isready`, `position startpos`, and `go` to simulate the GUI pipeline; capture `info string` and `bestmove` responses directly.
-- Reuse scripted command batches from `tests/test_pvsengine_engine.py` to recreate corner cases, or issue commands manually to probe new heuristics while observing the live budget calculations and `info string perf …` summaries.
+### Key Modules & Data
+- `pvsengine.py` — primary engine and strategy stack described above.
+- `hsengine.py` — historical hybrid engine kept for comparison regressions.
+- `simple_engine.py` — minimal heuristic-only engine (no deep search).
+- `gui.py` — PySide6 widget layer for boards, clocks, and control panels.
+- `utils.py` — logging helpers, ANSI colouring, Qt cleanup utilities.
+- `chess_logic.py` — board helpers, repetition detection, PGN/SAN utilities.
+- `tests/` — full regression suite (see Testing Strategy below).
+- `docs/` — long-form documentation (`testing_architecture.md`,
+  `sunfish_engine_analysis.md`).
+- `self_play_traces/`, `gamestates/`, `profiles/` — generated artefacts for
+  self-play logs, exported game states, and profiler outputs respectively.
 
-## Build & Development Shortcuts
-- `python main.py` — launch the PySide6 GUI with the default engine pairing.
-- Use the `SearchReporter` hooks and `utils.debug_text` when instrumenting new heuristics so test and benchmark output stays consistent.
+## Testing Strategy
+- Tests default to **instant feedback**; long-running GUI and search suites are
+  opt-in (`-G`, `-S`). This keeps `pytest` suitable for quick pre-commit runs.
+- Suite organisation mirrors engine components:
+  - `tests/test_pvsengine_engine.py`, `test_pvsengine_strategy_selector.py`,
+    `test_pvsengine_search_limits.py`, and `test_pvsengine_heuristic_strategy.py`
+    cover the UCI façade, strategy ordering, budget resolution, and search config.
+  - `tests/test_pvsengine_pvsearch.py` is marked `search` and gated behind `-S`.
+  - `tests/test_self_play_manager.py`, `tests/test_simple_engine.py`,
+    `tests/test_chess_logic.py`, and `tests/test_utils.py` exercise supporting
+    modules and coordination helpers.
+  - `tests/test_gui.py` is marked `gui` and depends on PySide6 plus a display or
+    offscreen backend.
+- Markers live in `pytest.ini`; `conftest.py` exposes fixtures for engine harnesses,
+  FEN repositories, and GUI bootstrapping. Extend these instead of duplicating
+  harness code.
+- For a deep dive into intended coverage, fixture relationships, and extension
+  recipes, read `docs/testing_architecture.md`.
 
-## Artifact Locations
-- `profiles/` — contains profiler captures; `benchmark_pvs.py profile` defaults to `profiles/pvs_profile.txt`, summarising each scenario with 80-character separators around `cProfile` output.
-- `self_play_traces/` — chronological logs for automated matches stored as `<X>_selfplay.txt`. Sort numerically on `X` to find the latest run, then parse the `[White - …]`/`[Black - …]` sections to reconstruct engine dialogue.
-- `gamestates/` — GUI exports produce `chess_game_<timestamp>.json` with `fen-init`, `fen-final`, and SAN/UCI move lists; leverage these snapshots to rerun reproductions via `position` commands.
-- `pvs_profile_output.txt` — historical benchmark report for quick diffing; regenerate via `python benchmark_pvs.py profile --output pvs_profile_output.txt` when comparing branches.
-- `agent_plans/` — repository of planning notes (e.g., `testing_improvements_plan_<date>.md`) that capture coordinated test or profiling work; add future investigation plans here for discoverability.
+## Development Practices
+- Follow PEP 8 with 4-space indentation; prefer type hints and dataclasses for
+  new constructs.
+- Stick with `snake_case` for functions/variables, `PascalCase` for classes.
+- Avoid stray prints—route logging through `utils.debug_text`, `SearchReporter`,
+  or existing structured channels.
+- When changing search behaviour, capture evidence via `pytest -S` and, if
+  relevant, `benchmark_pvs.py benchmark`. For GUI-affecting work, add or update
+  cases in `tests/test_gui.py`.
+- Commit style: short imperative titles (`Improve aspiration window logging`),
+  reference related issues in bodies, and note any benchmarks or GUI screenshots.
 
-## Coding Style & Naming Conventions
-- Follow PEP 8 with 4-space indentation; type hints and dataclasses are the norm for new Python code.
-- Use `snake_case` for functions and variables, `PascalCase` for classes, and keep modules cohesive around a single concern.
-- Logging should use the existing helper hooks (`utils.debug_text`, `SearchReporter.trace`) rather than ad-hoc `print` calls.
-
-## Testing Guidelines
-- Tests use `pytest`; store new cases under `tests/` mirroring the module under test (e.g., `tests/test_pvsengine.py`).
-- Mark slow or GUI-dependent checks with the configured markers from `pytest.ini` (`@pytest.mark.gui`, `@pytest.mark.search_slow`, `@pytest.mark.performance`); opt in via `pytest -G`/`--gui` or `pytest -S`/`--search`.
-- Provide deterministic FEN fixtures and assert principal variation or score deltas rather than raw stdout.
-
-## Commit & Pull Request Guidelines
-- Craft short, imperative commit titles (e.g., `Improve aspiration window logging`), mirroring the existing history.
-- Reference related issues in the body and note user-facing changes, benchmarks, or new CLI options.
-- Pull requests should summarise the change, list test evidence (`pytest`, benchmarks), and include screenshots when UI behaviour shifts.
-
-## Performance & Profiling Tips
-- Use `python benchmark_pvs.py profile --threads 1` to generate aggregated profiler output in `profiles/`.
-- Within the engine, prefer `SearchReporter` timing hooks to instrument new strategies so benchmark output stays coherent.
+## Additional Resources
+- `README.md` — quickstart flow for developers outside the agent workflow.
+- `docs/testing_architecture.md` — canonical reference for the test matrix.
+- `docs/sunfish_engine_analysis.md` — preserved analysis of the Sunfish adapter.
+- `agent_plans/` — coordination notes for ongoing investigative efforts.
+- Reach out in this file when new workflows or conventions need to be surfaced;
+  keeping AGENTS.md current avoids divergence between contributors and automation.
