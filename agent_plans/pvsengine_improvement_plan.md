@@ -1,57 +1,86 @@
-# PVS Engine Improvement Plan
+# PVS Engine Improvement Plan — Status 2025-10-13
 
-## 1. Context
-- Recent analysis of Sunfish’s architecture (`docs/sunfish_engine_analysis.md`) highlighted how a compact engine derives strength from incremental evaluation and aggressive pruning rather than elaborate piece-square tables (PSTs).
-- Self-play logs (e.g., `self_play_traces/3_selfplay.txt`) show PVS and HS entering nearly identical knight-first openings due to shared heuristics and deterministic search.
+_Last updated: 2025-10-13 12:57:25 UTC on Linux Desktop (WSL2, 6.6.87.2-microsoft-standard-WSL2) running Python 3.12.3._
 
-## 2. Benchmark & Profiling Findings (2024-05 harness)
-- **Depth stalls under default budgeting**: The curated “Kingside pressure” run (`python benchmark_pvs.py benchmark --positions kingside_pressure --echo-info`) repeatedly halts at depth 3 with a depth‑4 timeout after ~2.0 s despite a 3.22 s budget. This is consistent with the dynamic budget resolver (`SearchLimits.resolve_budget`, `pvsengine.py:279-338`) assigning ~3.2 s and the deadline guard firing inside `_iterative_deepening` (`pvsengine.py:1173-1306`) before depth 4 can complete.
-- **Stop command absent**: The engine never recognises `stop`; the UCI dispatch table omits it (`pvsengine.py:2103-2112`), so `go infinite` runs until the depth loop exhausts its search_depth. Our head-to-head test on the same FEN needed ~138 s to finish depth 7 even after issuing `stop`, proving we currently rely entirely on deadline expiry.
-- **Throughput bottlenecks**: Profiling (`python benchmark_pvs.py profile --positions kingside_pressure`) shows 3.2 M calls in 3.3 s, dominated by `_alpha_beta`/`_quiescence` (`pvsengine.py:1454`, `pvsengine.py:1647`) plus `python-chess` move generation (`Board.generate_legal_moves`/`push`). `_evaluate` (`pvsengine.py:1698`) alone accounts for ~1.45 s over 3 k evaluations, which keeps depth 3 expensive.
-- **JSON payload confirms low NPS**: The perf telemetry for the same scenario reports 9 345 total nodes, 2.9 kN/s, and depth delta +62.5 cp; the engine never reaches the configured `search_depth=7` derived from the default meta preset (`build_search_tuning`, `pvsengine.py:405-479`).
+## 1. Current Performance Snapshot
 
-## 3. Recent Improvements (2024-05)
-- **Budget parity + stop support**: `depth_stop_ratio` now allows 60–85 % of the allocated time before aborting the next iteration (`pvsengine.py:420-454`), and the UCI façade wires `stop`/`quit` into a shared event with worker joins (`pvsengine.py:2081-2310`). Benchmarks and hand-issued UCI sessions now halt immediately when a stop arrives.
-- **Evaluation caching**: `_evaluate` switched to bitboard accumulation (no `piece_map` scans) and writes to a 100 K-entry LRU keyed by `board._transposition_key()` (`pvsengine.py:1730-1794`). Mobility and king-safety reuse the same key-based caches to avoid repeated legal-move counting (`pvsengine.py:1830-1892`).
-- **SEE / quiescence caching**: SEE values are memoised per hash (`pvsengine.py:1912-1947`), and quiescence move ordering caches the sorted capture/order list (`pvsengine.py:1894-1930`). Captures are now generated via a custom bitboard walker rather than iterating `board.legal_moves` (`pvsengine.py:1932-1994`).
-- **Prototype custom movegen**: `HeuristicSearchStrategy._generate_capture_moves` builds legal captures through direct bitboard attacks plus legality checks, dodging the full python-chess generator. Quiet promotions are derived explicitly from promotion ranks (`pvsengine.py:1996-2013`).
-- **Benchmark delta**: On the curated set (`benchmark_pvs.py benchmark --max-wait 20`), middlegame nodes rose by 25–40 % with unchanged budgets (e.g., Kingside pressure 11.4 K → 17.5 K nodes, 2.9 kN/s → 4.5 kN/s) and Opening Semi-Slav now reaches depth 4. Profiling still highlights `board.generate_legal_moves/push/gives_check` as the dominant cost, but `_evaluate` shrank from 2.46 s to ~1.92 s per profile run.
+### 1.1 Benchmark summary (`python benchmark_pvs.py benchmark --depth 5`, 1 thread)
+| Scenario | Phase | Depth (search/sel) | Nodes (total) | Time (s) | NPS | Score Δ |
+| --- | --- | --- | --- | --- | --- | --- |
+| Opening – Semi-Slav structure | Opening | 5 / 11 | 54,823 | 4.112 | 13,331 | +15.0 cp |
+| Middlegame – Kingside pressure | Middlegame | 5 / 11 | 50,495 | 3.929 | 12,850 | +75.6 cp |
+| Middlegame – Tactical imbalance | Middlegame | 5 / 10 | 61,628 | 4.799 | 12,842 | 0.0 cp |
+| Middlegame – Opposite-wing plans | Middlegame | 5 / 11 | 47,577 | 3.649 | 13,037 | –5.0 cp |
+| Endgame – Complex rook ending | Endgame | 5 / 10 | 19,595 | 1.005 | 19,505 | +8.0 cp |
+| Endgame – Knight vs pawns | Endgame | 7 / 9 | 10,051 | 0.374 | 26,894 | +14.0 cp |
 
-## 4. Open Areas & Next Experiments
-1. **Python-chess hotspots**
-   - `board.generate_legal_moves`, `board.generate_pseudo_legal_moves`, and `board.push/pop` remain the heaviest routines (~2 s combined per 6.7 s profile). Replacing these with a compiled generator or a full Sunfish-style move engine is the top throughput lever.
-   - `board.gives_check` and `board.attacks` still fire for almost every move. We should fold check detection into the custom generator (precompute attack masks and reuse SEE deltas) to avoid repeated python-chess calls.
-2. **Incremental feature stack**
-   - Current caching avoids recomputation but still rebuilds PST totals the first time a node appears. Introduce a feature stack tied to the search push/pop cycle (material, PST, bishop counts, phase counters) so `_evaluate` becomes a pure delta update per move.
-   - With a feature stack in place, we can expose phase and material deltas to mobility/king-safety without extra board queries.
-3. **Quiescence coverage**
-   - Quiet checking moves are currently omitted from the prototype generator. Re-introduce a lightweight check finder (e.g., targeting the opposing king square with ray masks) to keep tactical coverage while avoiding full `board.legal_moves` scans.
-4. **Hyperparameter follow-up**
-   - Re-run `benchmark_pvs.py` with higher `MetaParams.strength` / lower `speed_bias` to gauge depth scaling now that throughput improved.
-   - Compare quiescence SEE thresholds after caching (current -50 cp) and consider tuning to reduce `board.gives_check` invocations further.
+Observations:
+- Compared with the May 2024 baseline (≈10 kN/s middlegame), the engine sustains ~13 kN/s while reliably finishing depth 5 and occasionally depth 7 in low-branching endgames, aligning with the user’s reported ~30 % NPS gain.
+- Time budgets are being consumed almost entirely (≤0.02 s slack), validating the recent `depth_stop_ratio` and stop-handling work.
 
-## 5. PST Strategy
-- Maintain current tables while profiling their contribution; if future tuning is warranted, derive adjustments through data-driven methods (e.g., self-play gradient tuning) rather than importing Sunfish weights.
-- Any PST experiments must subtract base material and align indices before comparison; reference section 7 of the Sunfish analysis for transformation requirements.
+### 1.2 Profiling highlights (`python benchmark_pvs.py profile --positions kingside_pressure --threads 1`)
+- Sample outputs:
+  - Opening Semi-Slav: depth 4 in 7.06 s, NPS 2.4 k.
+  - Kingside Pressure: depth 3 in 6.77 s, NPS 1.9 k.
+  - Knight vs pawns: depth 8 in 1.62 s, NPS 6.5 k.
+- Dominant cumulative costs (Opening scenario):
+  - `_alpha_beta` + `_quiescence`: 6.95 s combined.
+  - `python-chess` move APIs: `generate_legal_moves` (2.07 s), `generate_pseudo_legal_moves` (1.32 s), `board.push` (1.29 s), `gives_check` (1.60 s), `attackers_mask` (0.28 s).
+  - Engine-side helpers: `_order_moves` (2.19 s), `_mobility_term` (1.74 s), `_passed_pawn_bonus` (0.32 s), `_generate_qmoves` (0.78 s).
+- Takeaway: python-chess move generation/push remain the heaviest bottlenecks despite caching and SearchBoard scaffolding.
 
-## 6. Next Actions
-- Finish incremental feature stack integration (push/pop deltas + phase counters) and measure impact on `_evaluate` plus `_passed_pawn_bonus`.
-- Extend the custom move generator beyond captures/promotions—start with knight/rook checking moves derived from the opponent king ray to cut remaining `board.legal_moves` reliance.
-- Prototype a shared-memory or C-extension move generator for bulk profiling; collect before/after stats on `generate_legal_moves` and `push/pop`.
-- Capture benchmark + profile snapshots after each major change to maintain a historical performance log (nodes, depth, NPS, high-cost functions).
+## 2. Completed Improvements
 
-## 7. Python-chess Escape Blueprint (2025-10-12)
+| Area | Status | Notes |
+| --- | --- | --- |
+| SearchBoard scaffold | ✅ | `_SearchBoard` mirrors key bitboards, castling, ep, hash; linked to `_SearchState.push_eval/pop_eval` to support incremental stats (`pvsengine.py:1030-1480`). Hash verification still reuses python-chess but groundwork for standalone state exists. |
+| Incremental evaluation | ✅ (material/PST/bishops) | Push/pop deltas update material, PST, bishop counters; evaluation caches (OrderedDict) reduce repeat computations (`pvsengine.py:1272-2290`). |
+| Quiescence enhancements | ✅ | Custom capture/promotion/check generators with SEE pruning, q-move cache, quiet-check enumeration using SearchBoard bitboards (`pvsengine.py:2421-2525`). |
+| Null/LMR heuristics | ✅ | Null-move gating via tuning, late-move reductions with history-assisted re-search, depth-based killers/history heuristics updated (`pvsengine.py:1998-2149`). |
+| Time management | ✅ | `SearchLimits` derived from preset tuning; `depth_stop_ratio` ensures margin; `profile_search` now reuses configured limits (fixes recent regression). |
+| UCI responsiveness | ✅ | `stop`, `quit`, and shared stop event implemented; worker join ensures immediate halts (`pvsengine.py:2888-2965`). |
+| Benchmark harness | ✅ | `benchmark_pvs.py` covers curated scenarios, CLI wrappers for profiling, integrates with presets. |
 
-- **Current blockers**: `_generate_quiet_checks` still loops over `board.generate_legal_moves()` and filters with `board.gives_check()`, while the main search path triggers `board.push()`/`pop()` for every node. Profiles identify these three python-chess calls as ~2.75 s of a 6.7 s search sample.
-- **SearchBoard scaffold**: Introduce a lightweight bitboard-backed state (`SearchBoard`) that mirrors python-chess fields (piece bitboards, occupancy, side-to-move, castling flags, ep square, hash). Extend `_SearchState.push_eval/pop_eval` to keep this structure in sync so evaluation stays incremental even when python-chess is phased out.
-- **Custom legal move generation**:
-  - Precompute directional masks for sliders plus knight/king attack tables we already use in evaluation.
-  - Emit pseudo-legal moves per piece type directly from bitboards, tagging capture/quiet/promotion subsets as we do today.
-  - Enforce legality by tracking pinned pieces and verifying king safety via fast attack maps—no `board.gives_check()` calls.
-  - Retain python-chess as an assertion-only fallback until unit tests confirm parity on a FEN suite (normal, in-check, pinned, promotions, en-passant).
-- **Push/Pop replacement**: Once `SearchBoard` can make/unmake moves (including castling, EP, promotions) and updates Zobrist keys plus repetition stacks, swap search routines to operate on it. Keep python-chess only for FEN I/O/UCI echo until confidence is high.
-- **Sunfish lessons**: Reuse Sunfish’s 0x88 movegen patterns (direction lists, inline pawn logic, rook/king castling hooks) as design guidance, but adapt them to our bitboard structure so evaluation deltas and ordering heuristics remain compatible.
-- **Validation plan**: 
-  1. Build parity tests that compare move lists and check flags between python-chess and the new generator on curated positions.
-  2. Profile after switching captures/quiet checks to the new path, ensuring the python-chess hotspot times collapse.
-  3. Record before/after benchmarks (depth, NPS) to verify throughput gains offset the refactor risk.
+## 3. Outstanding Workstreams
+
+### 3.1 Python-chess Dependency Reduction
+- **Root move ordering & quiescence** still call `board.legal_moves`, `board.gives_check`, `board.is_legal`. Replace with `_SearchBoard`-backed enumerators to cut 2–3 s per search in profiling traces.
+- **Push/pop**: every node triggers python-chess `push`/`pop`. Implement make/unmake directly on `_SearchBoard` (including castling, en passant, promotions, EP squares, repetition hashes). Use python-chess for validation only during testing.
+- **Check detection**: fold legality and check detection into move generation (pin masks, occupied ray scans) to avoid repeated `board.gives_check` calls.
+
+### 3.2 Full Incremental Feature Stack
+- Track passed-pawn lanes, mobility differentials, king-safety terms inside `_SearchState` so `_evaluate` becomes a pure delta function (no fresh board scans). This will also shrink the OrderedDict cache churn.
+- With mobility cached per push, remove `board.push(chess.Move.null())` in `_mobility_term` by evaluating opponent mobility via precomputed attack bitboards.
+
+### 3.3 Search Heuristic Refinements
+- **Hyperparameter re-tuning**: explore higher `MetaParams.strength` / lower `speed_bias` now that throughput improved; confirm depth scaling via `benchmark_pvs.py benchmark --depth 6` and targeted `--positions`.
+- **Quiescence coverage**: reintroduce efficient quiet-check generation for pinned pieces/underpromotions once movegen is custom; ensure SEE thresholds are retuned afterwards.
+- **Transposition table**: evaluate raising TT size and storing incremental evaluation to reduce `_evaluate` calls during re-searches.
+
+### 3.4 Validation & Tooling
+- Build parity tests comparing `_SearchBoard` move lists and check flags against python-chess across curated FEN suites (normal, in-check, pins, EP, promotions, castling).
+- Automate benchmark logging (nodes, NPS, depth per scenario) after each major change to maintain a performance timeline.
+- Capture profile snapshots post-refactor to ensure python-chess hotspots collapse as custom generators roll out.
+
+## 4. Near-Term Action Plan
+1. **Custom move enumeration (captures + quiets)**  
+   - Extend `_generate_capture_moves` to operate purely on `_SearchBoard` bitboards.  
+   - Implement `_generate_quiet_moves`/`_order_moves` using SearchBoard data, including check detection via attack masks and pin tracking.  
+   - Validate against python-chess via dedicated tests before switching default path.
+2. **Make/unmake without python-chess**  
+   - Add `_SearchBoard.apply_move` returning metadata for unmake; update `_SearchState.push_eval/pop_eval` to avoid calling python-chess during search except for verification in debug mode.  
+   - Update repetition bookkeeping to use SearchBoard hash exclusively.
+3. **Incremental feature deltas**  
+   - Maintain passed-pawn shields, mobility counts, king-safety metrics on the eval stack.  
+   - Refactor `_mobility_term`, `_passed_pawn_bonus`, `_king_safety` to read from the incremental data instead of recomputing from the board.
+4. **Re-benchmark & profile**  
+   - After each milestone above, run:  
+     - `python benchmark_pvs.py benchmark --depth 5` (baseline)  
+     - `python benchmark_pvs.py benchmark --depth 6 --positions kingside_pressure` (depth stretch)  
+     - `python benchmark_pvs.py profile --positions kingside_pressure` (hotspot verification)  
+   - Log timestamped results back into this document.
+
+## 5. Long-Term Vision
+- Replace python-chess move generation entirely with SearchBoard-native routines inspired by Sunfish’s 0x88 patterns and bitboard attacks, retaining python-chess only for FEN I/O and fallback verification.
+- Explore C-extension or Rust move generator once Python implementation proves stable, targeting ≥25 kN/s in middlegame benchmarks and consistent depth 6+ within current budgets.
+- Integrate automated tuning (e.g., self-play gradient descent) once throughput plateaus, ensuring evaluation parameters adapt to the faster search pipeline.

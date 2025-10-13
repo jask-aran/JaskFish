@@ -1606,6 +1606,8 @@ class PVSearchBackend(SearchBackend):
         
         if self.tuning is None or self.meta is None:
             raise RuntimeError("PVSearchBackend not configured - call configure() first")
+        if self.limits is None:
+            raise RuntimeError("Search limits not initialised - call configure() first")
         
         # Create a simple context for profiling
         context = StrategyContext(
@@ -1622,8 +1624,13 @@ class PVSearchBackend(SearchBackend):
             opponent_mate_in_one_threat=False,
         )
         
-        limits = SearchLimits(depth=depth)
-        reporter = SearchReporter(debug=False)
+        limits = SearchLimits(
+            min_time=self.limits.min_time,
+            max_time=self.limits.max_time,
+            base_time=self.limits.base_time,
+            time_factor=self.limits.time_factor,
+        )
+        reporter = SearchReporter(logger=lambda *_: None)
         
         profiler = cProfile.Profile()
         profiler.enable()
