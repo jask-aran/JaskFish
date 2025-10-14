@@ -1,0 +1,41 @@
+=== Opening – Semi-Slav structure (Opening) ===
+FEN: rn1qkbnr/pppb1ppp/4p3/3p4/3P4/2P2N2/PP2PPPP/RNBQKB1R w KQkq - 0 5
+  Python       | depth=2 | sel=5 | time=0.489s | nodes=4,020 | nps=8,223 | score=-50.0cp | best=c1g5 | pv=c1g5
+  Native       | depth=8 | sel=17 | time=0.500s | nodes=289,102 | nps=578,204 | score=500.0cp | best=d1b3 | pv=b1d2 f8d6 b3a4 g8f6 b1d2 g8f6
+    depthΔ=-6 | time py/native=0.98x | nodes py/native=0.01x
+
+=== Middlegame – Kingside pressure (Middlegame) ===
+FEN: r2q1rk1/pp1b1ppp/2n2n2/2bp4/3P4/2P1PN2/PP1NBPPP/R1BQ1RK1 w - - 0 10
+  Python       | depth=3 | sel=5 | time=0.436s | nodes=4,928 | nps=11,308 | score=57500.0cp | best=d4c5 | pv=d4c5
+  Native       | depth=8 | sel=19 | time=0.500s | nodes=317,916 | nps=635,832 | score=52000.0cp | best=d4c5 | pv=g1h1 c5d4 f3d4 c5d4 a1b1 b6d4
+    depthΔ=-5 | time py/native=0.87x | nodes py/native=0.02x
+
+=== Middlegame – Tactical imbalance (Middlegame) ===
+FEN: r1b2rk1/1pp1qppp/p1n2n2/3p4/2PP4/2N1PN2/PPQ2PPP/R1B2RK1 b - - 0 11
+  Python       | depth=2 | sel=7 | time=0.499s | nodes=4,012 | nps=8,044 | score=-4000.0cp | best=c6b4 | pv=c6b4
+  Native       | depth=7 | sel=17 | time=0.500s | nodes=224,370 | nps=448,740 | score=-2500.0cp | best=d5c4 | pv=c6d4 c2h7 e7e4 g2g4 c6d4 c2b3
+    depthΔ=-5 | time py/native=1.00x | nodes py/native=0.02x
+
+=== Middlegame – Opposite-wing plans (Middlegame) ===
+FEN: 2r2rk1/1b2bppp/p2p1n2/1p1Pp3/1P2P3/P1NB1N2/1B3PPP/2RR2K1 w - - 0 21
+  Python       | depth=2 | sel=8 | time=0.499s | nodes=4,580 | nps=9,185 | score=32500.0cp | best=d1d2 | pv=d1d2
+  Native       | depth=7 | sel=20 | time=0.500s | nodes=176,289 | nps=352,578 | score=34000.0cp | best=c1c2 | pv=d1d2 c8c3 c1a1 a6a5 d3b5 c8c1
+    depthΔ=-5 | time py/native=1.00x | nodes py/native=0.03x
+
+=== Endgame – Complex rook ending (Endgame) ===
+FEN: 8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1
+  Python       | depth=4 | sel=7 | time=0.413s | nodes=4,849 | nps=11,739 | score=3700.0cp | best=b4c4 | pv=b4c4
+  Native       | depth=15 | sel=19 | time=0.500s | nodes=512,884 | nps=1,025,768 | score=2500.0cp | best=b4f4 | pv=a5a6 h4g5 a5a6 g3g2 a5a6 h5g5
+    depthΔ=-11 | time py/native=0.83x | nodes py/native=0.01x
+
+=== Endgame – Knight vs pawns (Endgame) ===
+FEN: 8/5k2/1p4p1/1P2p3/4P3/2K3P1/5N2/8 w - - 0 50
+  Python       | depth=6 | sel=9 | time=0.499s | nodes=8,153 | nps=16,332 | score=32000.0cp | best=c3c4 | pv=c3c4
+  Native       | depth=25 | sel=29 | time=0.500s | nodes=578,074 | nps=1,156,148 | score=59500.0cp | best=c3c4 | pv=f2g4 g6g5 c4d5 g6g5 c4d3 g5f6
+    depthΔ=-19 | time py/native=1.00x | nodes py/native=0.01x
+
+=== Aggregate ===
+  Python       | avg depth=3.17 | avg time=0.472s | avg nodes=5,090 | avg nps=10,805 | avg score=20275.0cp
+  Native       | avg depth=11.67 | avg time=0.500s | avg nodes=349,772 | avg nps=699,545 | avg score=24333.3cp
+  Average time ratio (py/native): 0.94x
+  Mean depth delta (py-native): -8.50
