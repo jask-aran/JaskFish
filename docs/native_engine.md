@@ -86,6 +86,28 @@ The command prints per-position metrics (depth, elapsed time, nodes searched,
 and principal variation) for each engine, along with aggregate averages and
 Python/native ratios.
 
+## Recent upgrades
+
+The native engine has advanced significantly since the initial
+`cpvsengine_improvement_plan.md`. Highlights include:
+
+- **Tactical safety and quiescence**: Static exchange evaluation now scores
+  captures before they enter search, delta pruning filters hopeless trades, and
+  quiescence extends through checking moves to cover common tactics without
+  exploding the tree.
+- **Stability fixes**: Transposition-table entries store mate scores with ply
+  adjustments, eliminating the bogus `+30000` horizons. Iterative deepening now
+  uses aspiration windows with automatic re-search on fail-high/low.
+- **Selective search heuristics**: Null-move pruning, late-move reductions,
+  killer/history ordering, and SEE-aware move sorting focus nodes on critical
+  branches while preserving tactical coverage.
+- **Instrumentation**: Nodes, SEE calls, quiescence pruning, null-move usage,
+  and aspiration stats are exported via the `info string perf` summaries to
+  aid profiling.
+- **Time allocation**: `go` commands now derive budgets from the Python control
+  plane, and the engine supports both `movetime`/incremental controls and
+  adaptive moves-to-go limits.
+
 ## Known gaps
 
 The C engine mirrors the Python heuristics at a high level (piece-square tables,

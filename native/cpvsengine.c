@@ -11,6 +11,7 @@
 #define MAX_PLY 64
 #define TT_SIZE (1u << 20)
 #define INF 30000
+#define MATE_THRESHOLD (INF - MAX_PLY)
 
 typedef enum {
     COLOR_WHITE = 0,
@@ -63,6 +64,18 @@ static uint64_t tt_cutoffs;
 static uint64_t beta_cutoffs;
 static uint64_t first_move_cutoffs;
 static uint64_t pv_change_count;
+static uint64_t q_delta_prunes;
+static uint64_t q_see_prunes;
+static uint64_t q_check_expansions;
+static uint64_t null_move_tried;
+static uint64_t null_move_pruned;
+static uint64_t lmr_applied;
+static uint64_t lmr_researched;
+static uint64_t aspiration_fail_low_count;
+static uint64_t aspiration_fail_high_count;
+static uint64_t aspiration_research_count;
+static uint64_t move_generation_calls;
+static uint64_t see_evaluations;
 static int max_sel_depth;
 static int root_depth;
 static int best_move_global = 0;
@@ -74,6 +87,8 @@ static TTEntry transposition_table[TT_SIZE];
 
 static int pv_table[MAX_PLY][MAX_PLY];
 static int pv_length[MAX_PLY];
+static int history_table[2][128][128];
+static int killer_moves[MAX_PLY][2];
 
 static uint64_t zobrist_pieces[12][64];
 static uint64_t zobrist_castling[16];
@@ -182,6 +197,148 @@ static inline Color piece_color(int piece) {
 
 static inline int piece_type(int piece) {
     return piece > 0 ? piece : -piece;
+}
+
+static int get_piece_value(int piece) {
+    if (piece == 0) {
+        return 0;
+    }
+    int type = piece_type(piece);
+    if (type < 1 || type > 6) {
+        return 0;
+    }
+    return piece_values[type - 1];
+}
+
+static bool attacks_square_from_board(const int board[128], int from, int to, int piece) {
+    int type = piece_type(piece);
+    if (type == 0) {
+        return false;
+    }
+    int from_file = from & 7;
+    int from_rank = from >> 4;
+    int to_file = to & 7;
+    int to_rank = to >> 4;
+    if (type == 1) {
+        int forward = piece > 0 ? 16 : -16;
+        if (to == from + forward - 1 || to == from + forward + 1) {
+            return true;
+        }
+        return false;
+    }
+    if (type == 2) {
+        for (int i = 0; i < 8; ++i) {
+            int target = from + knight_offsets[i];
+            if (target == to) {
+                return square_on_board(target);
+            }
+        }
+        return false;
+    }
+    bool diag_aligned = abs(from_file - to_file) == abs(from_rank - to_rank);
+    bool straight_aligned = (from_file == to_file) || (from_rank == to_rank);
+    if (type == 3 || type == 5) {
+        if (!diag_aligned) {
+            if (type == 3) {
+                return false;
+            }
+        } else {
+            for (int i = 0; i < 4; ++i) {
+                int offset = bishop_offsets[i];
+                int sq = from + offset;
+                while (square_on_board(sq)) {
+                    if (sq == to) {
+                        return true;
+                    }
+                    if (board[sq] != 0) {
+                        break;
+                    }
+                    sq += offset;
+                }
+            }
+        }
+        if (type == 3) {
+            return false;
+        }
+    }
+    if (type == 4 || type == 5) {
+        if (!straight_aligned) {
+            return (type == 5) && diag_aligned;
+        }
+        for (int i = 0; i < 4; ++i) {
+            int offset = rook_offsets[i];
+            int sq = from + offset;
+            while (square_on_board(sq)) {
+                if (sq == to) {
+                    return true;
+                }
+                if (board[sq] != 0) {
+                    break;
+                }
+                sq += offset;
+            }
+        }
+        if (type == 4) {
+            return false;
+        }
+    }
+    if (type == 6) {
+        for (int i = 0; i < 8; ++i) {
+            int target = from + king_offsets[i];
+            if (target == to) {
+                return square_on_board(target);
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+static int find_least_valuable_attacker(const int board[128], int square, Color color, int *out_value) {
+    int best_square = -1;
+    int best_value = 1 << 30;
+    for (int sq = 0; sq < 128; ++sq) {
+        if (!square_on_board(sq)) {
+            sq += 7;
+            continue;
+        }
+        int piece = board[sq];
+        if (piece == 0 || piece_color(piece) != color) {
+            continue;
+        }
+        if (!attacks_square_from_board(board, sq, square, piece)) {
+            continue;
+        }
+        int value = get_piece_value(piece);
+        if (value < best_value || (value == best_value && best_square != -1 && piece_type(piece) < piece_type(board[best_square]))) {
+            best_value = value;
+            best_square = sq;
+        }
+    }
+    if (best_square != -1 && out_value) {
+        *out_value = best_value;
+    }
+    return best_square;
+}
+
+static int value_to_tt(int value, int ply) {
+    if (value > MATE_THRESHOLD) {
+        return value + ply;
+    }
+    if (value < -MATE_THRESHOLD) {
+        return value - ply;
+    }
+    return value;
+}
+
+static int value_from_tt(int value, int ply) {
+    if (value > MATE_THRESHOLD) {
+        return value - ply;
+    }
+    if (value < -MATE_THRESHOLD) {
+        return value + ply;
+    }
+    return value;
 }
 
 static uint64_t random_u64(void) {
@@ -380,6 +537,17 @@ static bool square_attacked(const Position *pos, int square, Color by_color);
 static bool make_move(Position *pos, int move, Undo *undo);
 static void undo_move(Position *pos, int move, const Undo *undo);
 static void generate_moves(const Position *pos, MoveList *list, bool captures_only);
+static int move_from(int move);
+static int move_to(int move);
+static int move_promotion(int move);
+static int move_flags(int move);
+static int get_piece_value(int piece);
+static int find_least_valuable_attacker(const int board[128], int square, Color color, int *out_value);
+static int see(const Position *pos, int move);
+static int value_to_tt(int value, int ply);
+static int value_from_tt(int value, int ply);
+static void make_null_move(Position *pos, Undo *undo);
+static void undo_null_move(Position *pos, const Undo *undo);
 static int search(Position *pos, int depth, int alpha, int beta, int ply);
 static int quiescence(Position *pos, int alpha, int beta, int ply);
 static void *search_position(void *arg);
@@ -519,6 +687,72 @@ enum MoveFlags {
     FLAG_CASTLING = 8
 };
 
+static int see(const Position *pos, int move) {
+    see_evaluations++;
+    int from = move_from(move);
+    int to = move_to(move);
+    int promotion = move_promotion(move);
+    int flags = move_flags(move);
+    int board[128];
+    memcpy(board, pos->squares, sizeof(board));
+    int mover = board[from];
+    if (mover == 0) {
+        return 0;
+    }
+    int captured_value = 0;
+    if (flags & FLAG_EN_PASSANT) {
+        int ep_sq = (pos->side_to_move == COLOR_WHITE) ? (to - 16) : (to + 16);
+        captured_value = get_piece_value(board[ep_sq]);
+        board[ep_sq] = 0;
+    } else {
+        captured_value = get_piece_value(board[to]);
+    }
+    if (!(flags & FLAG_CAPTURE) && !(flags & FLAG_EN_PASSANT) && !promotion) {
+        return 0;
+    }
+    board[from] = 0;
+    if (promotion) {
+        captured_value += piece_values[promotion - 1] - piece_values[0];
+        mover = (pos->side_to_move == COLOR_WHITE) ? promotion : -promotion;
+    }
+    board[to] = mover;
+    int gain[MAX_PLY];
+    int depth = 0;
+    gain[0] = captured_value;
+    Color stm = (pos->side_to_move == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
+    while (true) {
+        int attacker_value = 0;
+        int attacker_sq = find_least_valuable_attacker(board, to, stm, &attacker_value);
+        if (attacker_sq == -1) {
+            break;
+        }
+        int attacker_piece = board[attacker_sq];
+        board[attacker_sq] = 0;
+        depth++;
+        if (depth >= MAX_PLY) {
+            depth--;
+            board[attacker_sq] = attacker_piece;
+            break;
+        }
+        gain[depth] = attacker_value - gain[depth - 1];
+        board[to] = attacker_piece;
+        stm = (stm == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
+        if (piece_type(attacker_piece) == 6) {
+            break;
+        }
+    }
+    while (depth > 0) {
+        int alt = gain[depth];
+        int prev = gain[depth - 1];
+        if (-prev > alt) {
+            alt = -prev;
+        }
+        gain[depth - 1] = -alt;
+        depth--;
+    }
+    return gain[0];
+}
+
 static void add_move(const Position *pos, MoveList *list, int from, int to, int promotion, int flags) {
     if (list->count >= MAX_MOVES) {
         return;
@@ -527,19 +761,27 @@ static void add_move(const Position *pos, MoveList *list, int from, int to, int 
     list->moves[list->count] = move;
     int captured = pos->squares[to];
     int score = 0;
-    if (captured != 0) {
+    if (flags & FLAG_EN_PASSANT) {
+        captured = (pos->side_to_move == COLOR_WHITE) ? -1 : 1;
+    }
+    if ((flags & FLAG_CAPTURE) || (flags & FLAG_EN_PASSANT)) {
         int victim = piece_type(captured) - 1;
         int attacker = piece_type(pos->squares[from]) - 1;
-        score = 10 * piece_values[victim] - piece_values[attacker];
-    }
-    if (promotion) {
-        score += piece_values[promotion - 1];
+        int mvv_lva = 0;
+        if (victim >= 0 && attacker >= 0) {
+            mvv_lva = 10 * piece_values[victim] - piece_values[attacker];
+        }
+        int see_score = see(pos, move);
+        score = 200000 + mvv_lva + see_score;
+    } else if (promotion) {
+        score = 150000 + piece_values[promotion - 1];
     }
     list->scores[list->count] = score;
     list->count++;
 }
 
 static void generate_moves(const Position *pos, MoveList *list, bool captures_only) {
+    move_generation_calls++;
     list->count = 0;
     for (int sq = 0; sq < 128; ++sq) {
         if (!square_on_board(sq)) {
@@ -858,6 +1100,35 @@ static void undo_move(Position *pos, int move, const Undo *undo) {
     }
 }
 
+static void make_null_move(Position *pos, Undo *undo) {
+    undo->move = 0;
+    undo->captured = 0;
+    undo->castling = pos->castling;
+    undo->ep_square = pos->ep_square;
+    undo->halfmove_clock = pos->halfmove_clock;
+    undo->zobrist_key = pos->zobrist_key;
+    if (pos->ep_square != -1) {
+        update_zobrist_ep(pos, pos->ep_square);
+    }
+    pos->ep_square = -1;
+    pos->halfmove_clock++;
+    toggle_side(pos);
+    if (pos->side_to_move == COLOR_WHITE) {
+        pos->fullmove_number++;
+    }
+}
+
+static void undo_null_move(Position *pos, const Undo *undo) {
+    if (pos->side_to_move == COLOR_WHITE) {
+        pos->fullmove_number--;
+    }
+    toggle_side(pos);
+    pos->castling = undo->castling;
+    pos->ep_square = undo->ep_square;
+    pos->halfmove_clock = undo->halfmove_clock;
+    pos->zobrist_key = undo->zobrist_key;
+}
+
 static void sort_moves(MoveList *list) {
     for (int i = 1; i < list->count; ++i) {
         int move = list->moves[i];
@@ -892,6 +1163,9 @@ static bool time_exceeded(void) {
 }
 
 static int quiescence(Position *pos, int alpha, int beta, int ply) {
+    if (time_exceeded()) {
+        return alpha;
+    }
     if (ply > max_sel_depth) {
         max_sel_depth = ply;
     }
@@ -907,7 +1181,28 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
     sort_moves(&list);
     for (int i = 0; i < list.count; ++i) {
         int move = list.moves[i];
-        if (!(move_flags(move) & FLAG_CAPTURE) && !(move_flags(move) & FLAG_EN_PASSANT)) {
+        int flags = move_flags(move);
+        if (!(flags & FLAG_CAPTURE) && !(flags & FLAG_EN_PASSANT)) {
+            continue;
+        }
+        int target = move_to(move);
+        int capture_value = 0;
+        if (flags & FLAG_EN_PASSANT) {
+            capture_value = piece_values[0];
+        } else {
+            capture_value = get_piece_value(pos->squares[target]);
+        }
+        int promotion = move_promotion(move);
+        if (promotion) {
+            capture_value += piece_values[promotion - 1] - piece_values[0];
+        }
+        const int delta_margin = 80;
+        if (stand_pat + capture_value + delta_margin < alpha) {
+            q_delta_prunes++;
+            continue;
+        }
+        if (see(pos, move) < 0) {
+            q_see_prunes++;
             continue;
         }
         Undo undo;
@@ -925,10 +1220,41 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
             alpha = score;
         }
     }
+    MoveList quiet_list;
+    generate_moves(pos, &quiet_list, false);
+    for (int i = 0; i < quiet_list.count; ++i) {
+        int move = quiet_list.moves[i];
+        int flags = move_flags(move);
+        if ((flags & FLAG_CAPTURE) || (flags & FLAG_EN_PASSANT) || (flags & FLAG_CASTLING)) {
+            continue;
+        }
+        Undo undo;
+        if (!make_move(pos, move, &undo)) {
+            continue;
+        }
+        int king_sq = find_king(pos, pos->side_to_move);
+        Color attacker = (pos->side_to_move == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
+        bool gives_check = (king_sq != -1) && square_attacked(pos, king_sq, attacker);
+        if (!gives_check) {
+            undo_move(pos, move, &undo);
+            continue;
+        }
+        q_check_expansions++;
+        nodes_total++;
+        nodes_qsearch++;
+        int score = -quiescence(pos, -beta, -alpha, ply + 1);
+        undo_move(pos, move, &undo);
+        if (score >= beta) {
+            return beta;
+        }
+        if (score > alpha) {
+            alpha = score;
+        }
+    }
     return alpha;
 }
 
-static int probe_tt(uint64_t key, int depth, int alpha, int beta, int *tt_move) {
+static int probe_tt(uint64_t key, int depth, int alpha, int beta, int ply, int *tt_move) {
     TTEntry *entry = &transposition_table[key & (TT_SIZE - 1)];
     tt_probes++;
     bool key_match = (entry->key == key);
@@ -937,26 +1263,27 @@ static int probe_tt(uint64_t key, int depth, int alpha, int beta, int *tt_move) 
     }
     if (key_match && entry->depth >= depth) {
         tt_hits++;
+        int stored = value_from_tt(entry->value, ply);
         if (entry->flag == 0) {
             tt_cutoffs++;
-            return entry->value;
+            return stored;
         }
-        if (entry->flag == -1 && entry->value <= alpha) {
+        if (entry->flag == -1 && stored <= alpha) {
             tt_cutoffs++;
-            return alpha;
+            return stored;
         }
-        if (entry->flag == 1 && entry->value >= beta) {
+        if (entry->flag == 1 && stored >= beta) {
             tt_cutoffs++;
-            return beta;
+            return stored;
         }
     }
     return INF + 1;
 }
 
-static void store_tt(uint64_t key, int depth, int value, int flag, int move) {
+static void store_tt(uint64_t key, int depth, int ply, int value, int flag, int move) {
     TTEntry *entry = &transposition_table[key & (TT_SIZE - 1)];
     entry->key = key;
-    entry->value = value;
+    entry->value = value_to_tt(value, ply);
     entry->depth = depth;
     entry->flag = flag;
     entry->move = move;
@@ -970,37 +1297,72 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
     if (ply > max_sel_depth) {
         max_sel_depth = ply;
     }
+
+    Color us = pos->side_to_move;
+    Color them = (us == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
+    int king_sq = find_king(pos, us);
+    bool in_check = (king_sq != -1) && square_attacked(pos, king_sq, them);
+
     if (depth == 0) {
         return quiescence(pos, alpha, beta, ply);
     }
 
+    bool pv_node = (beta - alpha) > 1;
+
     int tt_move = 0;
-    int tt_value = probe_tt(pos->zobrist_key, depth, alpha, beta, &tt_move);
+    int tt_value = probe_tt(pos->zobrist_key, depth, alpha, beta, ply, &tt_move);
     if (tt_value != INF + 1) {
         return tt_value;
     }
 
     pv_length[ply] = 0;
 
+    if (!pv_node && !in_check && depth >= 3 && pos->halfmove_clock > 0) {
+        Undo undo_null;
+        make_null_move(pos, &undo_null);
+        null_move_tried++;
+        int reduction = 2 + depth / 4;
+        if (reduction > depth - 1) {
+            reduction = depth - 1;
+        }
+        int null_score = -search(pos, depth - 1 - reduction, -beta, -beta + 1, ply + 1);
+        undo_null_move(pos, &undo_null);
+        if (null_score >= beta) {
+            null_move_pruned++;
+            return beta;
+        }
+    }
+
     MoveList list;
     generate_moves(pos, &list, false);
     if (list.count == 0) {
-        int king_sq = find_king(pos, pos->side_to_move);
-        if (king_sq != -1 && square_attacked(pos, king_sq, pos->side_to_move == COLOR_WHITE ? COLOR_BLACK : COLOR_WHITE)) {
+        if (in_check) {
             return -INF + ply;
         }
         return 0;
     }
 
-    if (tt_move) {
-        for (int i = 0; i < list.count; ++i) {
-            if (list.moves[i] == tt_move) {
-                list.scores[i] = 1000000;
-                break;
-            }
+    for (int i = 0; i < list.count; ++i) {
+        int move = list.moves[i];
+        if (move == tt_move) {
+            list.scores[i] = 2000000000;
+            continue;
         }
+        int flags = move_flags(move);
+        if (flags & (FLAG_CAPTURE | FLAG_EN_PASSANT)) {
+            list.scores[i] += 1000000;
+            continue;
+        }
+        if (killer_moves[ply][0] == move) {
+            list.scores[i] = 900000;
+            continue;
+        }
+        if (killer_moves[ply][1] == move) {
+            list.scores[i] = 800000;
+            continue;
+        }
+        list.scores[i] = history_table[us][move_from(move)][move_to(move)];
     }
-
     sort_moves(&list);
 
     int best_value = -INF;
@@ -1015,16 +1377,39 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
         }
         nodes_total++;
         nodes_search++;
+
+        int flags = move_flags(move);
+        bool is_capture = (flags & (FLAG_CAPTURE | FLAG_EN_PASSANT)) != 0;
+        bool is_promotion = move_promotion(move) != 0;
+
+        int search_depth = depth - 1;
         int score;
         if (first_move) {
-            score = -search(pos, depth - 1, -beta, -alpha, ply + 1);
+            score = -search(pos, search_depth, -beta, -alpha, ply + 1);
             first_move = false;
         } else {
-            score = -search(pos, depth - 1, -alpha - 1, -alpha, ply + 1);
+            int reduction = 0;
+            if (!pv_node && !in_check && search_depth > 0 && !is_capture && !is_promotion) {
+                reduction = 1 + (depth >= 5 && i >= 5);
+                if (reduction > search_depth) {
+                    reduction = search_depth;
+                }
+            }
+            if (reduction > 0) {
+                lmr_applied++;
+                score = -search(pos, search_depth - reduction, -alpha - 1, -alpha, ply + 1);
+                if (score > alpha) {
+                    lmr_researched++;
+                    score = -search(pos, search_depth, -alpha - 1, -alpha, ply + 1);
+                }
+            } else {
+                score = -search(pos, search_depth, -alpha - 1, -alpha, ply + 1);
+            }
             if (score > alpha && score < beta) {
-                score = -search(pos, depth - 1, -beta, -alpha, ply + 1);
+                score = -search(pos, search_depth, -beta, -alpha, ply + 1);
             }
         }
+
         undo_move(pos, move, &undo);
 
         if (score > best_value) {
@@ -1044,12 +1429,25 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
             if (i == 0) {
                 first_move_cutoffs++;
             }
+            if (!is_capture && !is_promotion) {
+                int from_sq = move_from(move);
+                int to_sq = move_to(move);
+                int delta = depth * depth;
+                history_table[us][from_sq][to_sq] += delta;
+                if (history_table[us][from_sq][to_sq] > 1000000) {
+                    history_table[us][from_sq][to_sq] = 1000000;
+                }
+                if (killer_moves[ply][0] != move) {
+                    killer_moves[ply][1] = killer_moves[ply][0];
+                    killer_moves[ply][0] = move;
+                }
+            }
             break;
         }
     }
 
     if (best_move == 0) {
-        return best_value;
+        return in_check ? (-INF + ply) : 0;
     }
 
     int flag = 0;
@@ -1058,7 +1456,7 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
     } else if (best_value >= beta) {
         flag = 1;
     }
-    store_tt(pos->zobrist_key, depth, best_value, flag, best_move);
+    store_tt(pos->zobrist_key, depth, ply, best_value, flag, best_move);
 
     return best_value;
 }
@@ -1117,6 +1515,9 @@ static void send_perf_summary(
     uint64_t total_cuts = beta_cutoffs + tt_cutoffs;
     double tt_cut_share = (total_cuts > 0) ? (double)tt_cutoffs / (double)total_cuts : 0.0;
     double first_move_rate = (total_cuts > 0) ? (double)first_move_cutoffs / (double)total_cuts : 0.0;
+    uint64_t q_prunes = q_delta_prunes + q_see_prunes;
+    double q_prune_ratio = (quiescence_nodes > 0) ? (double)q_prunes / (double)quiescence_nodes : 0.0;
+    double check_ratio = (quiescence_nodes > 0) ? (double)q_check_expansions / (double)quiescence_nodes : 0.0;
 
     char pv_json[2048];
     int pv_offset = snprintf(pv_json, sizeof(pv_json), "[");
@@ -1272,6 +1673,32 @@ static void send_perf_summary(
         tt_cut_pct
     );
     printf("info string perf summary heuristics q=%d%%\n", q_pct);
+    printf(
+        "info string perf summary qsearch prunes delta=%llu see=%llu pruned=%.1f%% checks=%llu (%.1f%%)\n",
+        (unsigned long long)q_delta_prunes,
+        (unsigned long long)q_see_prunes,
+        q_prune_ratio * 100.0,
+        (unsigned long long)q_check_expansions,
+        check_ratio * 100.0
+    );
+    printf(
+        "info string perf summary reductions lmr=%llu/%llu null=%llu/%llu\n",
+        (unsigned long long)lmr_applied,
+        (unsigned long long)lmr_researched,
+        (unsigned long long)null_move_tried,
+        (unsigned long long)null_move_pruned
+    );
+    printf(
+        "info string perf summary aspiration fail_low=%llu fail_high=%llu researches=%llu\n",
+        (unsigned long long)aspiration_fail_low_count,
+        (unsigned long long)aspiration_fail_high_count,
+        (unsigned long long)aspiration_research_count
+    );
+    printf(
+        "info string perf summary instrumentation moves=%llu see=%llu\n",
+        (unsigned long long)move_generation_calls,
+        (unsigned long long)see_evaluations
+    );
     fflush(stdout);
 }
 
@@ -1328,10 +1755,24 @@ static void *search_position(void *arg) {
     beta_cutoffs = 0;
     first_move_cutoffs = 0;
     pv_change_count = 0;
+    q_delta_prunes = 0;
+    q_see_prunes = 0;
+    q_check_expansions = 0;
+    null_move_tried = 0;
+    null_move_pruned = 0;
+    lmr_applied = 0;
+    lmr_researched = 0;
+    aspiration_fail_low_count = 0;
+    aspiration_fail_high_count = 0;
+    aspiration_research_count = 0;
+    move_generation_calls = 0;
+    see_evaluations = 0;
     max_sel_depth = 0;
     best_move_global = 0;
     best_score_global = -INF;
     clock_gettime(CLOCK_MONOTONIC, &search_start_time);
+    memset(history_table, 0, sizeof(history_table));
+    memset(killer_moves, 0, sizeof(killer_moves));
     pv_length[0] = 0;
     int completed_depth = 0;
     int score_history[64];
@@ -1339,7 +1780,34 @@ static void *search_position(void *arg) {
     int previous_root_move = 0;
     for (int depth = 1; depth <= root_depth; ++depth) {
         pv_length[depth] = 0;
-        int score = search(&pos, depth, -INF, INF, 0);
+        int alpha_window = -INF;
+        int beta_window = INF;
+        if (depth > 1 && score_history_count > 0) {
+            int prev_score = score_history[score_history_count - 1];
+            int window = 50 + depth * 5;
+            if (window > INF) {
+                window = INF;
+            }
+            alpha_window = prev_score - window;
+            beta_window = prev_score + window;
+            if (alpha_window < -INF) {
+                alpha_window = -INF;
+            }
+            if (beta_window > INF) {
+                beta_window = INF;
+            }
+        }
+        int score = search(&pos, depth, alpha_window, beta_window, 0);
+        if (!time_exceeded() && ((alpha_window != -INF && score <= alpha_window) || (beta_window != INF && score >= beta_window))) {
+            if (alpha_window != -INF && score <= alpha_window) {
+                aspiration_fail_low_count++;
+            }
+            if (beta_window != INF && score >= beta_window) {
+                aspiration_fail_high_count++;
+            }
+            aspiration_research_count++;
+            score = search(&pos, depth, -INF, INF, 0);
+        }
         if (time_exceeded()) {
             break;
         }
@@ -1480,6 +1948,13 @@ static void handle_go_command(const char *args) {
     search_time_limit_ms = 0;
     root_depth = 64;
     const char *ptr = args;
+    long movetime = 0;
+    long wtime = 0;
+    long btime = 0;
+    long winc = 0;
+    long binc = 0;
+    int movestogo = 0;
+    bool infinite = false;
     while (*ptr) {
         while (*ptr == ' ') ptr++;
         if (strncmp(ptr, "depth", 5) == 0) {
@@ -1489,26 +1964,64 @@ static void handle_go_command(const char *args) {
         } else if (strncmp(ptr, "movetime", 8) == 0) {
             ptr += 8;
             while (*ptr == ' ') ptr++;
-            search_time_limit_ms = atol(ptr);
+            movetime = atol(ptr);
         } else if (strncmp(ptr, "wtime", 5) == 0) {
             ptr += 5;
             while (*ptr == ' ') ptr++;
-            long wtime = atol(ptr);
-            if (current_position.side_to_move == COLOR_WHITE) {
-                search_time_limit_ms = wtime / 30;
-            }
+            wtime = atol(ptr);
         } else if (strncmp(ptr, "btime", 5) == 0) {
             ptr += 5;
             while (*ptr == ' ') ptr++;
-            long btime = atol(ptr);
-            if (current_position.side_to_move == COLOR_BLACK) {
-                search_time_limit_ms = btime / 30;
-            }
+            btime = atol(ptr);
+        } else if (strncmp(ptr, "winc", 4) == 0) {
+            ptr += 4;
+            while (*ptr == ' ') ptr++;
+            winc = atol(ptr);
+        } else if (strncmp(ptr, "binc", 4) == 0) {
+            ptr += 4;
+            while (*ptr == ' ') ptr++;
+            binc = atol(ptr);
+        } else if (strncmp(ptr, "movestogo", 9) == 0) {
+            ptr += 9;
+            while (*ptr == ' ') ptr++;
+            movestogo = atoi(ptr);
+        } else if (strncmp(ptr, "infinite", 8) == 0) {
+            ptr += 8;
+            infinite = true;
         }
         while (*ptr && *ptr != ' ') ptr++;
     }
     if (root_depth <= 0) {
         root_depth = 1;
+    }
+    if (!infinite) {
+        if (movetime > 0) {
+            search_time_limit_ms = movetime;
+        } else {
+            Color side = current_position.side_to_move;
+            long remaining = (side == COLOR_WHITE) ? wtime : btime;
+            long increment = (side == COLOR_WHITE) ? winc : binc;
+            if (remaining > 0) {
+                int moves = movestogo > 0 ? movestogo : 30;
+                long budget = remaining / (moves + 1);
+                if (budget < 10) {
+                    budget = remaining / 20;
+                }
+                if (budget < 10) {
+                    budget = 10;
+                }
+                long increment_bonus = increment > 0 ? increment / 2 : 0;
+                budget += increment_bonus;
+                long max_budget = remaining - remaining / 10;
+                if (budget > max_budget) {
+                    budget = max_budget;
+                }
+                if (budget < 10) {
+                    budget = 10;
+                }
+                search_time_limit_ms = budget;
+            }
+        }
     }
     stop_search = false;
     search_running = true;

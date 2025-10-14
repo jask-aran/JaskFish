@@ -2819,19 +2819,24 @@ class HeuristicSearchStrategy(MoveStrategy):
 
         reporter = SearchReporter(logger=self._logger)
         budget = self._limits.resolve_budget(context, reporter)
-        budget_desc = "infinite" if budget is None else f"{budget:.2f}s"
+        if budget is None:
+            budget = self._tuning.base_time_limit
+        budget_desc = f"{budget:.2f}s"
         self._logger(
             f"{self.log_tag}: depth={self._tuning.search_depth} budget={budget_desc} moves={context.legal_moves_count}"
         )
 
         board_copy = board.copy(stack=True)
+        backend_kwargs: dict[str, Any] = {}
+        if self._stop_event is not None:
+            backend_kwargs["stop_event"] = self._stop_event
         outcome = self._backend.search(
             board_copy,
             context,
             self._limits,
             reporter,
             budget,
-            stop_event=self._stop_event,
+            **backend_kwargs,
         )
         if not outcome.move:
             self._logger(f"{self.log_tag}: backend returned no move")
