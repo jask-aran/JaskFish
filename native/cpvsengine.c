@@ -54,7 +54,16 @@ static Position current_position;
 static pthread_t search_thread;
 static bool search_running = false;
 static volatile bool stop_search = false;
-static uint64_t nodes;
+static uint64_t nodes_total;
+static uint64_t nodes_search;
+static uint64_t nodes_qsearch;
+static uint64_t tt_probes;
+static uint64_t tt_hits;
+static uint64_t tt_cutoffs;
+static uint64_t beta_cutoffs;
+static uint64_t first_move_cutoffs;
+static uint64_t pv_change_count;
+static int max_sel_depth;
 static int root_depth;
 static int best_move_global = 0;
 static int best_score_global = -INF;
@@ -74,6 +83,9 @@ static uint64_t zobrist_side;
 static const int piece_values[6] = {100, 320, 330, 500, 900, 20000};
 static int pst_white[6][64];
 static int pst_black[6][64];
+
+static void format_move_uci(int move, char buffer[8]);
+static void send_perf_summary(int depth, int sel_depth, int score_cp, int score_delta_cp, double elapsed_seconds, double budget_seconds);
 
 static const int pst_reference[6][64] = {
     /* Pawn */
@@ -259,6 +271,7 @@ static bool parse_fen(Position *pos, const char *fen) {
             continue;
         }
         if (c == ' ') {
+            ptr--;
             break;
         }
         if (isdigit((unsigned char)c)) {
@@ -879,6 +892,9 @@ static bool time_exceeded(void) {
 }
 
 static int quiescence(Position *pos, int alpha, int beta, int ply) {
+    if (ply > max_sel_depth) {
+        max_sel_depth = ply;
+    }
     int stand_pat = evaluate(pos);
     if (stand_pat >= beta) {
         return beta;
@@ -898,7 +914,8 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
         if (!make_move(pos, move, &undo)) {
             continue;
         }
-        nodes++;
+        nodes_total++;
+        nodes_qsearch++;
         int score = -quiescence(pos, -beta, -alpha, ply + 1);
         undo_move(pos, move, &undo);
         if (score >= beta) {
@@ -913,22 +930,25 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
 
 static int probe_tt(uint64_t key, int depth, int alpha, int beta, int *tt_move) {
     TTEntry *entry = &transposition_table[key & (TT_SIZE - 1)];
-    if (entry->key == key && entry->depth >= depth) {
-        if (tt_move) {
-            *tt_move = entry->move;
-        }
+    tt_probes++;
+    bool key_match = (entry->key == key);
+    if (tt_move) {
+        *tt_move = key_match ? entry->move : 0;
+    }
+    if (key_match && entry->depth >= depth) {
+        tt_hits++;
         if (entry->flag == 0) {
+            tt_cutoffs++;
             return entry->value;
         }
         if (entry->flag == -1 && entry->value <= alpha) {
+            tt_cutoffs++;
             return alpha;
         }
         if (entry->flag == 1 && entry->value >= beta) {
+            tt_cutoffs++;
             return beta;
         }
-    }
-    if (tt_move) {
-        *tt_move = (entry->key == key) ? entry->move : 0;
     }
     return INF + 1;
 }
@@ -946,6 +966,9 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
     int original_alpha = alpha;
     if (time_exceeded()) {
         return alpha;
+    }
+    if (ply > max_sel_depth) {
+        max_sel_depth = ply;
     }
     if (depth == 0) {
         return quiescence(pos, alpha, beta, ply);
@@ -990,7 +1013,8 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
         if (!make_move(pos, move, &undo)) {
             continue;
         }
-        nodes++;
+        nodes_total++;
+        nodes_search++;
         int score;
         if (first_move) {
             score = -search(pos, depth - 1, -beta, -alpha, ply + 1);
@@ -1016,6 +1040,10 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
             }
         }
         if (alpha >= beta) {
+            beta_cutoffs++;
+            if (i == 0) {
+                first_move_cutoffs++;
+            }
             break;
         }
     }
@@ -1071,6 +1099,182 @@ static void format_move_uci(int move, char buffer[8]) {
     buffer[idx] = '\0';
 }
 
+static void send_perf_summary(
+    int depth,
+    int sel_depth,
+    int score_cp,
+    int score_delta_cp,
+    double elapsed_seconds,
+    double budget_seconds
+) {
+    uint64_t total_nodes = nodes_total;
+    uint64_t regular_nodes = nodes_search;
+    uint64_t quiescence_nodes = nodes_qsearch;
+    double denom = (elapsed_seconds > 1e-6) ? elapsed_seconds : 1e-6;
+    unsigned long long nps = (unsigned long long)(total_nodes / denom);
+    double q_ratio = (total_nodes > 0) ? (double)quiescence_nodes / (double)total_nodes : 0.0;
+    double tt_hit_rate = (tt_probes > 0) ? (double)tt_hits / (double)tt_probes : 0.0;
+    uint64_t total_cuts = beta_cutoffs + tt_cutoffs;
+    double tt_cut_share = (total_cuts > 0) ? (double)tt_cutoffs / (double)total_cuts : 0.0;
+    double first_move_rate = (total_cuts > 0) ? (double)first_move_cutoffs / (double)total_cuts : 0.0;
+
+    char pv_json[2048];
+    int pv_offset = snprintf(pv_json, sizeof(pv_json), "[");
+    for (int i = 0; i < pv_length[0] && pv_offset >= 0 && pv_offset < (int)sizeof(pv_json); ++i) {
+        char move_buf[8];
+        format_move_uci(pv_table[0][i], move_buf);
+        pv_offset += snprintf(
+            pv_json + pv_offset,
+            sizeof(pv_json) - (size_t)pv_offset,
+            "\"%s\"%s",
+            move_buf,
+            (i + 1 < pv_length[0]) ? "," : ""
+        );
+    }
+    if (pv_offset < 0 || pv_offset >= (int)sizeof(pv_json)) {
+        pv_json[sizeof(pv_json) - 2] = ']';
+        pv_json[sizeof(pv_json) - 1] = '\0';
+    } else {
+        snprintf(pv_json + pv_offset, sizeof(pv_json) - (size_t)pv_offset, "]");
+    }
+
+    char pv_display[256];
+    pv_display[0] = '\0';
+    for (int i = 0; i < pv_length[0] && i < 5; ++i) {
+        char move_buf[8];
+        format_move_uci(pv_table[0][i], move_buf);
+        size_t used = strlen(pv_display);
+        size_t remaining = sizeof(pv_display) - used;
+        if (remaining <= 1) {
+            break;
+        }
+        if (used > 0) {
+            strncat(pv_display, " ", remaining - 1);
+            used++;
+            remaining--;
+        }
+        strncat(pv_display, move_buf, remaining - 1);
+    }
+    if (pv_length[0] > 5) {
+        strncat(pv_display, "...", sizeof(pv_display) - strlen(pv_display) - 1);
+    }
+    if (pv_display[0] == '\0') {
+        strncpy(pv_display, "(empty)", sizeof(pv_display) - 1);
+        pv_display[sizeof(pv_display) - 1] = '\0';
+    }
+
+    double score_value = (double)score_cp;
+    double score_delta = (double)score_delta_cp;
+    int q_pct = (int)(q_ratio * 100.0);
+    int tt_hit_pct = (int)(tt_hit_rate * 100.0);
+    int tt_cut_pct = (int)(tt_cut_share * 100.0);
+    int first_cut_pct = (int)(first_move_rate * 100.0);
+
+    char nodes_str[64];
+    snprintf(
+        nodes_str,
+        sizeof(nodes_str),
+        "%llu(r:%llu,q:%llu)",
+        (unsigned long long)total_nodes,
+        (unsigned long long)regular_nodes,
+        (unsigned long long)quiescence_nodes
+    );
+
+    char time_summary[64];
+    if (budget_seconds >= 0.0) {
+        snprintf(time_summary, sizeof(time_summary), "%.2f/%.2fs", elapsed_seconds, budget_seconds);
+    } else {
+        snprintf(time_summary, sizeof(time_summary), "%.2fs", elapsed_seconds);
+    }
+
+    char budget_json[32];
+    if (budget_seconds >= 0.0) {
+        snprintf(budget_json, sizeof(budget_json), "%.3f", budget_seconds);
+    } else {
+        strncpy(budget_json, "null", sizeof(budget_json) - 1);
+        budget_json[sizeof(budget_json) - 1] = '\0';
+    }
+
+    char payload[4096];
+    snprintf(
+        payload,
+        sizeof(payload),
+        "{\"strategy\":\"cpvs\","
+        "\"depth\":%d,"
+        "\"seldepth\":%d,"
+        "\"nodes\":{\"total\":%llu,\"regular\":%llu,\"quiescence\":%llu},"
+        "\"nps\":%llu,"
+        "\"time\":{\"elapsed\":%.3f,\"budget\":%s},"
+        "\"score\":{\"value\":%.3f,\"delta\":%.3f},"
+        "\"pv\":%s,"
+        "\"pv_changes\":%llu,"
+        "\"tt\":{\"probes\":%llu,\"hits\":%llu,\"hit_rate\":%.3f,\"cuts\":%llu,\"cut_share\":%.3f},"
+        "\"aspiration\":{\"fail_low\":0,\"fail_high\":0,\"researches\":0},"
+        "\"cuts\":{\"tt\":%llu,\"killer\":0,\"history\":0,\"capture\":0,\"null\":0,\"futility\":0,\"other\":0,\"total\":%llu,\"first_move_rate\":%.3f},"
+        "\"quiescence\":{\"ratio\":%.3f,\"cutoffs\":0,\"stand_pat_cuts\":0,\"delta_prunes\":0,\"see_prunes\":0,\"prune_ratio\":0.0},"
+        "\"reductions\":{\"lmr\":{\"applied\":0,\"researched\":0,\"success_rate\":0.0},\"null\":{\"tried\":0,\"success\":0,\"success_rate\":0.0}}"
+        "}",
+        depth,
+        sel_depth,
+        (unsigned long long)total_nodes,
+        (unsigned long long)regular_nodes,
+        (unsigned long long)quiescence_nodes,
+        nps,
+        elapsed_seconds,
+        budget_json,
+        score_value,
+        score_delta,
+        pv_json,
+        (unsigned long long)pv_change_count,
+        (unsigned long long)tt_probes,
+        (unsigned long long)tt_hits,
+        tt_hit_rate,
+        (unsigned long long)tt_cutoffs,
+        tt_cut_share,
+        (unsigned long long)tt_cutoffs,
+        (unsigned long long)total_cuts,
+        first_move_rate,
+        q_ratio
+    );
+
+    printf("info string perf payload=%s\n", payload);
+    printf(
+        "info string perf summary core depth=%d sel=%d nodes=%s nps=%llu time=%s\n",
+        depth,
+        sel_depth,
+        nodes_str,
+        nps,
+        time_summary
+    );
+    printf(
+        "info string perf summary eval score=%.1f(Δ%+.1f) pv=%s swaps=%llu\n",
+        score_value,
+        score_delta,
+        pv_display,
+        (unsigned long long)pv_change_count
+    );
+    printf(
+        "info string perf summary pruning tt probes=%llu hits=%llu hit_rate=%d%% cut_share=%d%% cuts=%llu\n",
+        (unsigned long long)tt_probes,
+        (unsigned long long)tt_hits,
+        tt_hit_pct,
+        tt_cut_pct,
+        (unsigned long long)tt_cutoffs
+    );
+    printf(
+        "info string perf summary pruning aspiration fail_low=0 fail_high=0 researches=0\n"
+    );
+    printf(
+        "info string perf summary pruning cuts total=%llu first_move_rate=%d%% breakdown=tt:%llu(%d%%) k:0 h:0 c:0 n:0\n",
+        (unsigned long long)total_cuts,
+        first_cut_pct,
+        (unsigned long long)tt_cutoffs,
+        tt_cut_pct
+    );
+    printf("info string perf summary heuristics q=%d%%\n", q_pct);
+    fflush(stdout);
+}
+
 static int parse_move(const Position *pos, const char *uci) {
     if (strlen(uci) < 4) {
         return 0;
@@ -1115,11 +1319,24 @@ static int parse_move(const Position *pos, const char *uci) {
 static void *search_position(void *arg) {
     (void)arg;
     Position pos = current_position;
-    nodes = 0;
+    nodes_total = 0;
+    nodes_search = 0;
+    nodes_qsearch = 0;
+    tt_probes = 0;
+    tt_hits = 0;
+    tt_cutoffs = 0;
+    beta_cutoffs = 0;
+    first_move_cutoffs = 0;
+    pv_change_count = 0;
+    max_sel_depth = 0;
     best_move_global = 0;
     best_score_global = -INF;
     clock_gettime(CLOCK_MONOTONIC, &search_start_time);
     pv_length[0] = 0;
+    int completed_depth = 0;
+    int score_history[64];
+    int score_history_count = 0;
+    int previous_root_move = 0;
     for (int depth = 1; depth <= root_depth; ++depth) {
         pv_length[depth] = 0;
         int score = search(&pos, depth, -INF, INF, 0);
@@ -1129,18 +1346,45 @@ static void *search_position(void *arg) {
         best_move_global = pv_table[0][0];
         best_score_global = score;
         int time_ms = (int)elapsed_ms();
-        send_info(depth, score, time_ms, nodes);
+        send_info(depth, score, time_ms, nodes_total);
         if (search_time_limit_ms > 0 && elapsed_ms() > search_time_limit_ms) {
             break;
         }
+        if (previous_root_move != 0 && best_move_global != previous_root_move) {
+            pv_change_count++;
+        }
+        previous_root_move = best_move_global;
+        if (score_history_count < 64) {
+            score_history[score_history_count++] = score;
+        }
+        completed_depth = depth;
     }
     if (best_move_global == 0) {
         MoveList list;
         generate_moves(&pos, &list, false);
         if (list.count > 0) {
             best_move_global = list.moves[0];
+            best_score_global = 0;
         }
     }
+    if (best_score_global <= -INF) {
+        best_score_global = 0;
+    }
+    int final_time_ms = (int)elapsed_ms();
+    double elapsed_seconds = final_time_ms / 1000.0;
+    int score_delta = 0;
+    if (score_history_count >= 2) {
+        score_delta = score_history[score_history_count - 1] - score_history[score_history_count - 2];
+    }
+    double budget_seconds = (search_time_limit_ms > 0) ? (search_time_limit_ms / 1000.0) : -1.0;
+    send_perf_summary(
+        completed_depth,
+        max_sel_depth,
+        best_score_global,
+        score_delta,
+        elapsed_seconds,
+        budget_seconds
+    );
     print_bestmove(best_move_global);
     search_running = false;
     return NULL;
@@ -1171,8 +1415,15 @@ static void handle_position_command(const char *args) {
     Position pos;
     clear_position(&pos);
     const char *ptr = args;
+    while (*ptr == ' ') {
+        ptr++;
+    }
     if (strncmp(ptr, "startpos", 8) == 0) {
-        parse_fen_wrapper(&pos, "startpos");
+        if (!parse_fen_wrapper(&pos, "startpos")) {
+            printf("info string Failed to set position to startpos\n");
+            fflush(stdout);
+            return;
+        }
         ptr += 8;
     } else if (strncmp(ptr, "fen", 3) == 0) {
         ptr += 3;
@@ -1190,7 +1441,11 @@ static void handle_position_command(const char *args) {
             ptr++;
         }
         fen[idx] = '\0';
-        parse_fen_wrapper(&pos, fen);
+        if (!parse_fen_wrapper(&pos, fen)) {
+            printf("info string Invalid FEN provided to position command: %s\n", fen);
+            fflush(stdout);
+            return;
+        }
     } else {
         return;
     }

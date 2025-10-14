@@ -73,11 +73,10 @@ def test_start_initialises_engines_and_requests_move(tmp_path) -> None:
     assert gui.board_enabled is False
     assert gui.manual_enabled is False
     assert gui.info_message == "Self-play: White Engine evaluating"
-    assert white_engine.commands[:3] == [
-        "ucinewgame",
-        f"position fen {gui.board.fen()}",
-        "go",
-    ]
+    assert white_engine.commands[0] == "ucinewgame"
+    assert white_engine.commands[1] == f"position fen {gui.board.fen()}"
+    assert white_engine.commands[2].startswith("go ")
+    assert "movetime" in white_engine.commands[2]
     assert black_engine.commands == ["ucinewgame"]
 
 
@@ -112,10 +111,9 @@ def test_on_engine_move_switches_to_opponent(tmp_path) -> None:
 
     assert "White Engine" in gui.completed
     assert gui.info_message == "Self-play: Black Engine evaluating"
-    assert black_engine.commands[-2:] == [
-        f"position fen {gui.board.fen()}",
-        "go",
-    ]
+    assert black_engine.commands[-2] == f"position fen {gui.board.fen()}"
+    assert black_engine.commands[-1].startswith("go ")
+    assert "movetime" in black_engine.commands[-1]
     assert manager.current_expected_color() == chess.BLACK
 
 

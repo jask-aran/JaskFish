@@ -50,23 +50,20 @@ def test_resolve_budget_with_incremental_clock() -> None:
     assert pytest.approx(budget, rel=1e-3) == 0.7
 
 
-def test_resolve_budget_heuristic_path_uses_reporter() -> None:
+def test_resolve_budget_without_time_controls_returns_none() -> None:
     limits = SearchLimits(min_time=0.1, max_time=5.0, base_time=1.0, time_factor=0.25)
     messages = []
     reporter = SearchReporter(logger=messages.append)
     context = make_context(legal_moves=45, piece_count=24)
     budget = limits.resolve_budget(context, reporter)
-    assert 0.1 <= budget <= 5.0
-    assert messages and "budget calc" in messages[0]
+    assert budget is None
+    assert messages and "infinite" in messages[0]
 
 
-def test_resolve_budget_applies_tension_multiplier() -> None:
+def test_resolve_budget_with_depth_only_is_infinite() -> None:
     limits = SearchLimits(min_time=0.1, max_time=5.0, base_time=0.5, time_factor=0.3)
-    calm_context = make_context(legal_moves=12, piece_count=20)
-    tense_context = make_context(legal_moves=12, piece_count=20, in_check=True)
-    calm_budget = limits.resolve_budget(calm_context)
-    tense_budget = limits.resolve_budget(tense_context)
-    assert tense_budget > calm_budget
+    context = make_context(time_controls={"depth": 6})
+    assert limits.resolve_budget(context) is None
 
 
 def test_meta_registry_resolve_and_clamp() -> None:
@@ -77,4 +74,3 @@ def test_meta_registry_resolve_and_clamp() -> None:
 
     with pytest.raises(ValueError):
         MetaRegistry.resolve("unknown")
-

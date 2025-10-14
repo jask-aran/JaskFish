@@ -16,6 +16,10 @@ from pathlib import Path
 from statistics import mean
 from typing import Dict, Iterator, List, Optional, Sequence
 
+import chess
+
+from main import compute_adaptive_movetime
+
 DEFAULT_ENGINE_CMD: Sequence[str] = (sys.executable, "pvsengine.py")
 
 
@@ -351,13 +355,12 @@ def run_benchmark(args: argparse.Namespace) -> List[GoResult]:
     if not scenarios:
         raise SystemExit("No scenarios provided. Use --positions or --fen/--fen-file.")
 
-    go_tokens = build_go_tokens(args)
+    base_go_tokens = build_go_tokens(args)
     infinite_duration = args.infinite_duration
     if args.infinite and infinite_duration is None:
         infinite_duration = 5.0
 
     request_template = {
-        "go_tokens": go_tokens,
         "infinite_duration": infinite_duration,
         "max_wait": args.max_wait,
         "echo_info": args.echo_info,
@@ -369,9 +372,16 @@ def run_benchmark(args: argparse.Namespace) -> List[GoResult]:
     results: List[GoResult] = []
     try:
         for scenario in scenarios:
+            if base_go_tokens:
+                go_tokens = list(base_go_tokens)
+            else:
+                board = chess.Board(scenario.fen)
+                movetime_ms = compute_adaptive_movetime(board)
+                go_tokens = ["movetime", str(movetime_ms)]
             request = GoRequest(
                 fen=scenario.fen,
                 label=scenario.label,
+                go_tokens=go_tokens,
                 **request_template,
             )
             print(f"\n=== {scenario.label} ({scenario.phase}) ===")

@@ -8,9 +8,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
-
 import chess
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 try:  # pragma: no cover - optional dependency for GUI mode
     from PySide6.QtCore import QProcess
@@ -20,24 +19,30 @@ except ImportError:  # pragma: no cover
     QApplication = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
+    from PySide6.QtCore import QProcess as QProcessType
     from gui import ChessGUI  # pragma: no cover
+else:  # pragma: no cover
+    QProcessType = Any
 
 import chess_logic
 from utils import ReportingLevel
 from utils import cleanup, debug_text, info_text, recieved_text, sending_text
+from pvsengine import MetaRegistry, build_search_tuning
 
 ENGINE_SPECS = {
     "engine1": {
         "number": 1,
-        "default_script": "pvsengine.py",
-        "default_name": "PVS",
+        "default_script": "sunfish_wrapper.py",
+        "default_name": "Sunfish",
         "preferred_color": chess.WHITE,
+        "time_preset": "balanced",
     },
     "engine2": {
         "number": 2,
         "default_script": "native/cpvsengine_shim.py",
         "default_name": "cPVS",
         "preferred_color": chess.BLACK,
+        "time_preset": "balanced",
     },
 }
 ENGINE_ID_ORDER = tuple(ENGINE_SPECS.keys())
@@ -46,6 +51,100 @@ COLOR_NAME = {chess.WHITE: "White", chess.BLACK: "Black"}
 
 EngineProcess = Any
 SendCommand = Callable[[EngineProcess, str], None]
+
+DEFAULT_TIME_PRESET = "balanced"
+
+
+def _mate_in_one_threat(board: chess.Board) -> bool:
+    probe = board.copy(stack=False)
+    try:
+        probe.push(chess.Move.null())
+    except ValueError:
+        return False
+    for move in probe.legal_moves:
+        probe.push(move)
+        try:
+            if probe.is_checkmate():
+                return True
+        finally:
+            probe.pop()
+    return False
+
+
+def compute_adaptive_movetime(
+    board: chess.Board,
+    *,
+    meta_preset: str = DEFAULT_TIME_PRESET,
+    time_controls: Optional[Dict[str, int]] = None,
+) -> int:
+    meta = MetaRegistry.resolve(meta_preset)
+    _, limits = build_search_tuning(meta)
+    min_time = float(limits.min_time)
+    max_time = float(limits.max_time)
+    base_time = float(limits.base_time)
+    time_factor = float(limits.time_factor)
+
+    tc = dict(time_controls) if time_controls else {}
+    if tc.get("infinite"):
+        return 0
+    if "movetime" in tc:
+        return max(1, int(tc["movetime"]))
+
+    colour = board.turn
+    time_key = "wtime" if colour == chess.WHITE else "btime"
+    inc_key = "winc" if colour == chess.WHITE else "binc"
+    if time_key in tc:
+        time_left = max(0, int(tc.get(time_key, 0)))
+        increment = max(0, int(tc.get(inc_key, 0)))
+        moves_to_go = int(tc.get("movestogo", 0))
+        if moves_to_go > 0:
+            budget_ms = time_left // max(1, moves_to_go)
+        else:
+            budget_ms = int(time_left * time_factor)
+        budget_ms += increment
+        seconds = budget_ms / 1000.0
+        clamped = max(min_time, min(max_time, seconds))
+        return max(1, int(clamped * 1000))
+
+    legal_moves = board.legal_moves.count()
+    piece_count = len(board.piece_map())
+    in_check = board.is_check()
+    mate_threat = _mate_in_one_threat(board)
+
+    phase_factor = 0.3 + min(1.0, max(0.0, (piece_count - 2) / 30.0)) * 0.7
+    if legal_moves <= 10:
+        complexity_factor = 0.25
+    elif legal_moves <= 20:
+        complexity_factor = 0.55
+    elif legal_moves <= 35:
+        complexity_factor = 1.10
+    elif legal_moves <= 60:
+        complexity_factor = 1.45
+    else:
+        complexity_factor = 1.9 + min(0.6, (legal_moves - 60) * 0.01)
+
+    tension_factor = 1.35 if (in_check or mate_threat) else 1.0
+    budget_seconds = base_time * complexity_factor * phase_factor * tension_factor
+    budget_seconds = max(min_time, min(max_time, budget_seconds))
+
+    return max(1, int(budget_seconds * 1000))
+
+
+def build_go_command(
+    board: chess.Board,
+    *,
+    meta_preset: str = DEFAULT_TIME_PRESET,
+    time_controls: Optional[Dict[str, int]] = None,
+) -> str:
+    """Construct a UCI `go` command with an adaptive movetime budget."""
+    movetime_ms = compute_adaptive_movetime(
+        board,
+        meta_preset=meta_preset,
+        time_controls=time_controls,
+    )
+    if movetime_ms <= 0:
+        return "go infinite"
+    return f"go movetime {movetime_ms}"
 
 
 class _SelfPlayUI(Protocol):
@@ -85,6 +184,7 @@ class SelfPlayManager:
         send_command: SendCommand,
         engine_names: Dict[bool, str],
         *,
+        engine_time_presets: Optional[Dict[bool, str]] = None,
         capture_payload: bool = False,
         trace_directory: Optional[Union[Path, str]] = None,
     ) -> None:
@@ -95,6 +195,15 @@ class SelfPlayManager:
         self._engines = engines
         self._send_command = send_command
         self._engine_names = engine_names
+        default_presets = {
+            chess.WHITE: DEFAULT_TIME_PRESET,
+            chess.BLACK: DEFAULT_TIME_PRESET,
+        }
+        if engine_time_presets:
+            for color, preset in engine_time_presets.items():
+                if color in default_presets and isinstance(preset, str) and preset:
+                    default_presets[color] = preset
+        self._engine_time_presets = default_presets
 
         self._active = False
         self._current_engine_color: Optional[bool] = None
@@ -121,7 +230,10 @@ class SelfPlayManager:
         return self._current_engine_color
 
     def update_engines(
-        self, engines: Dict[bool, EngineProcess], engine_names: Dict[bool, str]
+        self,
+        engines: Dict[bool, EngineProcess],
+        engine_names: Dict[bool, str],
+        engine_time_presets: Optional[Dict[bool, str]] = None,
     ) -> None:
         if chess.WHITE not in engines or chess.BLACK not in engines:
             raise ValueError("SelfPlayManager requires engines for both colors")
@@ -131,6 +243,10 @@ class SelfPlayManager:
 
         self._engines = engines
         self._engine_names = engine_names
+        if engine_time_presets:
+            for color, preset in engine_time_presets.items():
+                if color in self._engine_time_presets and isinstance(preset, str) and preset:
+                    self._engine_time_presets[color] = preset
         self._current_engine_color = None
         self._pending_ignore_color = None
         self._waiting_for_move = False
@@ -230,7 +346,9 @@ class SelfPlayManager:
         engine = self._engines[color]
         fen = self._gui.board.fen()
         self._dispatch(engine, f"position fen {fen}")
-        self._dispatch(engine, "go")
+        preset = self._engine_time_presets.get(color, DEFAULT_TIME_PRESET)
+        go_command = build_go_command(self._gui.board, meta_preset=preset)
+        self._dispatch(engine, go_command)
 
         self._current_engine_color = color
         self._waiting_for_move = True
@@ -435,6 +553,10 @@ def run_headless_self_play(args, script_dir: str) -> None:
         white_engine: f"{white_spec['default_name']}[{white_spec['number']}][W]",
         black_engine: f"{black_spec['default_name']}[{black_spec['number']}][B]",
     }
+    engine_time_presets = {
+        chess.WHITE: white_spec.get("time_preset", DEFAULT_TIME_PRESET),
+        chess.BLACK: black_spec.get("time_preset", DEFAULT_TIME_PRESET),
+    }
 
     def send_command(engine: HeadlessEngineProcess, command: str) -> None:
         if not quiet:
@@ -447,6 +569,7 @@ def run_headless_self_play(args, script_dir: str) -> None:
         engines,
         send_command,
         engine_labels,
+        engine_time_presets=engine_time_presets,
         capture_payload=include_payload,
     )
 
@@ -595,7 +718,7 @@ def process_engine_output_line(
 
 
 def engine_output_processor(
-    proc: QProcess,
+    proc: QProcessType,
     gui: "ChessGUI",
     *,
     engine_id: Optional[str],
@@ -666,7 +789,7 @@ def engine_output_processor(
         )
 
 
-def start_engine_process(path: str) -> QProcess:
+def start_engine_process(path: str) -> QProcessType:
     if QProcess is None:  # pragma: no cover - defensive
         raise ImportError("PySide6 is required to start GUI engine processes")
     proc = QProcess()
@@ -716,6 +839,7 @@ def main():
             "name": engine_name,
             "number": number,
             "preferred_color": preferred_color,
+            "time_preset": spec.get("time_preset", DEFAULT_TIME_PRESET),
             "default_script": spec["default_script"],
             "path": engine_path,
             "process": None,
@@ -815,8 +939,8 @@ def main():
             label_color = "Engine"
         return engine_id, f"{label_color} - {engine_caption(engine_id)}"
 
-    def build_self_play_engine_map() -> Dict[bool, QProcess]:
-        engines: Dict[bool, QProcess] = {}
+    def build_self_play_engine_map() -> Dict[bool, QProcessType]:
+        engines: Dict[bool, QProcessType] = {}
         for color in (chess.WHITE, chess.BLACK):
             engine_id = color_assignments[color]
             slot = engine_slots[engine_id]
@@ -825,6 +949,15 @@ def main():
                 raise RuntimeError(f"No engine process assigned for {COLOR_NAME[color]}")
             engines[color] = proc  # type: ignore[assignment]
         return engines
+
+    def build_self_play_time_presets() -> Dict[bool, str]:
+        presets: Dict[bool, str] = {}
+        for color in (chess.WHITE, chess.BLACK):
+            engine_id = color_assignments[color]
+            slot = engine_slots.get(engine_id, {})
+            preset = slot.get("time_preset", DEFAULT_TIME_PRESET)
+            presets[color] = preset if isinstance(preset, str) and preset else DEFAULT_TIME_PRESET
+        return presets
 
     def rebuild_engine_labels_by_color() -> Dict[bool, str]:
         return {
@@ -840,7 +973,7 @@ def main():
     def can_swap_colors() -> bool:
         return color_assignments[chess.WHITE] != color_assignments[chess.BLACK]
 
-    def send_command_with_lookup(proc: QProcess, command: str) -> None:
+    def send_command_with_lookup(proc: QProcessType, command: str) -> None:
         engine_id = process_slot_lookup.get(id(proc))
         monitor_label = engine_monitor_label(engine_id, None)
         print(sending_text(f"{monitor_label} {command}"))
@@ -857,7 +990,7 @@ def main():
             return expected
         return None
 
-    def attach_engine_output(engine_id: str, proc: QProcess) -> None:
+    def attach_engine_output(engine_id: str, proc: QProcessType) -> None:
         if gui is None:
             return
         proc.readyReadStandardOutput.connect(
@@ -876,7 +1009,7 @@ def main():
             )
         )
 
-    def start_engine_instance(engine_id: str) -> QProcess:
+    def start_engine_instance(engine_id: str) -> QProcessType:
         slot = engine_slots[engine_id]
         process = start_engine_process(slot["path"])
         slot["process"] = process
@@ -886,7 +1019,7 @@ def main():
         print(info_text(f"{engine_log_label(engine_id)} -> {slot['path']}"))
         return process
 
-    def stop_process(proc: QProcess) -> None:
+    def stop_process(proc: QProcessType) -> None:
         try:
             if proc.state() != QProcess.NotRunning:
                 send_command_with_lookup(proc, "quit")
@@ -921,7 +1054,11 @@ def main():
         manual_pending[engine_id] = True
         print(info_text(f"Manual evaluation started using {engine_label}"))
         send_command_with_lookup(proc, f"position fen {fen_string}")
-        send_command_with_lookup(proc, "go")
+        preset = slot.get("time_preset", DEFAULT_TIME_PRESET)
+        if not isinstance(preset, str) or not preset:
+            preset = DEFAULT_TIME_PRESET
+        go_command = build_go_command(gui.board, meta_preset=preset)
+        send_command_with_lookup(proc, go_command)
 
     def manual_ready_callback(engine_id: str, engine_label: str) -> None:
         if gui is None:
@@ -967,6 +1104,7 @@ def main():
         build_self_play_engine_map(),
         send_command_with_lookup,
         engine_labels_by_color.copy(),
+        engine_time_presets=build_self_play_time_presets(),
         capture_payload=include_perf_payload,
     )
 
@@ -977,6 +1115,7 @@ def main():
             self_play_manager.update_engines(
                 build_self_play_engine_map(),
                 engine_labels_by_color.copy(),
+                build_self_play_time_presets(),
             )
         if gui:
             gui.set_engine_labels(

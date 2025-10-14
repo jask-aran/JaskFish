@@ -193,17 +193,19 @@ def _resolve_time_budget(board: chess.Board, options: Dict[str, int | bool]) -> 
     total_ms = int(options.get(time_key, 0))
     inc_ms = int(options.get(inc_key, 0))
 
-    if total_ms <= 0 and "wtime" not in options and "btime" not in options:
-        # No time controls supplied: allow a conservative fixed window.
-        return 1.0, depth_limit
+    if time_key in options or inc_key in options:
+        total = max(0.0, total_ms / 1000.0)
+        increment = max(0.0, inc_ms / 1000.0)
+        if total <= 0.0 and increment <= 0.0:
+            return None, depth_limit
+        if total <= 0.0:
+            return max(0.05, increment), depth_limit
+        upper_bound = max(0.05, total / 2.0 - 0.5)
+        think = min(total / 40.0 + increment, upper_bound)
+        think = max(0.05, think)
+        return think, depth_limit
 
-    total = total_ms / 1000.0
-    increment = inc_ms / 1000.0
-    think = max(0.05, min(total / 40.0 + increment, total / 2.0 - 0.5))
-    if think <= 0.05:
-        think = max(0.05, total * 0.1 if total > 0 else 0.05)
-
-    return think, depth_limit
+    return None, depth_limit
 
 
 # --------------------------------------------------------------------------- #

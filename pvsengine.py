@@ -393,6 +393,10 @@ class SearchLimits:
 
     def resolve_budget(self, context: StrategyContext, reporter: Optional["SearchReporter"] = None) -> Optional[float]:
         tc = context.time_controls or {}
+        if reporter and not tc:
+            reporter.trace("budget calc: no explicit limits supplied; treating search as infinite")
+        if not tc:
+            return None
         if tc.get("infinite"):
             return None
 
@@ -412,37 +416,9 @@ class SearchLimits:
                 budget = time_left * self.time_factor
             budget += increment
             return self._clamp(budget / 1000.0)
-
-        complexity = context.legal_moves_count
-        phase = context.piece_count
-
-        phase_factor = 0.3 + min(1.0, max(0.0, (phase - 2) / 30.0)) * 0.7
-        if complexity <= 10:
-            complexity_factor = 0.25
-        elif complexity <= 20:
-            complexity_factor = 0.55
-        elif complexity <= 35:
-            complexity_factor = 1.10
-        elif complexity <= 60:
-            complexity_factor = 1.45
-        else:
-            complexity_factor = 1.9 + min(0.6, (complexity - 60) * 0.01)
-
-        tension_factor = 1.0
-        if context.in_check or context.opponent_mate_in_one_threat:
-            tension_factor = max(tension_factor, 1.35)
-
-        budget = self.base_time * complexity_factor * phase_factor * tension_factor
-        clamped = self._clamp(budget)
-        
         if reporter:
-            reporter.trace(
-                f"budget calc: complexity={complexity_factor:.2f}({complexity}mv) "
-                f"phase={phase_factor:.2f}({phase}pc) tension={tension_factor:.2f} "
-                f"base={self.base_time:.2f}s raw={budget:.2f}s => {clamped:.2f}s"
-            )
-        
-        return clamped
+            reporter.trace("budget calc: unable to infer limit from supplied controls; treating as infinite")
+        return None
 
     def _clamp(self, seconds: float) -> float:
         return max(self.min_time, min(self.max_time, seconds))
