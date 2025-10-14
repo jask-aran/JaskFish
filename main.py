@@ -35,8 +35,8 @@ ENGINE_SPECS = {
     },
     "engine2": {
         "number": 2,
-        "default_script": "sunfish_wrapper.py",
-        "default_name": "Sunfish",
+        "default_script": "native/cpvsengine_shim.py",
+        "default_name": "cPVS",
         "preferred_color": chess.BLACK,
     },
 }
