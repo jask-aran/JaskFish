@@ -96,10 +96,8 @@ static uint64_t zobrist_ep[8];
 static uint64_t zobrist_side;
 
 static const int piece_values[6] = {100, 320, 330, 500, 900, 20000};
-static int pst_white_mg[6][64];
-static int pst_black_mg[6][64];
-static int pst_white_eg[6][64];
-static int pst_black_eg[6][64];
+static int pst_white[6][64];
+static int pst_black[6][64];
 
 static void format_move_uci(int move, char buffer[8]);
 static void send_perf_summary(int depth, int sel_depth, int score_cp, int score_delta_cp, double elapsed_seconds, double budget_seconds);
