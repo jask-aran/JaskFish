@@ -110,12 +110,7 @@ The native engine has advanced significantly since the initial
 
 ## Known gaps
 
-The C engine mirrors the Python heuristics at a high level (piece-square tables,
-simple quiescence search, history ordering, and transposition table with
-principal variation search), but it remains a single-threaded baseline without
-aspiration windows or sophisticated pruning. A few midgame positions currently
-resolve immediately because the legality checks are stricter than the Python
-engine’s move generator, so the reported node counts can drop to zero when the
-search recognises a forced mate at the root. Despite those limitations, the
-binary provides a useful reference point for evaluating the raw overhead of the
-Python implementation versus a native build.
+Core pruning (null-move, LMR, SEE, aspiration windows) now mirrors the Python engine; remaining gaps center on evaluation depth, threaded search, and tooling. In
+some midgame positions, stricter legality checks still short-circuit to forced
+mates, causing node counts to collapse, but the binary remains a reliable gauge
+of Python-vs-native overhead.

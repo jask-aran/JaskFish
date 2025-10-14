@@ -32,8 +32,8 @@ from pvsengine import MetaRegistry, build_search_tuning
 ENGINE_SPECS = {
     "engine1": {
         "number": 1,
-        "default_script": "sunfish_wrapper.py",
-        "default_name": "Sunfish",
+        "default_script": "pvsengine.py",
+        "default_name": "PyPVS",
         "preferred_color": chess.WHITE,
         "time_preset": "balanced",
     },
