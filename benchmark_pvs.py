@@ -6,13 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence
+from statistics import mean
+from typing import Dict, Iterator, List, Optional, Sequence
 
 DEFAULT_ENGINE_CMD: Sequence[str] = (sys.executable, "pvsengine.py")
 
@@ -110,6 +112,18 @@ class GoResult:
     @property
     def final_payload(self) -> Optional[dict]:
         return self.payloads[-1] if self.payloads else None
+
+
+@dataclass
+class EngineMetrics:
+    depth: Optional[int]
+    seldepth: Optional[int]
+    time_ms: Optional[int]
+    nodes: Optional[int]
+    nps: Optional[int]
+    score_cp: Optional[float]
+    pv: List[str]
+    bestmove: Optional[str]
 
 
 class EngineSession:
@@ -440,6 +454,173 @@ def summarise_result(result: GoResult) -> None:
     print(f"PV: {pv_preview or '(empty)'}")
 
 
+def parse_info_line(lines: Sequence[str]) -> Dict[str, Optional[object]]:
+    data: Dict[str, Optional[object]] = {
+        "depth": None,
+        "seldepth": None,
+        "time_ms": None,
+        "nodes": None,
+        "nps": None,
+        "score_cp": None,
+        "pv": [],
+    }
+    for raw in reversed(lines):
+        stripped = raw.strip()
+        if not stripped.startswith("info depth"):
+            continue
+        tokens = stripped.split()
+        pv_index: Optional[int] = None
+        i = 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "depth" and i + 1 < len(tokens):
+                try:
+                    data["depth"] = int(tokens[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if token == "seldepth" and i + 1 < len(tokens):
+                try:
+                    data["seldepth"] = int(tokens[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if token == "score" and i + 2 < len(tokens):
+                mode = tokens[i + 1]
+                value_token = tokens[i + 2]
+                if mode == "cp":
+                    try:
+                        data["score_cp"] = float(value_token)
+                    except ValueError:
+                        data["score_cp"] = None
+                elif mode == "mate":
+                    try:
+                        mate_in = int(value_token)
+                        data["score_cp"] = 32000.0 if mate_in > 0 else -32000.0
+                    except ValueError:
+                        data["score_cp"] = None
+                i += 3
+                continue
+            if token == "time" and i + 1 < len(tokens):
+                try:
+                    data["time_ms"] = int(tokens[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if token == "nodes" and i + 1 < len(tokens):
+                try:
+                    data["nodes"] = int(tokens[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if token == "nps" and i + 1 < len(tokens):
+                try:
+                    data["nps"] = int(tokens[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+                continue
+            if token == "pv":
+                pv_index = i + 1
+                break
+            i += 1
+        if pv_index is not None:
+            data["pv"] = tokens[pv_index:]
+        else:
+            data["pv"] = []
+        return data
+    return data
+
+
+def extract_metrics(result: GoResult) -> EngineMetrics:
+    payload = result.final_payload
+    if payload:
+        time_block = payload.get("time", {})
+        elapsed = time_block.get("elapsed")
+        time_ms = int(round(elapsed * 1000)) if isinstance(elapsed, (int, float)) else None
+        nodes_block = payload.get("nodes", {})
+        nodes = nodes_block.get("total") if isinstance(nodes_block, dict) else None
+        score_block = payload.get("score", {})
+        score_val = score_block.get("value") if isinstance(score_block, dict) else None
+        score_cp = float(score_val) * 100.0 if isinstance(score_val, (int, float)) else None
+        pv = payload.get("pv") if isinstance(payload.get("pv"), list) else []
+        depth = payload.get("depth") if isinstance(payload.get("depth"), int) else None
+        seldepth = payload.get("seldepth") if isinstance(payload.get("seldepth"), int) else None
+        nps = payload.get("nps") if isinstance(payload.get("nps"), int) else None
+        return EngineMetrics(
+            depth=depth,
+            seldepth=seldepth,
+            time_ms=time_ms,
+            nodes=nodes,
+            nps=nps,
+            score_cp=score_cp,
+            pv=pv or [],
+            bestmove=result.bestmove,
+        )
+    info_data = parse_info_line(result.lines)
+    return EngineMetrics(
+        depth=info_data.get("depth"),
+        seldepth=info_data.get("seldepth"),
+        time_ms=info_data.get("time_ms"),
+        nodes=info_data.get("nodes"),
+        nps=info_data.get("nps"),
+        score_cp=info_data.get("score_cp"),
+        pv=info_data.get("pv", []) if isinstance(info_data.get("pv"), list) else [],
+        bestmove=result.bestmove,
+    )
+
+
+def describe_metrics(label: str, metrics: EngineMetrics) -> str:
+    pieces = [f"{label:<12}"]
+    pieces.append(f"depth={metrics.depth}" if metrics.depth is not None else "depth=?")
+    if metrics.seldepth is not None:
+        pieces.append(f"sel={metrics.seldepth}")
+    pieces.append(
+        f"time={metrics.time_ms / 1000:.3f}s" if metrics.time_ms is not None else "time=?"
+    )
+    if metrics.nodes is not None:
+        pieces.append(f"nodes={metrics.nodes:,}")
+    if metrics.nps is not None:
+        pieces.append(f"nps={metrics.nps:,}")
+    if metrics.score_cp is not None:
+        pieces.append(f"score={metrics.score_cp:.1f}cp")
+    best = metrics.bestmove or "(none)"
+    pieces.append(f"best={best}")
+    pv_preview = " ".join(metrics.pv[:6])
+    if pv_preview:
+        pieces.append(f"pv={pv_preview}")
+    return "  " + " | ".join(pieces)
+
+
+def summarise_deltas(python_metrics: EngineMetrics, native_metrics: EngineMetrics) -> str:
+    details: List[str] = []
+    if (
+        python_metrics.depth is not None
+        and native_metrics.depth is not None
+    ):
+        diff = python_metrics.depth - native_metrics.depth
+        details.append(f"depthΔ={diff:+d}")
+    if (
+        python_metrics.time_ms is not None
+        and native_metrics.time_ms is not None
+        and native_metrics.time_ms > 0
+    ):
+        ratio = python_metrics.time_ms / native_metrics.time_ms
+        details.append(f"time py/native={ratio:.2f}x")
+    if (
+        python_metrics.nodes is not None
+        and native_metrics.nodes is not None
+        and native_metrics.nodes > 0
+    ):
+        ratio = python_metrics.nodes / native_metrics.nodes
+        details.append(f"nodes py/native={ratio:.2f}x")
+    return "    " + " | ".join(details) if details else ""
+
+
 def run_profile(args: argparse.Namespace) -> None:
     from pvsengine import run_profile as engine_run_profile
 
@@ -457,6 +638,103 @@ def list_scenarios() -> None:
     print("Available curated scenarios:")
     for scenario in CURATED_SCENARIOS:
         print(f"  {scenario.slug:<20} {scenario.phase:<12} {scenario.label}")
+
+
+def _safe_mean(values: List[Optional[float]]) -> Optional[float]:
+    numeric = [v for v in values if isinstance(v, (int, float))]
+    if not numeric:
+        return None
+    return float(mean(numeric))
+
+
+def run_compare(args: argparse.Namespace) -> None:
+    scenarios = resolve_scenarios(args.positions, include_defaults=not args.skip_defaults)
+    scenarios.extend(iter_user_fens(args))
+    if not scenarios:
+        raise SystemExit("No scenarios provided. Use --positions or --fen/--fen-file.")
+
+    go_tokens = build_go_tokens(args)
+    if not go_tokens:
+        raise SystemExit("Comparison requires specifying a concrete search limit (e.g. --movetime 500 or --depth 6).")
+
+    request_template = {
+        "go_tokens": go_tokens,
+        "infinite_duration": args.infinite_duration,
+        "max_wait": args.max_wait,
+        "echo_info": args.echo_info,
+    }
+
+    python_session = EngineSession(command=args.engine_cmd or DEFAULT_ENGINE_CMD)
+    native_cmd = args.native_cmd or ("native/cpvsengine",)
+    native_session = EngineSession(command=native_cmd)
+
+    python_session.start()
+    native_session.start()
+
+    python_metrics: List[EngineMetrics] = []
+    native_metrics: List[EngineMetrics] = []
+    time_ratios: List[float] = []
+    depth_deltas: List[int] = []
+
+    try:
+        for scenario in scenarios:
+            print(f"\n=== {scenario.label} ({scenario.phase}) ===")
+            print(f"FEN: {scenario.fen}")
+            request = GoRequest(fen=scenario.fen, label=scenario.label, **request_template)
+
+            python_result = python_session.go(request)
+            py_metrics = extract_metrics(python_result)
+            python_metrics.append(py_metrics)
+            print(describe_metrics("Python", py_metrics))
+
+            native_result = native_session.go(request)
+            native_metrics_row = extract_metrics(native_result)
+            native_metrics.append(native_metrics_row)
+            print(describe_metrics("Native", native_metrics_row))
+
+            delta_line = summarise_deltas(py_metrics, native_metrics_row)
+            if delta_line:
+                print(delta_line)
+
+            if (
+                py_metrics.time_ms is not None
+                and native_metrics_row.time_ms is not None
+                and native_metrics_row.time_ms > 0
+            ):
+                time_ratios.append(py_metrics.time_ms / native_metrics_row.time_ms)
+            if (
+                py_metrics.depth is not None
+                and native_metrics_row.depth is not None
+            ):
+                depth_deltas.append(py_metrics.depth - native_metrics_row.depth)
+    finally:
+        python_session.shutdown()
+        native_session.shutdown()
+
+    print("\n=== Aggregate ===")
+    for label, metrics_list in (("Python", python_metrics), ("Native", native_metrics)):
+        depth_avg = _safe_mean([m.depth for m in metrics_list])
+        time_avg = _safe_mean([m.time_ms for m in metrics_list])
+        nodes_avg = _safe_mean([m.nodes for m in metrics_list])
+        nps_avg = _safe_mean([m.nps for m in metrics_list])
+        score_avg = _safe_mean([m.score_cp for m in metrics_list])
+        parts = [f"{label:<12}"]
+        if depth_avg is not None:
+            parts.append(f"avg depth={depth_avg:.2f}")
+        if time_avg is not None:
+            parts.append(f"avg time={time_avg / 1000:.3f}s")
+        if nodes_avg is not None:
+            parts.append(f"avg nodes={int(nodes_avg):,}")
+        if nps_avg is not None:
+            parts.append(f"avg nps={int(nps_avg):,}")
+        if score_avg is not None:
+            parts.append(f"avg score={score_avg:.1f}cp")
+        print("  " + " | ".join(parts))
+
+    if time_ratios:
+        print(f"  Average time ratio (py/native): {mean(time_ratios):.2f}x")
+    if depth_deltas:
+        print(f"  Mean depth delta (py-native): {mean(depth_deltas):+.2f}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -537,6 +815,19 @@ def build_parser() -> argparse.ArgumentParser:
     profile = subparsers.add_parser("profile", parents=[common_benchmark], help="Collect cProfile traces using engine internals.")
     profile.add_argument("--threads", type=int, default=1, help="Number of worker threads for profiling backend.")
     profile.set_defaults(handler=run_profile)
+
+    compare = subparsers.add_parser(
+        "compare",
+        parents=[common_benchmark],
+        help="Compare the Python PVS engine against the native C implementation.",
+    )
+    compare.add_argument(
+        "--native-cmd",
+        nargs="+",
+        default=("native/cpvsengine",),
+        help="Override native engine command (default: ./native/cpvsengine)",
+    )
+    compare.set_defaults(handler=run_compare)
 
     list_parser = subparsers.add_parser("list", help="List curated scenario slugs.")
     list_parser.set_defaults(handler=lambda *_: list_scenarios())
