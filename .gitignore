@@ -162,5 +162,6 @@ cython_debug/
 
 game_state.json
 gamestates/
-self_play_traces/
 output.txt
+self_play_traces/
+native/cpvsengine
