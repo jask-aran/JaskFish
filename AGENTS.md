@@ -1,8 +1,6 @@
 # Agent Guide
 
-This guide collects everything an agent needs to work productively in the JaskFish
-codebase. It blends the high-level architectural overview from the historical
-`CLAUDE.md` notes with the day-to-day workflows already documented for agents.
+We track work in Beads instead of Markdown. Run `bd quickstart` to see how.
 
 ## Overview
 - **Purpose**: JaskFish is a UCI-compliant chess engine with a PySide6 GUI. The
