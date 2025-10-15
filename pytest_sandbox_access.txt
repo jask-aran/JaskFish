@@ -1,6 +1,0 @@
-Pytest Access Notes (Codex Sandbox)
------------------------------------
-- Run the suite with `pytest` from the repo root: command is `pytest` or `python3 -m pytest`.
-- The default sandbox blocks process features, so rerun with elevated permissions by setting `with_escalated_permissions=true` and add a short justification (e.g., "Need to run pytest suite which interacts with process features blocked by the sandbox.").
-- Stay in `/home/jask/JaskFish` when invoking the command so pytest picks up `pytest.ini` and the configured markers.
-- For marker-specific runs use the same approach, e.g., `pytest -m dev src/tests/test_engine_core.py::test_headless_self_play_debug_trace` with escalation enabled.

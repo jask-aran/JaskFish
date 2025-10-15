@@ -1,14 +1,29 @@
 # Agent Guide
 
-We track work in Beads instead of Markdown. Run `bd quickstart` to see how.
+# Beads for issue tracking
+We track work in Beads instead of Markdown. Run `bd quickstart` and `bd -h` at the start of each session to see how. Strongly prefer using BD methods over reading/ modifying the .beads db or .jsonl files.
+
+### Find ready work
+bd ready --json | jq '.[0]'
+
+### Create issues during work
+bd create "Discovered bug" -t bug -p 0 --json
+
+### Link discovered work back to parent
+bd dep add <new-id> <parent-id> --type discovered-from
+
+### Update status
+bd update <issue-id> --status in_progress --json
+
+### Complete work
+bd close <issue-id> --reason "Implemented" --json
 
 ## Overview
 - **Purpose**: JaskFish is a UCI-compliant chess engine with a PySide6 GUI. The
   engine stack prioritises composable search strategies, deterministic testing,
   and traceable time budgeting.
-- **Entrypoints**: `pvsengine.py` for the primary PVS engine, `simple_engine.py`
-  for the lightweight heuristic engine, `hsengine.py` for the hybrid stack, and
-  `main.py` for the GUI/self-play harness.
+- **Entrypoints**: `pvsengine.py` for the primary PVS engine, `cpvsengine_shim.py`
+  for the pvs engine integrated in C, `sunfish_wrapper.py` for a ported version of the python Sunfish engine, and `main.py` for the GUI/self-play harness.
 - **Docs**: `docs/testing_architecture.md` (test layout) and
   `docs/sunfish_engine_analysis.md` (legacy sunfish notes) are the authoritative
   references beyond this file.
