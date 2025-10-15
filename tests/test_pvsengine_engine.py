@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from pvsengine import ChessEngine, StrategyToggle
+from engines.pvsengine import ChessEngine, StrategyToggle
 
 
 def make_engine() -> ChessEngine:

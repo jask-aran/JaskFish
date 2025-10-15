@@ -1,7 +1,7 @@
 import chess
 from chess import polyglot
 
-from pvsengine import _SearchBoard
+from engines.pvsengine import _SearchBoard
 
 
 def assert_matches(board: chess.Board, search_board: _SearchBoard) -> None:

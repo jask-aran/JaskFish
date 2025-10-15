@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from pvsengine import MetaRegistry, MetaParams, SearchLimits, SearchReporter, StrategyContext
+from engines.pvsengine import MetaRegistry, MetaParams, SearchLimits, SearchReporter, StrategyContext
 
 
 def make_context(

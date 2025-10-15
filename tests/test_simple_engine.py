@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-import simple_engine
+from engines import simple_engine
 
 
 def test_handle_uci_outputs_identity(capsys: pytest.CaptureFixture[str]) -> None:

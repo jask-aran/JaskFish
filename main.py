@@ -27,19 +27,19 @@ else:  # pragma: no cover
 import chess_logic
 from utils import ReportingLevel
 from utils import cleanup, debug_text, info_text, recieved_text, sending_text
-from pvsengine import MetaRegistry, build_search_tuning
+from engines.pvsengine import MetaRegistry, build_search_tuning
 
 ENGINE_SPECS = {
     "engine1": {
         "number": 1,
-        "default_script": "pvsengine.py",
+        "default_script": "engines/pvsengine.py",
         "default_name": "PyPVS",
         "preferred_color": chess.WHITE,
         "time_preset": "balanced",
     },
     "engine2": {
         "number": 2,
-        "default_script": "native/cpvsengine_shim.py",
+        "default_script": "engines/native/cpvsengine_shim.py",
         "default_name": "cPVS",
         "preferred_color": chess.BLACK,
         "time_preset": "balanced",

@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from pvsengine import (
+from engines.pvsengine import (
     ChessEngine,
     MetaRegistry,
     PVSearchBackend,

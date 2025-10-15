@@ -2,7 +2,7 @@ import types
 
 import chess
 
-from pvsengine import PVSearchBackend, _SearchBoard
+from engines.pvsengine import PVSearchBackend, _SearchBoard
 
 
 def collect_quiet_checks(backend: PVSearchBackend, board: chess.Board, seen: set[chess.Move]) -> list[str]:

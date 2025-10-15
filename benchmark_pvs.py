@@ -20,7 +20,7 @@ import chess
 
 from main import compute_adaptive_movetime
 
-DEFAULT_ENGINE_CMD: Sequence[str] = (sys.executable, "pvsengine.py")
+DEFAULT_ENGINE_CMD: Sequence[str] = (sys.executable, "engines/pvsengine.py")
 
 
 @dataclass(frozen=True)
@@ -632,7 +632,7 @@ def summarise_deltas(python_metrics: EngineMetrics, native_metrics: EngineMetric
 
 
 def run_profile(args: argparse.Namespace) -> None:
-    from pvsengine import run_profile as engine_run_profile
+    from engines.pvsengine import run_profile as engine_run_profile
 
     scenarios = resolve_scenarios(args.positions, include_defaults=not args.skip_defaults)
     scenarios.extend(iter_user_fens(args))
@@ -675,7 +675,7 @@ def run_compare(args: argparse.Namespace) -> None:
     }
 
     python_session = EngineSession(command=args.engine_cmd or DEFAULT_ENGINE_CMD)
-    native_cmd = args.native_cmd or ("native/cpvsengine",)
+    native_cmd = args.native_cmd or ("engines/native/cpvsengine",)
     native_session = EngineSession(command=native_cmd)
 
     python_session.start()
@@ -756,7 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine-cmd",
         nargs="+",
         default=None,
-        help="Override engine command (default: python pvsengine.py)",
+        help="Override engine command (default: python engines/pvsengine.py)",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -834,8 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument(
         "--native-cmd",
         nargs="+",
-        default=("native/cpvsengine",),
-        help="Override native engine command (default: ./native/cpvsengine)",
+        default=("engines/native/cpvsengine",),
+        help="Override native engine command (default: ./engines/native/cpvsengine)",
     )
     compare.set_defaults(handler=run_compare)
 

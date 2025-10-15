@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from pvsengine import HeuristicSearchStrategy, MetaRegistry, SearchOutcome, StrategyContext
+from engines.pvsengine import HeuristicSearchStrategy, MetaRegistry, SearchOutcome, StrategyContext
 
 
 def make_context(board: chess.Board) -> StrategyContext:

@@ -1,6 +1,6 @@
 import chess
 
-from pvsengine import MoveStrategy, StrategyContext, StrategyResult, StrategySelector
+from engines.pvsengine import MoveStrategy, StrategyContext, StrategyResult, StrategySelector
 
 
 def make_context(legal_moves: int = 20) -> StrategyContext:

@@ -27,7 +27,7 @@ def resolve_engine_path(explicit: Optional[str]) -> Path:
     1. Command-line override
     2. Environment variable `CPVSENGINE_NATIVE_PATH`
     3. Sibling executables next to this shim ("cpvsengine" / "cpvsengine.exe")
-    4. `native/build/cpvsengine` for out-of-tree builds
+    4. `engines/native/build/cpvsengine` for out-of-tree builds
     """
 
     shim_path = Path(__file__).resolve()
@@ -42,7 +42,7 @@ def resolve_engine_path(explicit: Optional[str]) -> Path:
             candidate_list.append(Path(env_value))
         for name in DEFAULT_BINARY_NAMES:
             candidate_list.append(base_dir / name)
-        # CMake-style tree (if the user builds into native/build/)
+        # CMake-style tree (if the user builds into engines/native/build/)
         for name in DEFAULT_BINARY_NAMES:
             candidate_list.append(base_dir / "build" / name)
         candidates = tuple(candidate_list)
