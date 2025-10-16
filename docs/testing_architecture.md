@@ -25,7 +25,7 @@ Both `-G`/`--gui` and `-S`/`--search` accept optional file or node filters, e.g.
 - `tests/test_pvsengine_heuristic_strategy.py` — backend contract + metadata normalisation with a stub outcome.
 - `tests/test_self_play_manager.py` — engine orchestration, trace export, and state toggles.
 - `tests/test_simple_engine.py` — lightweight engine command handling and move legality.
-- `tests/test_chess_logic.py`, `tests/test_utils.py` — board utilities, export helpers, ANSI colouring.
+- `tests/test_chess_logic.py`, `tests/test_utils.py` — board utilities, export helpers, and ANSI/logging helpers exposed via `main.py`.
 
 ### PV Search Smoke (add `-S`/`--search`)
 - `tests/test_pvsengine_pvsearch.py` — iterative deepening backend sanity checks across multiple edge-case positions, including repeated runs to ensure the board state stays untouched.

@@ -3,7 +3,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-import utils
+import main as utils
 
 
 def test_color_text_wraps_ansi() -> None:

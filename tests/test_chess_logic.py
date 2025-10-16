@@ -1,6 +1,6 @@
 import chess
 
-import chess_logic
+import main as chess_logic
 
 
 def test_is_valid_move_and_make_move_updates_board() -> None:

@@ -7,9 +7,23 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    Union,
+)
+
 import chess
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
+
+sys.modules.setdefault("main", sys.modules[__name__])
 
 try:  # pragma: no cover - optional dependency for GUI mode
     from PySide6.QtCore import QProcess
@@ -24,10 +38,177 @@ if TYPE_CHECKING:
 else:  # pragma: no cover
     QProcessType = Any
 
-import chess_logic
-from utils import ReportingLevel
-from utils import cleanup, debug_text, info_text, recieved_text, sending_text
 from engines.pvsengine import MetaRegistry, build_search_tuning
+
+
+class ReportingLevel(Enum):
+    """Controls how much diagnostic information the UI prints."""
+
+    QUIET = 0
+    BASIC = 1
+    VERBOSE = 2
+
+    def label(self) -> str:
+        return self.name.title()
+
+
+def color_text(text: str, color_code: str) -> str:
+    return f"\033[{color_code}m{text}\033[0m"
+
+
+def debug_text(text: str) -> str:
+    return f"{color_text('DEBUG', '31')} {text}"
+
+
+def info_text(text: str) -> str:
+    return f"{color_text('INFO', '34')}  {text}"
+
+
+def sending_text(text: str) -> str:
+    return f"{color_text('SENDING  ', '32')} {text}"
+
+
+def recieved_text(text: str) -> str:
+    return f"{color_text('RECIEVED ', '35')} {text}"
+
+
+def cleanup(process, thread, app, dev: bool = False, quit_app: bool = True) -> None:
+    if dev:
+        print(debug_text("Cleaning up resources..."))
+
+    if process is not None:
+        if QProcess is not None and hasattr(process, "state"):
+            if process.state() != QProcess.NotRunning:  # type: ignore[attr-defined]
+                process.terminate()
+                if not process.waitForFinished(2000):
+                    if dev:
+                        print(
+                            debug_text(
+                                "Engine process unresponsive; forcing termination"
+                            )
+                        )
+                    process.kill()
+                    process.waitForFinished(1000)
+        process.close()
+
+    if thread is not None:
+        thread.join(timeout=1)
+
+    if quit_app and app is not None:
+        app.quit()
+
+
+def get_piece_unicode(piece: chess.Piece) -> str:
+    piece_unicode = {
+        "K": "♔",
+        "Q": "♕",
+        "R": "♖",
+        "B": "♗",
+        "N": "♘",
+        "P": "♙",
+        "k": "♚",
+        "q": "♛",
+        "r": "♜",
+        "b": "♝",
+        "n": "♞",
+        "p": "♟",
+    }
+    return piece_unicode[piece.symbol()]
+
+
+def center_on_screen(window) -> None:
+    screen = QApplication.primaryScreen() if QApplication else None
+    if not screen:
+        return
+    screen_geometry = screen.geometry()
+    window_size = window.size()
+    x = (screen_geometry.width() - window_size.width()) / 2 + screen_geometry.left()
+    y = (screen_geometry.height() - window_size.height()) / 2 + screen_geometry.top()
+    window.move(x, y)
+
+
+def is_valid_move(board: chess.Board, move: chess.Move) -> bool:
+    return move in board.legal_moves
+
+
+def is_game_over(board: chess.Board) -> bool:
+    return board.is_game_over()
+
+
+def get_game_result(board: chess.Board) -> str:
+    if board.is_checkmate():
+        return "Checkmate"
+    if board.is_stalemate():
+        return "Stalemate"
+    if board.is_insufficient_material():
+        return "Insufficient Material"
+    if board.is_seventyfive_moves():
+        return "75-move rule"
+    if board.is_fivefold_repetition():
+        return "Fivefold Repetition"
+    if board.is_variant_draw():
+        return "Variant-specific Draw"
+    return "Game in progress"
+
+
+def is_in_check(board: chess.Board) -> bool:
+    return board.is_check()
+
+
+def get_possible_moves(board: chess.Board, square: chess.Square) -> list[chess.Move]:
+    return [move for move in board.legal_moves if move.from_square == square]
+
+
+def make_move(board: chess.Board, move: chess.Move) -> None:
+    board.push(move)
+
+
+def undo_move(board: chess.Board) -> bool:
+    if board.move_stack:
+        board.pop()
+        return True
+    return False
+
+
+def is_pawn_promotion_attempt(board: chess.Board, move: chess.Move) -> bool:
+    piece = board.piece_at(move.from_square)
+    if piece is None or piece.piece_type != chess.PAWN:
+        return False
+
+    original_promotion = move.promotion
+    move.promotion = chess.QUEEN
+    try:
+        if not is_valid_move(board, move):
+            return False
+    finally:
+        move.promotion = original_promotion
+
+    rank = chess.square_rank(move.to_square)
+    return (piece.color == chess.WHITE and rank == 7) or (
+        piece.color == chess.BLACK and rank == 0
+    )
+
+
+def export_board_fen(board: chess.Board) -> str:
+    return board.fen()
+
+
+def export_move_history_uci(board: chess.Board) -> str:
+    moves_uci = [move.uci() for move in board.move_stack]
+    return " ".join(moves_uci)
+
+
+def export_move_history_san(board: chess.Board) -> str:
+    moves_san: list[str] = []
+    temp_board = board.copy()
+    temp_board.reset()
+
+    for move in board.move_stack:
+        moves_san.append(temp_board.san(move))
+        temp_board.push(move)
+
+    return " ".join(moves_san)
+
 
 ENGINE_SPECS = {
     "engine1": {
@@ -152,26 +333,19 @@ class _SelfPlayUI(Protocol):
 
     board: chess.Board
 
-    def set_self_play_active(self, active: bool) -> None:
-        ...
+    def set_self_play_active(self, active: bool) -> None: ...
 
-    def set_board_interaction_enabled(self, enabled: bool) -> None:
-        ...
+    def set_board_interaction_enabled(self, enabled: bool) -> None: ...
 
-    def set_manual_controls_enabled(self, enabled: bool) -> None:
-        ...
+    def set_manual_controls_enabled(self, enabled: bool) -> None: ...
 
-    def set_info_message(self, message: str) -> None:
-        ...
+    def set_info_message(self, message: str) -> None: ...
 
-    def indicate_engine_activity(self, engine_label: str, context: str) -> None:
-        ...
+    def indicate_engine_activity(self, engine_label: str, context: str) -> None: ...
 
-    def clear_engine_activity(self, message: Optional[str] = None) -> None:
-        ...
+    def clear_engine_activity(self, message: Optional[str] = None) -> None: ...
 
-    def self_play_evaluation_complete(self, engine_label: str) -> None:
-        ...
+    def self_play_evaluation_complete(self, engine_label: str) -> None: ...
 
 
 class SelfPlayManager:
@@ -209,7 +383,11 @@ class SelfPlayManager:
         self._current_engine_color: Optional[bool] = None
         self._pending_ignore_color: Optional[bool] = None
         self._waiting_for_move = False
-        self._trace_directory = Path(trace_directory) if trace_directory else Path.cwd() / "self_play_traces"
+        self._trace_directory = (
+            Path(trace_directory)
+            if trace_directory
+            else Path.cwd() / "self_play_traces"
+        )
         self._capture_payload = capture_payload
         self._session_traces: Dict[bool, List[str]] = {chess.WHITE: [], chess.BLACK: []}
         self._session_start_fen: Optional[str] = None
@@ -245,7 +423,11 @@ class SelfPlayManager:
         self._engine_names = engine_names
         if engine_time_presets:
             for color, preset in engine_time_presets.items():
-                if color in self._engine_time_presets and isinstance(preset, str) and preset:
+                if (
+                    color in self._engine_time_presets
+                    and isinstance(preset, str)
+                    and preset
+                ):
                     self._engine_time_presets[color] = preset
         self._current_engine_color = None
         self._pending_ignore_color = None
@@ -305,7 +487,10 @@ class SelfPlayManager:
         return True
 
     def should_apply_move(self, color: bool) -> bool:
-        if self._pending_ignore_color is not None and color == self._pending_ignore_color:
+        if (
+            self._pending_ignore_color is not None
+            and color == self._pending_ignore_color
+        ):
             self._pending_ignore_color = None
             return False
 
@@ -322,8 +507,8 @@ class SelfPlayManager:
         engine_label = self._engine_names.get(color, "Engine")
         self._gui.self_play_evaluation_complete(engine_label)
 
-        if chess_logic.is_game_over(self._gui.board):
-            outcome = chess_logic.get_game_result(self._gui.board)
+        if is_game_over(self._gui.board):
+            outcome = get_game_result(self._gui.board)
             self.stop(message=f"Self-play finished: {outcome}")
             return
 
@@ -368,7 +553,9 @@ class SelfPlayManager:
             return
 
         timestamp = self._session_started_at or datetime.now(timezone.utc)
-        iso_stamp = timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        iso_stamp = (
+            timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
 
         pattern = re.compile(r"^(\d+)_selfplay(?:\.[^.]+)?$")
         next_index = 1
@@ -589,13 +776,18 @@ def run_headless_self_play(args, script_dir: str) -> None:
             if move not in ui.board.legal_moves:
                 if not quiet:
                     label = engine_labels.get(color, "Engine")
-                    print(info_text(f"{label} move illegal in current position: {move_uci}"))
+                    print(
+                        info_text(
+                            f"{label} move illegal in current position: {move_uci}"
+                        )
+                    )
                 return None
             ui.board.push(move)
         return move_uci
 
     def reader(color: bool, engine: HeadlessEngineProcess) -> None:
         label = monitor_labels.get(engine, "Engine")
+
         def emit(line: str) -> None:
             if quiet:
                 return
@@ -677,7 +869,10 @@ def parse_args():
     )
     return parser.parse_args()
 
-def handle_bestmove_line(bestmove_line: str, gui: "ChessGUI", engine_label: str) -> Optional[str]:
+
+def handle_bestmove_line(
+    bestmove_line: str, gui: "ChessGUI", engine_label: str
+) -> Optional[str]:
     parts = bestmove_line.strip().split()
     if len(parts) >= 2:
         move_uci = parts[1]
@@ -701,7 +896,11 @@ def process_engine_output_line(
         manager.on_engine_output(expected_color, line)
 
     if line.startswith("bestmove"):
-        if manager and expected_color is not None and not manager.should_apply_move(expected_color):
+        if (
+            manager
+            and expected_color is not None
+            and not manager.should_apply_move(expected_color)
+        ):
             return
         emit(line)
         move_uci = handle_bestmove(line)
@@ -769,6 +968,7 @@ def engine_output_processor(
 
         manual_complete: Optional[Callable[[], None]] = None
         if manual_pending is not None and engine_id is not None:
+
             def _manual_complete() -> None:
                 if manual_pending.get(engine_id):
                     manual_pending[engine_id] = False
@@ -809,9 +1009,13 @@ def main():
         return
 
     if QApplication is None or QProcess is None:
-        raise ImportError("PySide6 is required for GUI mode; install PySide6 or use --self-play.")
+        raise ImportError(
+            "PySide6 is required for GUI mode; install PySide6 or use --self-play."
+        )
 
-    from gui import ChessGUI  # Local import to avoid PySide requirement for headless use
+    from gui import (
+        ChessGUI,
+    )  # Local import to avoid PySide requirement for headless use
 
     board = chess.Board() if not args.fen else chess.Board(args.fen)
     dev = not args.dev
@@ -891,7 +1095,9 @@ def main():
             return f"{token}[WB]"
         return token
 
-    manual_pending: Dict[str, bool] = {engine_id: False for engine_id in ENGINE_ID_ORDER}
+    manual_pending: Dict[str, bool] = {
+        engine_id: False for engine_id in ENGINE_ID_ORDER
+    }
     manual_pending_color: Dict[str, Optional[bool]] = {
         engine_id: None for engine_id in ENGINE_ID_ORDER
     }
@@ -902,7 +1108,9 @@ def main():
 
     def colors_for_engine(engine_id: str) -> Tuple[bool, ...]:
         return tuple(
-            color for color, assigned in color_assignments.items() if assigned == engine_id
+            color
+            for color, assigned in color_assignments.items()
+            if assigned == engine_id
         )
 
     def engine_log_label(engine_id: Optional[str]) -> str:
@@ -928,7 +1136,10 @@ def main():
         engine_id = color_assignments.get(turn_color, ENGINE_ID_ORDER[0])
         slot = engine_slots.get(engine_id)
         if not slot or not slot.get("active"):
-            fallback = next((eid for eid in ENGINE_ID_ORDER if engine_slots[eid].get("active")), ENGINE_ID_ORDER[0])
+            fallback = next(
+                (eid for eid in ENGINE_ID_ORDER if engine_slots[eid].get("active")),
+                ENGINE_ID_ORDER[0],
+            )
             engine_id = fallback
         assigned_colors = colors_for_engine(engine_id)
         if turn_color in assigned_colors:
@@ -946,7 +1157,9 @@ def main():
             slot = engine_slots[engine_id]
             proc = slot.get("process")
             if proc is None:
-                raise RuntimeError(f"No engine process assigned for {COLOR_NAME[color]}")
+                raise RuntimeError(
+                    f"No engine process assigned for {COLOR_NAME[color]}"
+                )
             engines[color] = proc  # type: ignore[assignment]
         return engines
 
@@ -956,7 +1169,9 @@ def main():
             engine_id = color_assignments[color]
             slot = engine_slots.get(engine_id, {})
             preset = slot.get("time_preset", DEFAULT_TIME_PRESET)
-            presets[color] = preset if isinstance(preset, str) and preset else DEFAULT_TIME_PRESET
+            presets[color] = (
+                preset if isinstance(preset, str) and preset else DEFAULT_TIME_PRESET
+            )
         return presets
 
     def rebuild_engine_labels_by_color() -> Dict[bool, str]:
@@ -1086,7 +1301,9 @@ def main():
         start_engine_instance(engine_id)
 
     active_defaults = [
-        engine_id for engine_id in ENGINE_ID_ORDER if engine_slots[engine_id].get("active")
+        engine_id
+        for engine_id in ENGINE_ID_ORDER
+        if engine_slots[engine_id].get("active")
     ]
     if not active_defaults:
         raise RuntimeError("No engines are available to run")
@@ -1122,7 +1339,10 @@ def main():
                 {engine_id: engine_caption(engine_id) for engine_id in ENGINE_ID_ORDER}
             )
             gui.set_engine_activation_states(
-                {engine_id: engine_slots[engine_id].get("active", False) for engine_id in ENGINE_ID_ORDER}
+                {
+                    engine_id: engine_slots[engine_id].get("active", False)
+                    for engine_id in ENGINE_ID_ORDER
+                }
             )
             gui.set_swap_button_enabled(can_swap_colors())
             gui.set_engine_assignments(
@@ -1143,7 +1363,11 @@ def main():
             engine_id = color_assignments[color]
             slot = engine_slots[engine_id]
             proc = slot.get("process")
-            if not slot.get("active") or proc is None or proc.state() != QProcess.Running:
+            if (
+                not slot.get("active")
+                or proc is None
+                or proc.state() != QProcess.Running
+            ):
                 message = f"{engine_log_label(engine_id)} is not running"
                 gui.set_info_message(message)
                 print(info_text(message))
@@ -1179,7 +1403,11 @@ def main():
     def toggle_engine_activation(engine_id: str, activate: bool) -> None:
         slot = engine_slots[engine_id]
         if activate:
-            if slot.get("active") and slot.get("process") and slot["process"].state() == QProcess.Running:
+            if (
+                slot.get("active")
+                and slot.get("process")
+                and slot["process"].state() == QProcess.Running
+            ):
                 gui.set_info_message(f"{engine_log_label(engine_id)} is already active")
                 return
             process = start_engine_instance(engine_id)
@@ -1202,7 +1430,9 @@ def main():
                 manual_pending_color[engine_id] = None
                 gui.manual_engine_busy = False
                 gui.set_manual_controls_enabled(True)
-                gui.clear_engine_activity(f"Manual evaluation canceled: {engine_log_label(engine_id)}")
+                gui.clear_engine_activity(
+                    f"Manual evaluation canceled: {engine_log_label(engine_id)}"
+                )
             proc = slot.get("process")
             if proc is not None:
                 stop_process(proc)

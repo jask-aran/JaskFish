@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-# Ensure repo-local imports (e.g., `import utils`) resolve without extra setup.
+# Ensure repo-local imports (e.g., `import main`) resolve without extra setup.
 src_dir = os.path.abspath(os.path.dirname(__file__))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
@@ -28,7 +28,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     if not config.getoption("run_gui"):
         skip_gui = pytest.mark.skip(reason="use -G/--gui to enable GUI tests")
         for item in items:
@@ -36,7 +38,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(skip_gui)
 
     if not config.getoption("run_search_slow"):
-        skip_slow = pytest.mark.skip(reason="use -S/--search to enable search smoke tests")
+        skip_slow = pytest.mark.skip(
+            reason="use -S/--search to enable search smoke tests"
+        )
         for item in items:
             if "search_slow" in item.keywords:
                 item.add_marker(skip_slow)

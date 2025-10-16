@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from gui import ChessGUI, PromotionDialog
-from utils import ReportingLevel
+from main import ReportingLevel
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -113,8 +113,9 @@ def test_promotion_dialog_selection(chess_gui):
     f7_button = chess_gui.squares[chess.F7]
     f8_button = chess_gui.squares[chess.F8]
 
-    with patch.object(PromotionDialog, "exec", return_value=True), patch.object(
-        PromotionDialog, "get_promotion_piece", return_value="queen"
+    with (
+        patch.object(PromotionDialog, "exec", return_value=True),
+        patch.object(PromotionDialog, "get_promotion_piece", return_value="queen"),
     ):
         QTest.mouseClick(f7_button, Qt.LeftButton)
         QTest.mouseClick(f8_button, Qt.LeftButton)
@@ -174,11 +175,12 @@ def test_export_game_creates_expected_payload(chess_gui):
     fixed_time = "2025-11-04 10:00:00"
     chess_gui.board.push_san("e4")
 
-    with patch("time.strftime", return_value=fixed_time), patch(
-        "time.localtime"
-    ), patch("os.path.exists", return_value=True), patch(
-        "builtins.open", mock_open()
-    ) as mocked_file:
+    with (
+        patch("time.strftime", return_value=fixed_time),
+        patch("time.localtime"),
+        patch("os.path.exists", return_value=True),
+        patch("builtins.open", mock_open()) as mocked_file,
+    ):
         chess_gui.export_game()
 
     mocked_file.assert_called_once_with(f"gamestates/chess_game_{fixed_time}.json", "w")

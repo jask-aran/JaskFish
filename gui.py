@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
-import chess_logic
-import utils
-from utils import ReportingLevel
+import main
+from main import ReportingLevel
+
+chess_logic = main
+utils = main
 
 
 class PromotionDialog(QDialog):
@@ -596,7 +598,7 @@ class ChessGUI(QMainWindow):
         if not os.path.exists(gamestates_folder):
             os.makedirs(gamestates_folder)
 
-        filename = f'{gamestates_folder}/chess_game_{game_state["export-time"]}.json'
+        filename = f"{gamestates_folder}/chess_game_{game_state['export-time']}.json"
         with open(filename, "w") as outfile:
             outfile.write(json.dumps(game_state))
 
@@ -635,7 +637,11 @@ class ChessGUI(QMainWindow):
                 continue
             if not bool(button.property("active")):
                 continue
-            label_text = self.engine_labels.get(engine_id) or button.property("labelText") or engine_id
+            label_text = (
+                self.engine_labels.get(engine_id)
+                or button.property("labelText")
+                or engine_id
+            )
             active_engines.append((engine_id, str(label_text)))
 
         if not active_engines:
@@ -703,14 +709,20 @@ class ChessGUI(QMainWindow):
                 continue
             active = states.get(engine_id, False)
             button.setProperty("active", active)
-            label_text = self.engine_labels.get(engine_id) or button.property("labelText") or engine_id
+            label_text = (
+                self.engine_labels.get(engine_id)
+                or button.property("labelText")
+                or engine_id
+            )
             action = "Deactivate" if active else "Activate"
             button.setText(f"{action} {label_text}")
 
     def set_swap_button_enabled(self, enabled: bool) -> None:
         self._swap_allowed = enabled
         if self.swap_button is not None:
-            effective = enabled and not self.manual_engine_busy and not self.self_play_active
+            effective = (
+                enabled and not self.manual_engine_busy and not self.self_play_active
+            )
             self.swap_button.setEnabled(effective)
 
     def set_engine_assignments(self, white_engine: str, black_engine: str) -> None:
@@ -740,7 +752,9 @@ class ChessGUI(QMainWindow):
             button.setEnabled(enabled)
 
     def set_manual_controls_enabled(self, enabled: bool) -> None:
-        effective_state = enabled and not self.manual_engine_busy and not self.self_play_active
+        effective_state = (
+            enabled and not self.manual_engine_busy and not self.self_play_active
+        )
         if hasattr(self, "go_button"):
             self.go_button.setEnabled(effective_state)
         if hasattr(self, "ready_button"):
