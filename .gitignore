@@ -165,3 +165,4 @@ gamestates/
 output.txt
 self_play_traces/
 engines/native/cpvsengine
+.beads/*.db

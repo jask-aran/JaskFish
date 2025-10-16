@@ -19,23 +19,37 @@ JaskFish is a UCI-compliant chess engine orchestrator with a PySide6 GUI and a b
 
 ### Beads
 
+
+
 #### Commands
 ```bash
 # Create new issue
-bd create "Issue title" -t bug|feature|task -p 0-4 -d "Description" --json
+bd create "Issue title" -t bug|feature|task|epic|chore -p 0-4 -d "Description" --json
 
 # Create with labels
-bd create "Issue title" -t bug -p 1 -l bug,critical --json
+bd create "Issue title" -t bug  -l label1,label2,label3,... --json
+
+# Create and link in one command (new way)
+bd create "Issue title" -t bug -p 1 --deps discovered-from:<parent-id> --json
+
+# Create with explicit ID, overrides default ID schema
+bd create "Issue title" --id worker1-100 -p 1 --json
 
 # Update issue status
 bd update <id> --status in_progress --json
 
+# Show dependency tree from an ID
+bd dep tree <id>
 
+# Use JQ to query the returned json from any comand
+bd ready --json | jq '.[0]'
 ```
+
+#### Guidelines
 - **Issue Types:** `bug`, `feature`, `task`, `epic`, `chore`.
 - **Priority Levels:** `0` critical, `1` high, `2` medium, `3` low, `4` backlog.
 - **Dependency Types:** `blocks`, `related`, `parent-child`, `discovered-from`; only `blocks` suppresses items from `bd ready`. 
-
+- **Statuses** (`open`, `in_progress`, `blocked`, `closed`)
 - **Queues & Details:** `bd list` surfaces backlog slices, `bd show <id>` reveals metadata, and `bd dep tree <id>` maps deliverables and blockers.
 - **Epics & Hierarchies:** `bd list --type epic` highlights umbrellas; refine scope via `bd show <epic>` or `bd dep tree <epic>`; connect child work with `bd dep add <epic> <child> --type parent-child` and keep every child updated through `bd update`.
 - **Capture New Work:** Record every bug/TODO found—even outside the current task—via `bd create`; attach it to the correct parent or seek approval to introduce a new epic before proceeding.
