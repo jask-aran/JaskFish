@@ -18,22 +18,22 @@ JaskFish is a UCI-compliant chess engine orchestrator with a PySide6 GUI and a b
 - Order imports stdlib → third-party → local modules; remove unused or wildcard imports.
 
 ### Beads
-- We track work in Beads instead of Markdown.
-- Use `bd init` to set up the tracker (add `--prefix` for custom IDs).
-- Create issues with `bd create "<title>" [-p <priority>] [-t <type>]` and optional details.
-- Inspect queues via `bd list`, `bd show <id>`, and `bd ready` to claim unblocked work.
-- Manage dependencies with `bd dep add <issue> <blocker>` and visualize using `bd dep tree <id>`.
-- Follow the loop: `bd ready` → `bd update <id> --status in_progress` → implement/test/document → record new work with `bd create` → finish with `bd close <id> --reason "Done: <summary>"` → rerun `bd ready`.
-- Issue types: `bug`, `feature`, `task`, `epic`, `chore`.
-- Priority levels: `0` critical, `1` high, `2` medium, `3` low, `4` backlog.
-- Dependency types: `blocks` (gates `bd ready`), `related`, `parent-child`, `discovered-from`.
-- Run `bd quickstart` or `bd -h` anytime for the complete command reference.
+- **Setup:** `bd init` seeds a tracker (use `--prefix` for custom IDs); existing repos auto-discover `.beads`.
+- **Daily Loop:** `bd ready` → `bd update <id> --status in_progress --assignee <name>` → build/test/document → log discoveries with `bd create` → `bd close <id> --reason "Done: <summary>"` → rerun `bd ready`.
+- **Queues & Details:** `bd list` surfaces backlog slices, `bd show <id>` reveals metadata, and `bd dep tree <id>` maps deliverables and blockers.
+- **Epics & Hierarchies:** `bd list --type epic` highlights umbrellas; refine scope via `bd show <epic>` or `bd dep tree <epic>`; connect child work with `bd dep add <epic> <child> --type parent-child` and keep every child updated through `bd update`.
+- **Capture New Work:** Record every bug/TODO found—even outside the current task—via `bd create`; attach it to the correct parent or seek approval to introduce a new epic before proceeding.
+- **Issue Types:** `bug`, `feature`, `task`, `epic`, `chore`.
+- **Priority Levels:** `0` critical, `1` high, `2` medium, `3` low, `4` backlog.
+- **Dependency Types:** `blocks`, `related`, `parent-child`, `discovered-from`; only `blocks` suppresses items from `bd ready`.
+- **Updates & Notes:** `bd update <id>` keeps status (`open`, `in_progress`, `blocked`, `closed`), assignee, description, and acceptance criteria in sync with reality.
+- **Reference:** `bd quickstart` and `bd -h` provide command-level detail when needed.
 
 
 ## Important Implementation Details
 
 ### Testing
-- Testing is about validity of outputs to quickly detect feature regressions, rather than validate performance.
+- Testing is about ensuring validity of outputs to quickly detect feature regressions, rather than to validate performance.
 - Tests default to **instant feedback** only; long-running GUI and search suites are opt-in (`-G`, `-S`). This keeps `pytest` suitable for quick pre-commit runs.
   - Execute the default test suite with `uv run pytest` from the repo root.
 - run `pytest --collect-only` to see all available tests with information, or simply run the default suite in verbose mode `pytest -v`
@@ -41,13 +41,20 @@ JaskFish is a UCI-compliant chess engine orchestrator with a PySide6 GUI and a b
   recipes, read `docs/testing_architecture.md`.
 
 ### Benchmarking & Profiling
-- `benchmark.py` contains tools for benchmarking engine performance, profiling and recording.
-<!-- Impliment concise explanation of benchmarking and profiling apparatus, specifically what commands are available and their expected outputs/ behaviours..-->
+- **Entrypoint:** Run scenarios with `uv run python benchmark.py <subcommand>`; override the engine via `--engine-cmd <cmd ...>` when testing alternates.
+- **Scenario Catalogue:** Inspect curated slugs and phases with `uv run python benchmark.py list`. Use `--positions <slug ...>` to focus, `--skip-defaults` to start empty, or feed extra FENs via `--fen` / `--fen-file`.
+- **Benchmark Runs:** `uv run python benchmark.py benchmark` executes UCI searches, prints per-scenario summaries (bestmove, depth, nodes, NPS, score), and honours budget flags like `--movetime`, `--depth`, `--nodes`, and `--infinite-duration`. Add `--echo-info` to stream raw `info` lines.
+- **Profiling:** `uv run python benchmark.py profile [--threads N]` calls the engine’s internal profiler on each scenario, emitting cProfile tables (top 25 cumulative functions) plus quick best-move stats.
+- **Engine Comparison:** `uv run python benchmark.py compare --movetime <ms>|--depth <n>` runs matched searches against the native CPvsEngine (override with `--native-cmd`). Output includes per-scenario metric diffs and aggregate depth/time/node ratios.
+- **Workflow Tips:** Combine curated and custom FENs to mirror regressions, keep `--max-wait` conservative for long searches, and redirect output if you need archival logs. Use `--ponder` or time-control flags to mimic tournament constraints.
 
 
-### Self-Play and Headless Self Play
-<!-- Impliment concise explanation of self play with reference file for understanding implementation -->
-Both GUI and headless (`python main.py --self-play`) harnesses use the same manager, ensuring behavioral consistency. Use `--include-perf-payload` when launching to preserve the raw JSON perf payload lines in logs and traces (they are filtered by default).
+### Self-Play and Headless Self-Play
+- **GUI Mode:** `uv run python main.py` launches the PySide6 board with start/stop self-play controls. Activating self play hands control to a self-play manager class that calls each engine in turn. At the end of a self play session, traces are saved to `self_play_traces/`.
+- **Headless Mode:** `uv run main.py --self-play` runs the same manager without the GUI, desirable for agent led testing.
+- **Configuration:** Pass `-fen <FEN>` for bespoke starts, toggle perf payloads via `--include-perf-payload`, and adjust engine pairings/time presets in `ENGINE_SPECS` within `main.py`, just like normal interactions with `main.py`
+- **Workflow:** Headless runs auto-rotate engines, log UCI transcripts, and respect `SelfPlayManager` heuristics; GUI mode shares code paths so parity bugs should be filed once.
+- **Tracing Tips:** Inspect trace files for move-by-move logs, diff runs to catch regressions, and keep quiet mode off when diagnosing engine chatter.
 
 
 ### UCI Protocol Compliance
