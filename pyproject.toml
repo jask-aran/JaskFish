@@ -1,0 +1,13 @@
+[project]
+name = "jaskfish"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "chess==1.11.2",
+    "pyside6==6.9.2",
+    "pyside6-addons==6.9.2",
+    "pyside6-essentials==6.9.2",
+    "shiboken6==6.9.2",
+]
