@@ -115,17 +115,7 @@ bd close <issue-id> --reason "Implemented" --json
 
 ## Testing Strategy
 - Tests default to **instant feedback**; long-running GUI and search suites are
-  opt-in (`-G`, `-S`). This keeps `pytest` suitable for quick pre-commit runs.
-- Suite organisation mirrors engine components:
-  - `tests/test_pvsengine_engine.py`, `test_pvsengine_strategy_selector.py`,
-    `test_pvsengine_search_limits.py`, and `test_pvsengine_heuristic_strategy.py`
-    cover the UCI façade, strategy ordering, budget resolution, and search config.
-  - `tests/test_pvsengine_pvsearch.py` is marked `search` and gated behind `-S`.
-  - `tests/test_self_play_manager.py`, `tests/test_simple_engine.py`,
-    `tests/test_chess_logic.py`, and `tests/test_utils.py` exercise supporting
-    modules and coordination helpers.
-  - `tests/test_gui.py` is marked `gui` and depends on PySide6 plus a display or
-    offscreen backend.
+  opt-in (`-G`, `-S`). This keeps `pytest` suitable for quick pre-commit runs, use '
 - Markers live in `pytest.ini`; `conftest.py` exposes fixtures for engine harnesses,
   FEN repositories, and GUI bootstrapping. Extend these instead of duplicating
   harness code.

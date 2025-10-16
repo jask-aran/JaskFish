@@ -55,3 +55,42 @@ JaskFish is a UCI-compliant chess engine orchestrator with a PySide6 GUI and a b
 4. Exports trace logs to `self_play_traces/` directory
 
 Both GUI and headless (`python main.py --self-play`) harnesses use the same manager, ensuring behavioral consistency. Use `--include-perf-payload` when launching to preserve the raw JSON perf payload lines in logs and traces (they are filtered by default).
+
+## Important Implementation Details
+
+### UCI Protocol Compliance
+
+All engines must respond to:
+- `uci`: Print `id name`, `id author`, `uciok`
+- `isready`: Print `readyok` (or `info string Engine is busy processing a move` if calculating)
+- `ucinewgame`: Reset board state
+- `position startpos moves ...`: Set board to starting position and apply moves
+- `position fen <fen> moves ...`: Set board to FEN and apply moves
+- `go [wtime <ms>] [btime <ms>] [winc <ms>] [binc <ms>] [movestogo <n>] [movetime <ms>] [infinite]`: Start calculation
+- `stop`: Halt current calculation (graceful)
+- `quit`: Shutdown engine
+- `debug on/off`: Enable/disable debug logging
+
+
+## Common Development Scenarios
+
+### Running Headless Self-Play
+
+<!-- Impliment concise explanation of self play with reference file for understanding implementation -->
+
+
+### Changing Engine Matchups
+
+Edit `ENGINE_SPECS` in `main.py`:
+```python
+ENGINE_SPECS = {
+    "engine1": {
+        "default_script": "engine.py",  # or "pvsengine.py", "simple_engine.py"
+        "default_name": "JaskFish",
+        "preferred_color": chess.WHITE,
+    },
+    # ...
+}
+```
+
+Restart GUI to load new engine assignments.

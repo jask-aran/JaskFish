@@ -103,23 +103,6 @@ Both GUI and headless (`python main.py --self-play`) harnesses use the same mana
 
 
 
-### Testing Strategy
-
-**Headless Heuristic Trace Tests** (marked `dev`, ~50s total):
-- `test_headless_self_play_debug_trace`: 12 plies from start position
-- `test_headless_self_play_midgame_trace`: 8 plies from complex midgame
-
-These tests use:
-- `HeadlessSelfPlayUI`: Minimal callback interface for `SelfPlayManager`
-- `EngineHarness`: Wraps `ChessEngine`, forces `debug on`, routes commands synchronously
-- `SelfPlayTestHarness`: Sequences move generation deterministically
-
-**Test Markers** (defined in `pytest.ini`):
-- `dev`: Developer-only tests, expensive, run with `-m dev`
-- `gui`: GUI tests requiring display/Xvfb
-- `performance`: Performance benchmarks
-- `logic`: Game logic tests
-- `edge_case`: Edge case tests
 
 ### File Structure
 
@@ -155,34 +138,10 @@ All engines must respond to:
 - `quit`: Shutdown engine
 - `debug on/off`: Enable/disable debug logging
 
-### Repetition Avoidance
 
-When `MetaParams.avoid_repetition=True`, the heuristic search applies penalties:
-- Fivefold repetition: `MATE_SCORE` penalty (forced draw)
-- Threefold repetition or fifty-move rule: `repetition_strong_penalty` (default 90cp)
-- Twofold repetition: `repetition_penalty` (default 45cp)
 
-Penalties are subtracted from the score *from the perspective of the side to move*, discouraging loops.
 
-### Time Controls
 
-Explicit time controls from `go` command override adaptive heuristics. If no time controls provided, the engine computes a budget based on:
-- Complexity (legal move count)
-- Phase (piece count)
-- Tension (in check, mate threat)
-
-Budget is clamped: `[min_time_limit, max_time_limit]`.
-
-### Debug Logging
-
-Set `debug on` to enable trace logging:
-- Strategy selection rationale
-- Per-depth search summaries (depth, nodes, time, NPS, PV)
-- Aspiration window adjustments
-- Budget consumption warnings
-- Transposition table hit rates
-
-In GUI, toggle via "Debug Mode" checkbox. In tests, `EngineHarness` forces debug mode for deterministic traces.
 
 ## Common Development Scenarios
 
