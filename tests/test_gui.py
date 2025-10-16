@@ -5,15 +5,17 @@ from unittest.mock import mock_open, patch
 import chess
 import pytest
 
-pytest.importorskip("PySide6")
-pytestmark = pytest.mark.gui
-
-from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+try:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+except ImportError:  # pragma: no cover
+    pytest.skip("PySide6 is required for GUI tests", allow_module_level=True)
 
 from gui import ChessGUI, PromotionDialog
 from main import ReportingLevel
+
+pytestmark = pytest.mark.gui
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 

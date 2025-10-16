@@ -220,7 +220,7 @@ class ChessGUI(QMainWindow):
             """
         )
         white_button = msg_box.addButton("White", QMessageBox.YesRole)
-        black_button = msg_box.addButton("Black", QMessageBox.NoRole)
+        _black_button = msg_box.addButton("Black", QMessageBox.NoRole)
         utils.center_on_screen(msg_box)
         msg_box.exec()
 

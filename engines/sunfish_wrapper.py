@@ -329,7 +329,7 @@ class SunfishWrapper:
         history = [position]
         searcher = SUNFISH.Searcher()
         bestmove: Optional[str] = None
-        bestdepth = 0
+        _bestdepth = 0
 
         generator = searcher.search(history)
 
@@ -343,7 +343,7 @@ class SunfishWrapper:
                     centipawns = int(score)
                     print(f"info depth {depth} score cp {centipawns} pv {move_uci}")
                     bestmove = move_uci
-                    bestdepth = depth
+                    _bestdepth = depth
 
                 if depth_limit is not None and depth >= depth_limit:
                     break

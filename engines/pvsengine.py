@@ -2437,7 +2437,7 @@ class PVSearchBackend(SearchBackend):
     def _generate_capture_moves(self, board: chess.Board) -> List[chess.Move]:
         color = board.turn
         opponent = not color
-        occupied = board.occupied
+        _occupied = board.occupied
         enemy_bb = board.occupied_co[opponent]
         moves: List[chess.Move] = []
 
@@ -3028,8 +3028,8 @@ class ChessEngine:
             metadata = result.metadata if result and result.metadata else {}
             nodes = metadata.get("nodes")
             search_time = metadata.get("time")
-            depth = metadata.get("depth", 0)
-            timers = metadata.get("timing")
+            _depth = metadata.get("depth", 0)
+            _timers = metadata.get("timing")
 
             if result and result.move:
                 label = metadata.get("label", result.strategy_name)

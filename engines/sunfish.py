@@ -1,9 +1,12 @@
 #!/usr/bin/env pypy3
 from __future__ import print_function
 
+import sys
 import time
-from itertools import count
 from collections import namedtuple
+from itertools import count
+
+import tools.uci
 
 # If we could rely on the env -S argument, we could just use "pypy3 -u"
 # as the shebang to unbuffer stdout. But alas we have to do this instead:
@@ -73,8 +76,11 @@ pst = {
 }
 # Pad tables and join piece and pst dictionaries
 for k, table in pst.items():
-    padrow = lambda row: (0,) + tuple(x + piece[k] for x in row) + (0,)
-    pst[k] = sum((padrow(table[i * 8 : i * 8 + 8]) for i in range(8)), ())
+    padded_rows = [
+        (0,) + tuple(x + piece[k] for x in table[i * 8 : i * 8 + 8]) + (0,)
+        for i in range(8)
+    ]
+    pst[k] = sum(padded_rows, ())
     pst[k] = (0,) * 20 + pst[k] + (0,) * 20
 
 ###############################################################################
@@ -165,8 +171,10 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
                         break
                     # Pawn move, double move and capture
                     if p == "P":
-                        if d in (N, N + N) and q != ".": break
-                        if d == N + N and (i < A1 + N or self.board[i + N] != "."): break
+                        if d in (N, N + N) and q != ".":
+                            break
+                        if d == N + N and (i < A1 + N or self.board[i + N] != "."):
+                            break
                         if (
                             d in (N + W, N + E)
                             and q == "."
@@ -200,35 +208,42 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
 
     def move(self, move):
         i, j, prom = move
-        p, q = self.board[i], self.board[j]
-        put = lambda board, i, p: board[:i] + p + board[i + 1 :]
+        p = self.board[i]
+
+        def put_piece(board_state, index, value):
+            return board_state[:index] + value + board_state[index + 1 :]
+
         # Copy variables and reset ep and kp
         board = self.board
         wc, bc, ep, kp = self.wc, self.bc, 0, 0
         score = self.score + self.value(move)
         # Actual move
-        board = put(board, j, board[i])
-        board = put(board, i, ".")
+        board = put_piece(board, j, board[i])
+        board = put_piece(board, i, ".")
         # Castling rights, we move the rook or capture the opponent's
-        if i == A1: wc = (False, wc[1])
-        if i == H1: wc = (wc[0], False)
-        if j == A8: bc = (bc[0], False)
-        if j == H8: bc = (False, bc[1])
+        if i == A1:
+            wc = (False, wc[1])
+        if i == H1:
+            wc = (wc[0], False)
+        if j == A8:
+            bc = (bc[0], False)
+        if j == H8:
+            bc = (False, bc[1])
         # Castling
         if p == "K":
             wc = (False, False)
             if abs(j - i) == 2:
                 kp = (i + j) // 2
-                board = put(board, A1 if j < i else H1, ".")
-                board = put(board, kp, "R")
+                board = put_piece(board, A1 if j < i else H1, ".")
+                board = put_piece(board, kp, "R")
         # Pawn promotion, double move and en passant capture
         if p == "P":
             if A8 <= j <= H8:
-                board = put(board, j, prom)
+                board = put_piece(board, j, prom)
             if j - i == 2 * N:
                 ep = i + N
             if j == self.ep:
-                board = put(board, j + S, ".")
+                board = put_piece(board, j + S, ".")
         # We rotate the returned position, so it's ready for the next player
         return Position(board, score, wc, bc, ep, kp).rotate()
 
@@ -294,8 +309,10 @@ class Searcher:
         # We also need to be sure, that the stored search was over the same
         # nodes as the current search.
         entry = self.tp_score.get((pos, depth, can_null), Entry(-MATE_UPPER, MATE_UPPER))
-        if entry.lower >= gamma: return entry.lower
-        if entry.upper < gamma: return entry.upper
+        if entry.lower >= gamma:
+            return entry.lower
+        if entry.upper < gamma:
+            return entry.upper
 
         # Let's not repeat positions. We don't chat
         # - at the root (can_null=False) since it is in history, but not a draw.
@@ -450,8 +467,6 @@ hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
 #input = raw_input
 
 # minifier-hide start
-import sys
-import tools.uci
 tools.uci.run(sys.modules[__name__], hist[-1])
 sys.exit()
 # minifier-hide end

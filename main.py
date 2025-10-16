@@ -23,6 +23,8 @@ from typing import (
 
 import chess
 
+from engines.pvsengine import MetaRegistry, build_search_tuning
+
 sys.modules.setdefault("main", sys.modules[__name__])
 
 try:  # pragma: no cover - optional dependency for GUI mode
@@ -37,8 +39,6 @@ if TYPE_CHECKING:
     from gui import ChessGUI  # pragma: no cover
 else:  # pragma: no cover
     QProcessType = Any
-
-from engines.pvsengine import MetaRegistry, build_search_tuning
 
 
 class ReportingLevel(Enum):

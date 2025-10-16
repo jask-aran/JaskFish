@@ -997,10 +997,10 @@ class HeuristicSearchStrategy(MoveStrategy):
 
                 depth_start_nodes = self._nodes_visited
                 depth_start_time = time.perf_counter()
-                alpha_start_ns = timing_totals["alpha_beta"]
-                order_start_ns = timing_totals["order_moves"]
-                eval_start_ns = timing_totals["evaluate"]
-                q_start_ns = timing_totals["quiescence"]
+                _alpha_start_ns = timing_totals["alpha_beta"]
+                _order_start_ns = timing_totals["order_moves"]
+                _eval_start_ns = timing_totals["evaluate"]
+                _q_start_ns = timing_totals["quiescence"]
 
                 failure_count = 0
 
@@ -2390,14 +2390,11 @@ class ChessEngine:
                     f"material={context.material_imbalance}"
                 )
 
-            selection_elapsed = 0.0
-            selection_start = time.perf_counter()
             result = (
                 self.strategy_selector.select_move(board_snapshot, context)
                 if self.strategy_selector
                 else None
             )
-            selection_elapsed = time.perf_counter() - selection_start
 
             metadata: Dict[str, Any] = {}
             if result and result.metadata:
