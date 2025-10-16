@@ -3,12 +3,11 @@ import io
 import time
 import threading
 import math
-import os
 from abc import ABC, abstractmethod
 from collections import defaultdict, OrderedDict
-from dataclasses import dataclass, field, replace, field, replace, fields
+from dataclasses import dataclass, field, replace, fields
 from enum import IntEnum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, Literal
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Literal
 
 import chess
 from chess import polyglot

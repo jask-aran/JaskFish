@@ -7,7 +7,7 @@ import os
 from typing import Callable, Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QColor, QPalette, QFontMetrics
+from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,

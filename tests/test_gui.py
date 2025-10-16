@@ -1,5 +1,4 @@
 import json
-import os
 import re
 from unittest.mock import mock_open, patch
 
@@ -11,7 +10,7 @@ pytestmark = pytest.mark.gui
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from gui import ChessGUI, PromotionDialog
 from utils import ReportingLevel

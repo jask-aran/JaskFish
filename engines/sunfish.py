@@ -1,9 +1,9 @@
 #!/usr/bin/env pypy3
 from __future__ import print_function
 
-import time, math
+import time
 from itertools import count
-from collections import namedtuple, defaultdict
+from collections import namedtuple
 
 # If we could rely on the env -S argument, we could just use "pypy3 -u"
 # as the shebang to unbuffer stdout. But alas we have to do this instead:
@@ -450,7 +450,8 @@ hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
 #input = raw_input
 
 # minifier-hide start
-import sys, tools.uci
+import sys
+import tools.uci
 tools.uci.run(sys.modules[__name__], hist[-1])
 sys.exit()
 # minifier-hide end
