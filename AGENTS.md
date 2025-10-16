@@ -18,16 +18,34 @@ JaskFish is a UCI-compliant chess engine orchestrator with a PySide6 GUI and a b
 - Order imports stdlib → third-party → local modules; remove unused or wildcard imports.
 
 ### Beads
-- **Setup:** `bd init` seeds a tracker (use `--prefix` for custom IDs); existing repos auto-discover `.beads`.
-- **Daily Loop:** `bd ready` → `bd update <id> --status in_progress --assignee <name>` → build/test/document → log discoveries with `bd create` → `bd close <id> --reason "Done: <summary>"` → rerun `bd ready`.
+
+#### Commands
+```bash
+# Create new issue
+bd create "Issue title" -t bug|feature|task -p 0-4 -d "Description" --json
+
+# Create with labels
+bd create "Issue title" -t bug -p 1 -l bug,critical --json
+
+# Update issue status
+bd update <id> --status in_progress --json
+
+
+```
+- **Issue Types:** `bug`, `feature`, `task`, `epic`, `chore`.
+- **Priority Levels:** `0` critical, `1` high, `2` medium, `3` low, `4` backlog.
+- **Dependency Types:** `blocks`, `related`, `parent-child`, `discovered-from`; only `blocks` suppresses items from `bd ready`. 
+
 - **Queues & Details:** `bd list` surfaces backlog slices, `bd show <id>` reveals metadata, and `bd dep tree <id>` maps deliverables and blockers.
 - **Epics & Hierarchies:** `bd list --type epic` highlights umbrellas; refine scope via `bd show <epic>` or `bd dep tree <epic>`; connect child work with `bd dep add <epic> <child> --type parent-child` and keep every child updated through `bd update`.
 - **Capture New Work:** Record every bug/TODO found—even outside the current task—via `bd create`; attach it to the correct parent or seek approval to introduce a new epic before proceeding.
-- **Issue Types:** `bug`, `feature`, `task`, `epic`, `chore`.
-- **Priority Levels:** `0` critical, `1` high, `2` medium, `3` low, `4` backlog.
-- **Dependency Types:** `blocks`, `related`, `parent-child`, `discovered-from`; only `blocks` suppresses items from `bd ready`.
+
+
+
 - **Updates & Notes:** `bd update <id>` keeps status (`open`, `in_progress`, `blocked`, `closed`), assignee, description, and acceptance criteria in sync with reality.
 - **Reference:** `bd quickstart` and `bd -h` provide command-level detail when needed.
+
+- **Daily Loop:** `bd ready` → `bd update <id> --status in_progress --assignee <name>` → build/test/document → log discoveries with `bd create` → `bd close <id> --reason "Done: <summary>"` → rerun `bd ready`.
 
 
 ## Important Implementation Details
