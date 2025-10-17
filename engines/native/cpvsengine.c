@@ -31,7 +31,6 @@ typedef struct {
     int king_square[2];
     int material_score[2];
     int pst_score[2];
-    int piece_count[2][6];
     int piece_list[2][6][16];
     int piece_list_size[2][6];
     uint64_t occupancy[2];
@@ -46,6 +45,9 @@ typedef struct {
     int halfmove_clock;
     uint64_t zobrist_key;
     int phase;
+    int material_score[2];
+    int pst_score[2];
+    int king_square[2];
 } Undo;
 
 typedef struct {
@@ -260,82 +262,62 @@ static bool attacks_square_from_board(const int board[128], int from, int to, in
     if (type == 0) {
         return false;
     }
+
+    if (type == 1) { /* Pawn */
+        int forward = piece > 0 ? 16 : -16;
+        return to == from + forward - 1 || to == from + forward + 1;
+    }
+
+    if (type == 2) { /* Knight */
+        for (int i = 0; i < 8; ++i) {
+            if (from + knight_offsets[i] == to) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (type == 6) { /* King */
+        for (int i = 0; i < 8; ++i) {
+            if (from + king_offsets[i] == to) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     int from_file = from & 7;
     int from_rank = from >> 4;
     int to_file = to & 7;
     int to_rank = to >> 4;
-    if (type == 1) {
-        int forward = piece > 0 ? 16 : -16;
-        if (to == from + forward - 1 || to == from + forward + 1) {
+
+    if (type == 3 || type == 5) { // Bishop or Queen
+        if (abs(from_file - to_file) == abs(from_rank - to_rank)) {
+            int step = ((to_rank - from_rank) > 0 ? 16 : -16) + ((to_file - from_file) > 0 ? 1 : -1);
+            for (int sq = from + step; sq != to; sq += step) {
+                if (board[sq] != 0) return false; // Blocked
+            }
             return true;
         }
-        return false;
     }
-    if (type == 2) {
-        for (int i = 0; i < 8; ++i) {
-            int target = from + knight_offsets[i];
-            if (target == to) {
-                return square_on_board(target);
+
+    if (type == 4 || type == 5) { // Rook or Queen
+        if (from_file == to_file) {
+            int step = (to_rank - from_rank) > 0 ? 16 : -16;
+            for (int sq = from + step; sq != to; sq += step) {
+                if (board[sq] != 0) return false;
             }
+            return true;
         }
-        return false;
-    }
-    bool diag_aligned = abs(from_file - to_file) == abs(from_rank - to_rank);
-    bool straight_aligned = (from_file == to_file) || (from_rank == to_rank);
-    if (type == 3 || type == 5) {
-        if (!diag_aligned) {
-            if (type == 3) {
-                return false;
+        if (from_rank == to_rank) {
+            int step = (to_file - from_file) > 0 ? 1 : -1;
+            for (int sq = from + step; sq != to; sq += step) {
+                if (board[sq] != 0) return false;
             }
-        } else {
-            for (int i = 0; i < 4; ++i) {
-                int offset = bishop_offsets[i];
-                int sq = from + offset;
-                while (square_on_board(sq)) {
-                    if (sq == to) {
-                        return true;
-                    }
-                    if (board[sq] != 0) {
-                        break;
-                    }
-                    sq += offset;
-                }
-            }
-        }
-        if (type == 3) {
-            return false;
+            return true;
         }
     }
-    if (type == 4 || type == 5) {
-        if (!straight_aligned) {
-            return (type == 5) && diag_aligned;
-        }
-        for (int i = 0; i < 4; ++i) {
-            int offset = rook_offsets[i];
-            int sq = from + offset;
-            while (square_on_board(sq)) {
-                if (sq == to) {
-                    return true;
-                }
-                if (board[sq] != 0) {
-                    break;
-                }
-                sq += offset;
-            }
-        }
-        if (type == 4) {
-            return false;
-        }
-    }
-    if (type == 6) {
-        for (int i = 0; i < 8; ++i) {
-            int target = from + king_offsets[i];
-            if (target == to) {
-                return square_on_board(target);
-            }
-        }
-        return false;
-    }
+
     return false;
 }
 
@@ -386,16 +368,19 @@ static int value_from_tt(int value, int ply) {
     return value;
 }
 
+static uint64_t rand_state = 10703437;
+
 static uint64_t random_u64(void) {
-    uint64_t a = (uint64_t)rand();
-    uint64_t b = (uint64_t)rand();
-    uint64_t c = (uint64_t)rand();
-    uint64_t d = (uint64_t)rand();
-    return (a << 48) ^ (b << 32) ^ (c << 16) ^ d;
+    uint64_t x = rand_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    rand_state = x;
+    return x * 0x2545F4914F6CDD1DULL;
 }
 
 static void init_zobrist(void) {
-    srand(20231123);
+    rand_state = 20231123;
     for (int i = 0; i < 12; ++i) {
         for (int sq = 0; sq < 64; ++sq) {
             zobrist_pieces[i][sq] = random_u64();
@@ -467,26 +452,34 @@ static void clear_position(Position *pos) {
     pos->phase = 0;
     pos->king_square[0] = -1;
     pos->king_square[1] = -1;
+    pos->material_score[0] = pos->material_score[1] = 0;
+    pos->pst_score[0] = pos->pst_score[1] = 0;
+    memset(pos->piece_list_size, 0, sizeof(pos->piece_list_size));
 }
 
-static void add_piece(Position *pos, int piece, int square) {
-    (void)pos;
-    (void)piece;
-    (void)square;
+static void add_piece_eval(Position *pos, int sq, int piece) {
+    Color color = piece_color(piece);
+    int type = piece_type(piece) - 1;
+    pos->material_score[color] += piece_values[type];
+    pos->pst_score[color] += (color == COLOR_WHITE) ? pst_white[type][square_to_64(sq)] : pst_black[type][square_to_64(sq)];
 }
 
-static void remove_piece(Position *pos, int piece, int square) {
-    (void)pos;
-    (void)piece;
-    (void)square;
+static void remove_piece_eval(Position *pos, int sq, int piece) {
+    if (piece == 0) return;
+    Color color = piece_color(piece);
+    int type = piece_type(piece) - 1;
+    pos->material_score[color] -= piece_values[type];
+    pos->pst_score[color] -= (color == COLOR_WHITE) ? pst_white[type][square_to_64(sq)] : pst_black[type][square_to_64(sq)];
 }
 
-static void move_piece(Position *pos, int piece, int from, int to) {
-    (void)pos;
-    (void)piece;
-    (void)from;
-    (void)to;
+static void move_piece_eval(Position *pos, int from, int to, int piece) {
+    Color color = piece_color(piece);
+    int type = piece_type(piece) - 1;
+    pos->pst_score[color] -= (color == COLOR_WHITE) ? pst_white[type][square_to_64(from)] : pst_black[type][square_to_64(from)];
+    pos->pst_score[color] += (color == COLOR_WHITE) ? pst_white[type][square_to_64(to)] : pst_black[type][square_to_64(to)];
 }
+
+
 
 static bool parse_fen(Position *pos, const char *fen) {
     clear_position(pos);
@@ -520,20 +513,22 @@ static bool parse_fen(Position *pos, const char *fen) {
             case 'B': piece = 3; break;
             case 'R': piece = 4; break;
             case 'Q': piece = 5; break;
-            case 'K': piece = 6; break;
+            case 'K': piece = 6; pos->king_square[COLOR_WHITE] = sq; break;
             case 'p': piece = -1; break;
             case 'n': piece = -2; break;
             case 'b': piece = -3; break;
             case 'r': piece = -4; break;
             case 'q': piece = -5; break;
-            case 'k': piece = -6; break;
+            case 'k': piece = -6; pos->king_square[COLOR_BLACK] = sq; break;
             default: return false;
         }
         pos->squares[sq] = piece;
+        add_piece_eval(pos, sq, piece);
         int type = piece_type(piece) - 1;
         if (type >= 0 && type < 6) {
+            Color color = piece_color(piece);
+            pos->piece_list[color][type][pos->piece_list_size[color][type]++] = sq;
             phase_sum += phase_values[type];
-            add_piece(pos, piece, sq);
         }
         file++;
     }
@@ -663,29 +658,7 @@ static void toggle_side(Position *pos) {
     pos->zobrist_key ^= zobrist_side;
 }
 
-static int compute_phase(const Position *pos) {
-    /* Returns phase value: 256 = opening, 0 = endgame */
-    int current_phase = 0;
-    
-    for (int sq = 0; sq < 128; ++sq) {
-        if (!square_on_board(sq)) {
-            sq += 7;
-            continue;
-        }
-        int piece = pos->squares[sq];
-        if (piece == 0) continue;
-        
-        int type = piece_type(piece) - 1;
-        if (type >= 0 && type < 6) {
-            current_phase += phase_values[type];
-        }
-    }
-    
-    if (max_phase_value == 0) return 128;
-    
-    /* Scale to 0-256 range */
-    return (current_phase * 256) / max_phase_value;
-}
+
 
 static int taper_score(int mg_score, int eg_score, int phase) {
     /* Interpolate between midgame and endgame scores based on phase */
@@ -822,19 +795,7 @@ static int eval_mobility(const Position *pos, Color color, int phase) {
 
 static int eval_king_safety(const Position *pos, Color color, int phase) {
     int score = 0;
-    int king_piece = (color == COLOR_WHITE) ? 6 : -6;
-    int king_sq = -1;
-    
-    for (int sq = 0; sq < 128; ++sq) {
-        if (!square_on_board(sq)) {
-            sq += 7;
-            continue;
-        }
-        if (pos->squares[sq] == king_piece) {
-            king_sq = sq;
-            break;
-        }
-    }
+    int king_sq = pos->king_square[color];
     
     if (king_sq == -1) return 0;
     
@@ -960,11 +921,7 @@ static int eval_piece_bonuses(const Position *pos, Color color, int phase) {
     return score;
 }
 
-static int evaluate_simple(const Position *pos) {
-    int score = pos->material_score[0] - pos->material_score[1];
-    score += pos->pst_score[0] - pos->pst_score[1];
-    return (pos->side_to_move == COLOR_WHITE) ? score : -score;
-}
+
 
 static int evaluate(const Position *pos) {
     int phase = pos->phase;
@@ -1322,22 +1279,7 @@ static void generate_moves(const Position *pos, MoveList *list, bool captures_on
     }
 }
 
-static int find_king(const Position *pos, Color color) {
-    for (int sq = 0; sq < 128; ++sq) {
-        if (!square_on_board(sq)) {
-            sq += 7;
-            continue;
-        }
-        int piece = pos->squares[sq];
-        if (piece == 0) {
-            continue;
-        }
-        if (piece_color(piece) == color && piece_type(piece) == 6) {
-            return sq;
-        }
-    }
-    return -1;
-}
+
 
 static void update_castling_rights(Position *pos, int square) {
     switch (square) {
@@ -1366,28 +1308,30 @@ static bool make_move(Position *pos, int move, Undo *undo) {
     undo->halfmove_clock = pos->halfmove_clock;
     undo->zobrist_key = pos->zobrist_key;
     undo->phase = pos->phase;
+    undo->material_score[0] = pos->material_score[0];
+    undo->material_score[1] = pos->material_score[1];
+    undo->pst_score[0] = pos->pst_score[0];
+    undo->pst_score[1] = pos->pst_score[1];
+    undo->king_square[0] = pos->king_square[0];
+    undo->king_square[1] = pos->king_square[1];
 
     pos->halfmove_clock++;
-
     if (piece_type(piece) == 1 || captured != 0) {
         pos->halfmove_clock = 0;
     }
 
     update_zobrist_piece(pos, piece, from);
     if (captured != 0) {
+        remove_piece_eval(pos, to, captured);
         update_zobrist_piece(pos, captured, to);
-        /* Update phase for captured piece */
-        int cap_type = piece_type(captured) - 1;
-        if (cap_type >= 0 && cap_type < 6 && max_phase_value > 0) {
-            int phase_delta = (phase_values[cap_type] * 256) / max_phase_value;
-            pos->phase -= phase_delta;
-            if (pos->phase < 0) pos->phase = 0;
-        }
     }
 
-    pos->ep_square = -1;
+    move_piece_eval(pos, from, to, piece);
     pos->squares[to] = piece;
     pos->squares[from] = 0;
+    if (piece_type(piece) == 6) {
+        pos->king_square[piece_color(piece)] = to;
+    }
     update_zobrist_piece(pos, piece, to);
 
     update_castling_rights(pos, from);
@@ -1395,49 +1339,43 @@ static bool make_move(Position *pos, int move, Undo *undo) {
 
     if (flags & FLAG_DOUBLE_PAWN) {
         pos->ep_square = (pos->side_to_move == COLOR_WHITE) ? to - 16 : to + 16;
+    } else {
+        pos->ep_square = -1;
     }
 
     if (flags & FLAG_EN_PASSANT) {
         int capture_sq = (pos->side_to_move == COLOR_WHITE) ? to - 16 : to + 16;
         int captured_piece = pos->squares[capture_sq];
+        remove_piece_eval(pos, capture_sq, captured_piece);
         update_zobrist_piece(pos, captured_piece, capture_sq);
         pos->squares[capture_sq] = 0;
         captured = captured_piece;
-        /* Update phase for en passant capture (pawn) */
-        if (max_phase_value > 0) {
-            int pawn_phase = (phase_values[0] * 256) / max_phase_value;
-            pos->phase -= pawn_phase;
-            if (pos->phase < 0) pos->phase = 0;
-        }
     }
 
     if (promotion) {
-        update_zobrist_piece(pos, pos->squares[to], to);
         int promoted_piece = (pos->side_to_move == COLOR_WHITE) ? promotion : -promotion;
+        remove_piece_eval(pos, to, piece);
+        add_piece_eval(pos, to, promoted_piece);
+        update_zobrist_piece(pos, piece, to);
         pos->squares[to] = promoted_piece;
-        update_zobrist_piece(pos, pos->squares[to], to);
-        /* Update phase for promotion (remove pawn, add promoted piece) */
-        if (max_phase_value > 0) {
-            int pawn_phase = (phase_values[0] * 256) / max_phase_value;
-            int promo_phase = (phase_values[promotion - 1] * 256) / max_phase_value;
-            pos->phase = pos->phase - pawn_phase + promo_phase;
-            if (pos->phase > 256) pos->phase = 256;
-        }
+        update_zobrist_piece(pos, promoted_piece, to);
     }
 
     if (flags & FLAG_CASTLING) {
-        if (to == from + 2) {
+        if (to == from + 2) { // Kingside
             int rook_from = to + 1;
             int rook_to = to - 1;
             int rook = pos->squares[rook_from];
+            move_piece_eval(pos, rook_from, rook_to, rook);
             update_zobrist_piece(pos, rook, rook_from);
             pos->squares[rook_to] = rook;
             pos->squares[rook_from] = 0;
             update_zobrist_piece(pos, rook, rook_to);
-        } else if (to == from - 2) {
+        } else { // Queenside
             int rook_from = to - 2;
             int rook_to = to + 1;
             int rook = pos->squares[rook_from];
+            move_piece_eval(pos, rook_from, rook_to, rook);
             update_zobrist_piece(pos, rook, rook_from);
             pos->squares[rook_to] = rook;
             pos->squares[rook_from] = 0;
@@ -1456,7 +1394,7 @@ static bool make_move(Position *pos, int move, Undo *undo) {
 
     toggle_side(pos);
 
-    int king_sq = find_king(pos, (pos->side_to_move == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE);
+    int king_sq = pos->king_square[(pos->side_to_move == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE];
     if (king_sq == -1 || square_attacked(pos, king_sq, pos->side_to_move)) {
         undo_move(pos, move, undo);
         return false;
@@ -1480,6 +1418,12 @@ static void undo_move(Position *pos, int move, const Undo *undo) {
     pos->ep_square = undo->ep_square;
     pos->halfmove_clock = undo->halfmove_clock;
     pos->phase = undo->phase;
+    pos->material_score[0] = undo->material_score[0];
+    pos->material_score[1] = undo->material_score[1];
+    pos->pst_score[0] = undo->pst_score[0];
+    pos->pst_score[1] = undo->pst_score[1];
+    pos->king_square[0] = undo->king_square[0];
+    pos->king_square[1] = undo->king_square[1];
     if (pos->side_to_move == COLOR_WHITE) {
         pos->fullmove_number--;
     }
@@ -1516,6 +1460,12 @@ static void make_null_move(Position *pos, Undo *undo) {
     undo->ep_square = pos->ep_square;
     undo->halfmove_clock = pos->halfmove_clock;
     undo->zobrist_key = pos->zobrist_key;
+    undo->phase = pos->phase;
+    undo->material_score[0] = pos->material_score[0];
+    undo->material_score[1] = pos->material_score[1];
+    undo->pst_score[0] = pos->pst_score[0];
+    undo->pst_score[1] = pos->pst_score[1];
+
     if (pos->ep_square != -1) {
         update_zobrist_ep(pos, pos->ep_square);
     }
@@ -1536,6 +1486,11 @@ static void undo_null_move(Position *pos, const Undo *undo) {
     pos->ep_square = undo->ep_square;
     pos->halfmove_clock = undo->halfmove_clock;
     pos->zobrist_key = undo->zobrist_key;
+    pos->phase = undo->phase;
+    pos->material_score[0] = undo->material_score[0];
+    pos->material_score[1] = undo->material_score[1];
+    pos->pst_score[0] = undo->pst_score[0];
+    pos->pst_score[1] = undo->pst_score[1];
 }
 
 static void sort_moves(MoveList *list) {
@@ -1578,8 +1533,7 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
     if (ply > max_sel_depth) {
         max_sel_depth = ply;
     }
-    /* Use fast evaluation in quiescence (material + PST only) */
-    int stand_pat = evaluate_simple(pos);
+    int stand_pat = evaluate(pos);
     if (stand_pat >= beta) {
         return beta;
     }
@@ -1642,7 +1596,7 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
         if (!make_move(pos, move, &undo)) {
             continue;
         }
-        int king_sq = find_king(pos, pos->side_to_move);
+        int king_sq = pos->king_square[pos->side_to_move];
         Color attacker = (pos->side_to_move == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
         bool gives_check = (king_sq != -1) && square_attacked(pos, king_sq, attacker);
         if (!gives_check) {
@@ -1710,7 +1664,7 @@ static int search(Position *pos, int depth, int alpha, int beta, int ply) {
 
     Color us = pos->side_to_move;
     Color them = (us == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
-    int king_sq = find_king(pos, us);
+    int king_sq = pos->king_square[us];
     bool in_check = (king_sq != -1) && square_attacked(pos, king_sq, them);
 
     if (depth == 0) {
@@ -2020,10 +1974,10 @@ static void send_perf_summary(
         "\"pv\":%s,"
         "\"pv_changes\":%llu,"
         "\"tt\":{\"probes\":%llu,\"hits\":%llu,\"hit_rate\":%.3f,\"cuts\":%llu,\"cut_share\":%.3f},"
-        "\"aspiration\":{\"fail_low\":0,\"fail_high\":0,\"researches\":0},"
-        "\"cuts\":{\"tt\":%llu,\"killer\":0,\"history\":0,\"capture\":0,\"null\":0,\"futility\":0,\"other\":0,\"total\":%llu,\"first_move_rate\":%.3f},"
-        "\"quiescence\":{\"ratio\":%.3f,\"cutoffs\":0,\"stand_pat_cuts\":0,\"delta_prunes\":0,\"see_prunes\":0,\"prune_ratio\":0.0},"
-        "\"reductions\":{\"lmr\":{\"applied\":0,\"researched\":0,\"success_rate\":0.0},\"null\":{\"tried\":0,\"success\":0,\"success_rate\":0.0}}"
+        "\"aspiration\":{\"fail_low\":%llu,\"fail_high\":%llu,\"researches\":%llu},"
+        "\"cuts\":{\"beta\":%llu,\"first_move\":%llu,\"total\":%llu,\"first_move_rate\":%.3f},"
+        "\"quiescence\":{\"ratio\":%.3f,\"delta_prunes\":%llu,\"see_prunes\":%llu,\"check_expansions\":%llu},"
+        "\"reductions\":{\"lmr\":{\"applied\":%llu,\"researched\":%llu},\"null\":{\"tried\":%llu,\"pruned\":%llu}}"
         "}",
         depth,
         sel_depth,
@@ -2042,10 +1996,21 @@ static void send_perf_summary(
         tt_hit_rate,
         (unsigned long long)tt_cutoffs,
         tt_cut_share,
-        (unsigned long long)tt_cutoffs,
+        (unsigned long long)aspiration_fail_low_count,
+        (unsigned long long)aspiration_fail_high_count,
+        (unsigned long long)aspiration_research_count,
+        (unsigned long long)beta_cutoffs,
+        (unsigned long long)first_move_cutoffs,
         (unsigned long long)total_cuts,
         first_move_rate,
-        q_ratio
+        q_ratio,
+        (unsigned long long)q_delta_prunes,
+        (unsigned long long)q_see_prunes,
+        (unsigned long long)q_check_expansions,
+        (unsigned long long)lmr_applied,
+        (unsigned long long)lmr_researched,
+        (unsigned long long)null_move_tried,
+        (unsigned long long)null_move_pruned
     );
 
     printf("info string perf payload=%s\n", payload);
@@ -2072,9 +2037,7 @@ static void send_perf_summary(
         tt_cut_pct,
         (unsigned long long)tt_cutoffs
     );
-    printf(
-        "info string perf summary pruning aspiration fail_low=0 fail_high=0 researches=0\n"
-    );
+
     printf(
         "info string perf summary pruning cuts total=%llu first_move_rate=%d%% breakdown=tt:%llu(%d%%) k:0 h:0 c:0 n:0\n",
         (unsigned long long)total_cuts,
@@ -2494,7 +2457,6 @@ int main(void) {
             handle_stop_command();
         } else if (strncmp(line, "quit", 4) == 0) {
             handle_quit();
-            break;
         }
     }
     handle_stop_command();
