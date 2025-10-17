@@ -5,8 +5,22 @@ import sys
 import time
 from collections import namedtuple
 from itertools import count
+from types import SimpleNamespace
 
-import tools.uci
+try:  # Optional dependency used only by the standalone CLI
+    import tools.uci as _tools_uci  # type: ignore[import]
+except ModuleNotFoundError:  # pragma: no cover - executed only when dependency missing
+    class _SunfishUCIStub:
+        @staticmethod
+        def run(*_args, **_kwargs) -> None:
+            raise ModuleNotFoundError(
+                "tools.uci is required for the standalone Sunfish CLI but is not bundled with JaskFish."
+            )
+
+
+    tools = SimpleNamespace(uci=_SunfishUCIStub())
+else:  # pragma: no cover - executed when dependency available
+    tools = SimpleNamespace(uci=_tools_uci)
 
 # If we could rely on the env -S argument, we could just use "pypy3 -u"
 # as the shebang to unbuffer stdout. But alas we have to do this instead:

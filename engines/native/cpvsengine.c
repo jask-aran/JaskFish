@@ -18,6 +18,7 @@ typedef enum {
     COLOR_BLACK = 1
 } Color;
 
+
 typedef struct {
     int squares[128];
     Color side_to_move;
@@ -26,6 +27,15 @@ typedef struct {
     int halfmove_clock;
     int fullmove_number;
     uint64_t zobrist_key;
+    int phase; /* Cached game phase: 256=opening, 0=endgame */
+    int king_square[2];
+    int material_score[2];
+    int pst_score[2];
+    int piece_count[2][6];
+    int piece_list[2][6][16];
+    int piece_list_size[2][6];
+    uint64_t occupancy[2];
+    uint64_t occupancy_both;
 } Position;
 
 typedef struct {
@@ -35,6 +45,7 @@ typedef struct {
     int ep_square;
     int halfmove_clock;
     uint64_t zobrist_key;
+    int phase;
 } Undo;
 
 typedef struct {
@@ -98,6 +109,36 @@ static uint64_t zobrist_side;
 static const int piece_values[6] = {100, 320, 330, 500, 900, 20000};
 static int pst_white[6][64];
 static int pst_black[6][64];
+
+/* Phase values for game phase computation */
+static const int phase_values[6] = {0, 1, 1, 2, 4, 0}; /* P, N, B, R, Q, K */
+static const int initial_piece_counts[6] = {16, 4, 4, 4, 2, 2};
+static int max_phase_value = 0;
+
+/* Evaluation weights - Midgame */
+static const int PASSED_PAWN_BONUS_MG[8] = {0, 10, 20, 40, 70, 120, 200, 0};
+static const int DOUBLED_PAWN_PENALTY_MG = 15;
+static const int ISOLATED_PAWN_PENALTY_MG = 20;
+static const int BISHOP_PAIR_BONUS_MG = 50;
+static const int ROOK_OPEN_FILE_BONUS_MG = 30;
+static const int ROOK_SEMI_OPEN_FILE_BONUS_MG = 18;
+static const int KNIGHT_OUTPOST_BONUS_MG = 35;
+static const int MOBILITY_BONUS_MG = 6;
+static const int KING_PAWN_SHIELD_BONUS_MG = 12;
+static const int KING_ATTACK_WEIGHT_MG = 25;
+
+/* Evaluation weights - Endgame */
+static const int PASSED_PAWN_BONUS_EG[8] = {0, 20, 40, 80, 140, 240, 400, 0};
+static const int DOUBLED_PAWN_PENALTY_EG = 20;
+static const int ISOLATED_PAWN_PENALTY_EG = 25;
+static const int BISHOP_PAIR_BONUS_EG = 60;
+static const int ROOK_OPEN_FILE_BONUS_EG = 20;
+static const int ROOK_SEMI_OPEN_FILE_BONUS_EG = 12;
+static const int KNIGHT_OUTPOST_BONUS_EG = 15;
+static const int MOBILITY_BONUS_EG = 4;
+static const int KING_PAWN_SHIELD_BONUS_EG = 5;
+static const int KING_ATTACK_WEIGHT_EG = 10;
+static const int KING_CENTRALIZATION_BONUS_EG = 8;
 
 static void format_move_uci(int move, char buffer[8]);
 static void send_perf_summary(int depth, int sel_depth, int score_cp, int score_delta_cp, double elapsed_seconds, double budget_seconds);
@@ -182,6 +223,10 @@ static inline int square_to_64(int sq) {
 
 static inline bool square_on_board(int sq) {
     return !(sq & 0x88);
+}
+
+static inline uint64_t bit_for_square(int sq) {
+    return 1ULL << square_to_64(sq);
 }
 
 static inline int piece_index(int piece) {
@@ -375,6 +420,12 @@ static void init_pst(void) {
             pst_black[p][sq] = pst_reference[p][mirrored];
         }
     }
+    
+    /* Compute max phase value */
+    max_phase_value = 0;
+    for (int p = 0; p < 6; ++p) {
+        max_phase_value += phase_values[p] * initial_piece_counts[p];
+    }
 }
 
 static void reset_transposition(void) {
@@ -412,7 +463,29 @@ static void clear_position(Position *pos) {
     pos->ep_square = -1;
     pos->halfmove_clock = 0;
     pos->fullmove_number = 1;
-    pos->zobrist_key = compute_zobrist(pos);
+    pos->zobrist_key = 0;
+    pos->phase = 0;
+    pos->king_square[0] = -1;
+    pos->king_square[1] = -1;
+}
+
+static void add_piece(Position *pos, int piece, int square) {
+    (void)pos;
+    (void)piece;
+    (void)square;
+}
+
+static void remove_piece(Position *pos, int piece, int square) {
+    (void)pos;
+    (void)piece;
+    (void)square;
+}
+
+static void move_piece(Position *pos, int piece, int from, int to) {
+    (void)pos;
+    (void)piece;
+    (void)from;
+    (void)to;
 }
 
 static bool parse_fen(Position *pos, const char *fen) {
@@ -420,6 +493,7 @@ static bool parse_fen(Position *pos, const char *fen) {
     int rank = 7;
     int file = 0;
     const char *ptr = fen;
+    int phase_sum = 0;
     while (*ptr && rank >= 0) {
         char c = *ptr++;
         if (c == '/') {
@@ -456,6 +530,11 @@ static bool parse_fen(Position *pos, const char *fen) {
             default: return false;
         }
         pos->squares[sq] = piece;
+        int type = piece_type(piece) - 1;
+        if (type >= 0 && type < 6) {
+            phase_sum += phase_values[type];
+            add_piece(pos, piece, sq);
+        }
         file++;
     }
     if (*ptr != ' ') {
@@ -523,6 +602,14 @@ static bool parse_fen(Position *pos, const char *fen) {
         pos->fullmove_number = 1;
     }
     pos->zobrist_key = compute_zobrist(pos);
+
+    /* Compute initial phase */
+    if (max_phase_value > 0) {
+        pos->phase = (phase_sum * 256) / max_phase_value;
+    } else {
+        pos->phase = 128;
+    }
+
     return true;
 }
 
@@ -576,25 +663,325 @@ static void toggle_side(Position *pos) {
     pos->zobrist_key ^= zobrist_side;
 }
 
-static int evaluate(const Position *pos) {
-    int score = 0;
+static int compute_phase(const Position *pos) {
+    /* Returns phase value: 256 = opening, 0 = endgame */
+    int current_phase = 0;
+    
     for (int sq = 0; sq < 128; ++sq) {
         if (!square_on_board(sq)) {
             sq += 7;
             continue;
         }
         int piece = pos->squares[sq];
-        if (piece == 0) {
-            continue;
-        }
+        if (piece == 0) continue;
+        
         int type = piece_type(piece) - 1;
-        int sq64 = square_to_64(sq);
-        if (piece > 0) {
-            score += piece_values[type] + pst_white[type][sq64];
-        } else {
-            score -= piece_values[type] + pst_black[type][sq64];
+        if (type >= 0 && type < 6) {
+            current_phase += phase_values[type];
         }
     }
+    
+    if (max_phase_value == 0) return 128;
+    
+    /* Scale to 0-256 range */
+    return (current_phase * 256) / max_phase_value;
+}
+
+static int taper_score(int mg_score, int eg_score, int phase) {
+    /* Interpolate between midgame and endgame scores based on phase */
+    /* phase: 256 = pure midgame, 0 = pure endgame */
+    return ((mg_score * phase) + (eg_score * (256 - phase))) / 256;
+}
+
+static int eval_pawn_structure(const Position *pos, Color color, int phase) {
+    int score = 0;
+    int c = (color == COLOR_WHITE) ? 0 : 1;
+    int pawn_piece = (color == COLOR_WHITE) ? 1 : -1;
+    int file_counts[8] = {0};
+    int file_pawns[8][8];
+    int file_sizes[8] = {0};
+    int count = pos->piece_list_size[c][0];
+    for (int i = 0; i < count; ++i) {
+        int sq = pos->piece_list[c][0][i];
+        int file = sq & 7;
+        file_pawns[file][file_sizes[file]++] = sq;
+        file_counts[file]++;
+    }
+    for (int file = 0; file < 8; ++file) {
+        int pawns_on_file = file_counts[file];
+        if (pawns_on_file == 0) {
+            continue;
+        }
+        if (pawns_on_file > 1) {
+            score -= taper_score(DOUBLED_PAWN_PENALTY_MG, DOUBLED_PAWN_PENALTY_EG, phase) * (pawns_on_file - 1);
+        }
+        bool has_neighbor = (file > 0 && file_counts[file - 1] > 0) || (file < 7 && file_counts[file + 1] > 0);
+        if (!has_neighbor) {
+            score -= taper_score(ISOLATED_PAWN_PENALTY_MG, ISOLATED_PAWN_PENALTY_EG, phase) * pawns_on_file;
+        }
+        for (int i = 0; i < file_sizes[file]; ++i) {
+            int sq = file_pawns[file][i];
+            int rank = sq >> 4;
+            bool passed = true;
+            int forward = (color == COLOR_WHITE) ? 16 : -16;
+            int max_ranks = (color == COLOR_WHITE) ? (7 - rank) : rank;
+            for (int r = 1; r <= max_ranks && passed; ++r) {
+                int check_rank = rank + r * (forward >> 4);
+                for (int df = -1; df <= 1; ++df) {
+                    int check_file = file + df;
+                    if (check_file < 0 || check_file > 7) {
+                        continue;
+                    }
+                    int check_sq = (check_rank << 4) | check_file;
+                    if (square_on_board(check_sq) && pos->squares[check_sq] == -pawn_piece) {
+                        passed = false;
+                        break;
+                    }
+                }
+            }
+            if (passed) {
+                score += taper_score(PASSED_PAWN_BONUS_MG[rank], PASSED_PAWN_BONUS_EG[rank], phase);
+            }
+        }
+    }
+    return score;
+}
+
+static int eval_mobility(const Position *pos, Color color, int phase) {
+    int mobility = 0;
+    
+    for (int sq = 0; sq < 128; ++sq) {
+        if (!square_on_board(sq)) {
+            sq += 7;
+            continue;
+        }
+        int piece = pos->squares[sq];
+        if (piece == 0 || piece_color(piece) != color) continue;
+        
+        int type = piece_type(piece);
+        
+        /* Skip pawns and king for mobility */
+        if (type == 1 || type == 6) continue;
+        
+        if (type == 2) { /* Knight */
+            for (int i = 0; i < 8; ++i) {
+                int to = sq + knight_offsets[i];
+                if (square_on_board(to)) {
+                    int target = pos->squares[to];
+                    if (target == 0 || piece_color(target) != color) {
+                        mobility++;
+                    }
+                }
+            }
+        } else if (type == 3) { /* Bishop */
+            for (int i = 0; i < 4; ++i) {
+                int offset = bishop_offsets[i];
+                int to = sq + offset;
+                while (square_on_board(to)) {
+                    int target = pos->squares[to];
+                    if (target == 0) {
+                        mobility++;
+                        to += offset;
+                    } else {
+                        if (piece_color(target) != color) mobility++;
+                        break;
+                    }
+                }
+            }
+        } else if (type == 4) { /* Rook */
+            for (int i = 0; i < 4; ++i) {
+                int offset = rook_offsets[i];
+                int to = sq + offset;
+                while (square_on_board(to)) {
+                    int target = pos->squares[to];
+                    if (target == 0) {
+                        mobility++;
+                        to += offset;
+                    } else {
+                        if (piece_color(target) != color) mobility++;
+                        break;
+                    }
+                }
+            }
+        } else if (type == 5) { /* Queen */
+            /* Simplified queen mobility - just count immediate squares */
+            for (int i = 0; i < 8; ++i) {
+                int to = sq + king_offsets[i];
+                if (square_on_board(to)) {
+                    int target = pos->squares[to];
+                    if (target == 0 || piece_color(target) != color) {
+                        mobility += 2; /* Weight queen mobility higher */
+                    }
+                }
+            }
+        }
+    }
+    
+    return mobility * taper_score(MOBILITY_BONUS_MG, MOBILITY_BONUS_EG, phase) / 10;
+}
+
+static int eval_king_safety(const Position *pos, Color color, int phase) {
+    int score = 0;
+    int king_piece = (color == COLOR_WHITE) ? 6 : -6;
+    int king_sq = -1;
+    
+    for (int sq = 0; sq < 128; ++sq) {
+        if (!square_on_board(sq)) {
+            sq += 7;
+            continue;
+        }
+        if (pos->squares[sq] == king_piece) {
+            king_sq = sq;
+            break;
+        }
+    }
+    
+    if (king_sq == -1) return 0;
+    
+    int pawn_piece = (color == COLOR_WHITE) ? 1 : -1;
+    int forward = (color == COLOR_WHITE) ? 16 : -16;
+    
+    /* Pawn shield */
+    int shield_count = 0;
+    for (int df = -1; df <= 1; ++df) {
+        int file = (king_sq & 7) + df;
+        if (file < 0 || file > 7) continue;
+        
+        int shield_sq = king_sq + forward + df;
+        if (square_on_board(shield_sq) && pos->squares[shield_sq] == pawn_piece) {
+            shield_count++;
+        }
+        
+        int shield_sq2 = king_sq + 2 * forward + df;
+        if (square_on_board(shield_sq2) && pos->squares[shield_sq2] == pawn_piece && pos->squares[shield_sq] != pawn_piece) {
+            shield_count++;
+        }
+    }
+    score += shield_count * taper_score(KING_PAWN_SHIELD_BONUS_MG, KING_PAWN_SHIELD_BONUS_EG, phase) / 10;
+    
+    /* King attackers penalty */
+    Color opponent = (color == COLOR_WHITE) ? COLOR_BLACK : COLOR_WHITE;
+    int attackers = 0;
+    for (int i = 0; i < 8; ++i) {
+        int to = king_sq + king_offsets[i];
+        if (square_on_board(to) && square_attacked(pos, to, opponent)) {
+            attackers++;
+        }
+    }
+    score -= attackers * taper_score(KING_ATTACK_WEIGHT_MG, KING_ATTACK_WEIGHT_EG, phase) / 10;
+    
+    /* King centralization in endgame */
+    if (phase < 128) {
+        int file = king_sq & 7;
+        int rank = king_sq >> 4;
+        int central_distance = (abs(file - 3) + abs(file - 4)) / 2 + (abs(rank - 3) + abs(rank - 4)) / 2;
+        score += (256 - phase) * (7 - central_distance) * KING_CENTRALIZATION_BONUS_EG / 256 / 10;
+    }
+    
+    return score;
+}
+
+static int eval_piece_bonuses(const Position *pos, Color color, int phase) {
+    int score = 0;
+    int bishop_count = 0;
+    
+    for (int sq = 0; sq < 128; ++sq) {
+        if (!square_on_board(sq)) {
+            sq += 7;
+            continue;
+        }
+        int piece = pos->squares[sq];
+        if (piece == 0 || piece_color(piece) != color) continue;
+        
+        int type = piece_type(piece);
+        
+        /* Bishop pair */
+        if (type == 3) {
+            bishop_count++;
+        }
+        
+        /* Rook on open/semi-open file */
+        if (type == 4) {
+            int file = sq & 7;
+            bool has_our_pawn = false;
+            bool has_their_pawn = false;
+            int our_pawn = (color == COLOR_WHITE) ? 1 : -1;
+            
+            for (int r = 0; r < 8; ++r) {
+                int check_sq = (r << 4) | file;
+                if (square_on_board(check_sq)) {
+                    int p = pos->squares[check_sq];
+                    if (piece_type(p) == 1) {
+                        if (p == our_pawn) has_our_pawn = true;
+                        if (p == -our_pawn) has_their_pawn = true;
+                    }
+                }
+            }
+            
+            if (!has_our_pawn && !has_their_pawn) {
+                score += taper_score(ROOK_OPEN_FILE_BONUS_MG, ROOK_OPEN_FILE_BONUS_EG, phase);
+            } else if (!has_our_pawn) {
+                score += taper_score(ROOK_SEMI_OPEN_FILE_BONUS_MG, ROOK_SEMI_OPEN_FILE_BONUS_EG, phase);
+            }
+        }
+        
+        /* Knight outpost */
+        if (type == 2) {
+            int rank = sq >> 4;
+            int file = sq & 7;
+            bool is_outpost = false;
+            
+            if ((color == COLOR_WHITE && rank >= 4 && rank <= 6) || 
+                (color == COLOR_BLACK && rank >= 1 && rank <= 3)) {
+                int pawn_piece = (color == COLOR_WHITE) ? 1 : -1;
+                int support_rank = (color == COLOR_WHITE) ? rank - 1 : rank + 1;
+                
+                for (int df = -1; df <= 1; df += 2) {
+                    if (file + df >= 0 && file + df < 8) {
+                        int support_sq = (support_rank << 4) | (file + df);
+                        if (square_on_board(support_sq) && pos->squares[support_sq] == pawn_piece) {
+                            is_outpost = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (is_outpost) {
+                score += taper_score(KNIGHT_OUTPOST_BONUS_MG, KNIGHT_OUTPOST_BONUS_EG, phase);
+            }
+        }
+    }
+    
+    if (bishop_count >= 2) {
+        score += taper_score(BISHOP_PAIR_BONUS_MG, BISHOP_PAIR_BONUS_EG, phase);
+    }
+    
+    return score;
+}
+
+static int evaluate_simple(const Position *pos) {
+    int score = pos->material_score[0] - pos->material_score[1];
+    score += pos->pst_score[0] - pos->pst_score[1];
+    return (pos->side_to_move == COLOR_WHITE) ? score : -score;
+}
+
+static int evaluate(const Position *pos) {
+    int phase = pos->phase;
+    int score = pos->material_score[0] - pos->material_score[1];
+    score += pos->pst_score[0] - pos->pst_score[1];
+    score += eval_pawn_structure(pos, COLOR_WHITE, phase);
+    score -= eval_pawn_structure(pos, COLOR_BLACK, phase);
+    if (phase > 32) {
+        score += eval_mobility(pos, COLOR_WHITE, phase);
+        score -= eval_mobility(pos, COLOR_BLACK, phase);
+    }
+    if (phase > 64) {
+        score += eval_king_safety(pos, COLOR_WHITE, phase);
+        score -= eval_king_safety(pos, COLOR_BLACK, phase);
+    }
+    score += eval_piece_bonuses(pos, COLOR_WHITE, phase);
+    score -= eval_piece_bonuses(pos, COLOR_BLACK, phase);
     return (pos->side_to_move == COLOR_WHITE) ? score : -score;
 }
 
@@ -978,6 +1365,7 @@ static bool make_move(Position *pos, int move, Undo *undo) {
     undo->ep_square = pos->ep_square;
     undo->halfmove_clock = pos->halfmove_clock;
     undo->zobrist_key = pos->zobrist_key;
+    undo->phase = pos->phase;
 
     pos->halfmove_clock++;
 
@@ -988,6 +1376,13 @@ static bool make_move(Position *pos, int move, Undo *undo) {
     update_zobrist_piece(pos, piece, from);
     if (captured != 0) {
         update_zobrist_piece(pos, captured, to);
+        /* Update phase for captured piece */
+        int cap_type = piece_type(captured) - 1;
+        if (cap_type >= 0 && cap_type < 6 && max_phase_value > 0) {
+            int phase_delta = (phase_values[cap_type] * 256) / max_phase_value;
+            pos->phase -= phase_delta;
+            if (pos->phase < 0) pos->phase = 0;
+        }
     }
 
     pos->ep_square = -1;
@@ -1008,6 +1403,12 @@ static bool make_move(Position *pos, int move, Undo *undo) {
         update_zobrist_piece(pos, captured_piece, capture_sq);
         pos->squares[capture_sq] = 0;
         captured = captured_piece;
+        /* Update phase for en passant capture (pawn) */
+        if (max_phase_value > 0) {
+            int pawn_phase = (phase_values[0] * 256) / max_phase_value;
+            pos->phase -= pawn_phase;
+            if (pos->phase < 0) pos->phase = 0;
+        }
     }
 
     if (promotion) {
@@ -1015,6 +1416,13 @@ static bool make_move(Position *pos, int move, Undo *undo) {
         int promoted_piece = (pos->side_to_move == COLOR_WHITE) ? promotion : -promotion;
         pos->squares[to] = promoted_piece;
         update_zobrist_piece(pos, pos->squares[to], to);
+        /* Update phase for promotion (remove pawn, add promoted piece) */
+        if (max_phase_value > 0) {
+            int pawn_phase = (phase_values[0] * 256) / max_phase_value;
+            int promo_phase = (phase_values[promotion - 1] * 256) / max_phase_value;
+            pos->phase = pos->phase - pawn_phase + promo_phase;
+            if (pos->phase > 256) pos->phase = 256;
+        }
     }
 
     if (flags & FLAG_CASTLING) {
@@ -1071,6 +1479,7 @@ static void undo_move(Position *pos, int move, const Undo *undo) {
     pos->castling = undo->castling;
     pos->ep_square = undo->ep_square;
     pos->halfmove_clock = undo->halfmove_clock;
+    pos->phase = undo->phase;
     if (pos->side_to_move == COLOR_WHITE) {
         pos->fullmove_number--;
     }
@@ -1169,7 +1578,8 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
     if (ply > max_sel_depth) {
         max_sel_depth = ply;
     }
-    int stand_pat = evaluate(pos);
+    /* Use fast evaluation in quiescence (material + PST only) */
+    int stand_pat = evaluate_simple(pos);
     if (stand_pat >= beta) {
         return beta;
     }

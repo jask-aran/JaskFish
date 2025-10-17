@@ -1,0 +1,54 @@
+
+=== Opening – Semi-Slav structure (Opening) ===
+FEN: rn1qkbnr/pppb1ppp/4p3/3p4/3P4/2P2N2/PP2PPPP/RNBQKB1R w KQkq - 0 5
+Best move: d1b3
+Depth: search=10, sel=18
+Nodes: total=1,126,192, regular=1017161, q=109031
+Time: elapsed=1.000s, budget=1.000s, NPS=1,126,192
+Score: value=15.0, delta=-5.0
+PV: b1d2 f8d6 b3d5 b8c6 b5b3 g8f6
+
+=== Middlegame – Kingside pressure (Middlegame) ===
+FEN: r2q1rk1/pp1b1ppp/2n2n2/2bp4/3P4/2P1PN2/PP1NBPPP/R1BQ1RK1 w - - 0 10
+Best move: d4c5
+Depth: search=10, sel=22
+Nodes: total=1,097,788, regular=1006459, q=91329
+Time: elapsed=1.000s, budget=1.000s, NPS=1,097,788
+Score: value=525.0, delta=-5.0
+PV: g1h1 f6e8 d1b3 d5d4 d2b3 d7f5
+
+=== Middlegame – Tactical imbalance (Middlegame) ===
+FEN: r1b2rk1/1pp1qppp/p1n2n2/3p4/2PP4/2N1PN2/PPQ2PPP/R1B2RK1 b - - 0 11
+Best move: d5c4
+Depth: search=8, sel=21
+Nodes: total=789,136, regular=655966, q=133170
+Time: elapsed=1.000s, budget=1.000s, NPS=789,136
+Score: value=-25.0, delta=0.0
+PV: c8e6 c1e3 h7h5 f3g5 a8b8 d5c6
+
+=== Middlegame – Opposite-wing plans (Middlegame) ===
+FEN: 2r2rk1/1b2bppp/p2p1n2/1p1Pp3/1P2P3/P1NB1N2/1B3PPP/2RR2K1 w - - 0 21
+Best move: c1c2
+Depth: search=9, sel=21
+Nodes: total=687,880, regular=499592, q=188288
+Time: elapsed=1.000s, budget=1.000s, NPS=687,880
+Score: value=340.0, delta=0.0
+PV: c3b5 g8h8 d1d2 f8d8 g1h1 d8d7
+
+=== Endgame – Complex rook ending (Endgame) ===
+FEN: 8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1
+Best move: b4f4
+Depth: search=17, sel=21
+Nodes: total=1,785,885, regular=1533765, q=252120
+Time: elapsed=1.000s, budget=1.000s, NPS=1,785,885
+Score: value=25.0, delta=10.0
+PV: a5a6 h4g5 f4f8 g3g2 a5b4 g3g2
+
+=== Endgame – Knight vs pawns (Endgame) ===
+FEN: 8/5k2/1p4p1/1P2p3/4P3/2K3P1/5N2/8 w - - 0 50
+Best move: c3c4
+Depth: search=27, sel=31
+Nodes: total=1,772,184, regular=1659112, q=113072
+Time: elapsed=1.000s, budget=1.000s, NPS=1,772,184
+Score: value=600.0, delta=5.0
+PV: f2g4 f7f6 g3g4 e6d7 g4e5 f7e8

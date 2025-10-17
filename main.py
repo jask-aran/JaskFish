@@ -213,8 +213,8 @@ def export_move_history_san(board: chess.Board) -> str:
 ENGINE_SPECS = {
     "engine1": {
         "number": 1,
-        "default_script": "engines/pvsengine.py",
-        "default_name": "PyPVS",
+        "default_script": "engines/sunfish_wrapper.py",
+        "default_name": "sunfish",
         "preferred_color": chess.WHITE,
         "time_preset": "balanced",
     },
