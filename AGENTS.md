@@ -137,12 +137,14 @@ bd import --input .beads/snapshot.jsonl --resolve-collisions
   recipes, read `docs/testing_architecture.md`.
 
 ### Benchmarking & Profiling
-- **Entrypoint:** Run scenarios with `uv run python benchmark.py <subcommand>`; override the engine via `--engine-cmd <cmd ...>` when testing alternates.
-- **Scenario Catalogue:** Inspect curated slugs and phases with `uv run python benchmark.py list`. Use `--positions <slug ...>` to focus, `--skip-defaults` to start empty, or feed extra FENs via `--fen` / `--fen-file`.
-- **Benchmark Runs:** `uv run python benchmark.py benchmark` executes UCI searches, prints per-scenario summaries (bestmove, depth, nodes, NPS, score), and honours budget flags like `--movetime`, `--depth`, `--nodes`, and `--infinite-duration`. Add `--echo-info` to stream raw `info` lines.
-- **Profiling:** `uv run python benchmark.py profile [--threads N]` calls the engine’s internal profiler on each scenario, emitting cProfile tables (top 25 cumulative functions) plus quick best-move stats.
-- **Engine Comparison:** `uv run python benchmark.py compare --movetime <ms>|--depth <n>` runs matched searches against the native CPvsEngine (override with `--native-cmd`). Output includes per-scenario metric diffs and aggregate depth/time/node ratios.
-- **Workflow Tips:** Combine curated and custom FENs to mirror regressions, keep `--max-wait` conservative for long searches, and redirect output if you need archival logs. Use `--ponder` or time-control flags to mimic tournament constraints.
+- **Entrypoint:** Use `uv run benchmark.py <command>` with one of `benchmark`, `profile`, `compare`, or `list`.
+- **Engine Registry:** Engines are addressed by alias. `benchmark`/`profile` require `--engine <alias>`; `compare` requires `--engine-a <alias>` and `--engine-b <alias>`. Run `uv run benchmark.py --help` (or per-subcommand `--help`) to see the alias table and profiling support notes.
+- **Scenario Catalogue:** `uv run benchmark.py list` prints curated scenario slugs. All modes accept `--positions`, `--skip-defaults`, `--fen`, and `--fen-file` to customise the workload.
+- **Search Budgets:** Time and depth controls (`--movetime`, `--depth`, `--nodes`, `--wtime`, `--btime`, `--movestogo`, `--infinite`, etc.) are shared across modes; at least one concrete limit is required for `compare`.
+- **Benchmark Runs:** `uv run benchmark.py benchmark --engine pvs [--movetime 500]` drives the chosen engine through each scenario, reporting depth, nodes, score, PV, NPS, and elapsed time.
+- **Profiling:** `uv run benchmark.py profile --engine pvs [--threads N]` invokes the engine’s registered profiling hook. Engines without profiling support will emit a clear message instead of running a trace.
+- **Engine Comparison:** `uv run benchmark.py compare --engine-a pvs --engine-b cpvs --movetime 500` executes matched searches and prints per-scenario summaries plus aggregate depth/time/node deltas.
+- **Workflow Tips:** Blend curated and custom FENs to reproduce regressions, keep `--max-wait` conservative for long searches, and use `--echo-info` or output redirection when you need raw UCI logs. `--ponder` mirrors tournament pondering behaviour.
 
 
 ### Self-Play and Headless Self-Play
